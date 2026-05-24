@@ -332,13 +332,14 @@ static int resolve_http_hooks(struct hook_entry *out) {
 
 void http_hooks_install(void) {
     struct hook_entry hooks[HTTP_HOOK_COUNT];
+    int redirect_active = taiko_online_redirect_active();
 
 #if HTTP_HOOK_VERBOSE
     dbg_print("[hook] installing cellHttp/cellHttps/cellSsl redirects\n");
 #endif
 
     if (taiko_fpt_available()) {
-        if (!g_cfg.http_hooks) {
+        if (!redirect_active) {
             cellSysmoduleLoadModule(CELL_SYSMODULE_HTTP);
             cellSysmoduleLoadModule(CELL_SYSMODULE_HTTP_UTIL);
             cellSysmoduleLoadModule(CELL_SYSMODULE_SSL);
@@ -346,7 +347,7 @@ void http_hooks_install(void) {
         }
         for (size_t i = 0; i < HTTP_HOOK_COUNT; i++) {
             const void *opd = kGreenHooks[i].handler;
-            if (!g_cfg.http_hooks)
+            if (!redirect_active)
                 opd = (const void *)taiko_fpt_original_opd(TAIKO_FPT_HTTP_BASE +
                                                            (uint32_t)i);
             if (opd)
@@ -356,7 +357,7 @@ void http_hooks_install(void) {
         return;
     }
 
-    if (!g_cfg.http_hooks)
+    if (!redirect_active)
         return;
 
     if (!resolve_http_hooks(hooks)) {

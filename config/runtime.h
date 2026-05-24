@@ -18,7 +18,6 @@ typedef struct {
     unsigned camera_diag_hooks  : 1;
     unsigned data00000_redirect : 1;
     unsigned cert_replacement   : 1;
-    unsigned http_hooks         : 1;
     unsigned online_diag        : 1;
 
     /* patches (binary memory writes at boot) */
@@ -77,5 +76,10 @@ void taiko_cfg_save(void);
  * a full URL via OSK and we still feed gethostbyname a bare hostname.
  * Always NUL-terminates. */
 void taiko_cfg_normalize_host(char *dst, size_t cap, const char *src);
+
+/* True only when redirect can actually run. This is the single gate for
+ * HTTP/DNS/socket redirect hooks; legacy standalone http_hooks config is
+ * intentionally ignored. */
+int taiko_online_redirect_active(void);
 
 #endif

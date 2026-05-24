@@ -48,7 +48,6 @@ typedef enum {
     F_CAMERA_DIAG_HOOKS,
     F_DATA00000_REDIRECT,
     F_CERT_REPLACEMENT,
-    F_HTTP_HOOKS,
     F_ONLINE_DIAG,
     /* patches */
     F_PROBE_PATCHES,
@@ -73,7 +72,6 @@ static int field_get(field_id_t id) {
     case F_CAMERA_DIAG_HOOKS:   return g_cfg.camera_diag_hooks;
     case F_DATA00000_REDIRECT:  return g_cfg.data00000_redirect;
     case F_CERT_REPLACEMENT:    return g_cfg.cert_replacement;
-    case F_HTTP_HOOKS:          return g_cfg.http_hooks;
     case F_ONLINE_DIAG:         return g_cfg.online_diag;
     case F_PROBE_PATCHES:       return g_cfg.probe_patches;
     case F_HARD_DONGLE_PROBE:   return g_cfg.hard_dongle_probe;
@@ -99,7 +97,6 @@ static void field_set(field_id_t id, int v) {
     case F_CAMERA_DIAG_HOOKS:   g_cfg.camera_diag_hooks = v; break;
     case F_DATA00000_REDIRECT:  g_cfg.data00000_redirect = v; break;
     case F_CERT_REPLACEMENT:    g_cfg.cert_replacement = v; break;
-    case F_HTTP_HOOKS:          g_cfg.http_hooks = v; break;
     case F_ONLINE_DIAG:         g_cfg.online_diag = v; break;
     case F_PROBE_PATCHES:       g_cfg.probe_patches = v; break;
     case F_HARD_DONGLE_PROBE:   g_cfg.hard_dongle_probe = v; break;
@@ -136,50 +133,154 @@ typedef enum {
 typedef struct {
     item_kind_t kind;
     const char *label;
+    const char *desc;
     field_id_t  field;     /* if ITEM_TOGGLE */
     action_id_t action;    /* if ITEM_ACTION */
 } menu_item_t;
 
 static const menu_item_t g_items[] = {
-    { ITEM_SECTION, "Features", 0, 0 },
-    { ITEM_TOGGLE,  "USIO emulation",          F_USIO_EMULATION,      0 },
-    { ITEM_TOGGLE,  "QR card reader",          F_QR_CARD_READER,      0 },
-    { ITEM_TOGGLE,  "Camera diag hooks",       F_CAMERA_DIAG_HOOKS,   0 },
-    { ITEM_TOGGLE,  "DATA00000 redirect",      F_DATA00000_REDIRECT,  0 },
-    { ITEM_TOGGLE,  "Cert replacement",        F_CERT_REPLACEMENT,    0 },
-    { ITEM_TOGGLE,  "HTTP hooks",              F_HTTP_HOOKS,          0 },
-    { ITEM_TOGGLE,  "Online diag",             F_ONLINE_DIAG,         0 },
+    { ITEM_SECTION, "Core", "", 0, 0 },
+    { ITEM_TOGGLE,  "USIO emulation",
+      "Replaces the USB IO board/card reader. Required for controller input and QR cards.",
+      F_USIO_EMULATION, 0 },
+    { ITEM_TOGGLE,  "QR card reader",
+      "Uses the camera to scan Banapass QR cards. Requires USIO emulation and camera input hooks.",
+      F_QR_CARD_READER, 0 },
 
-    { ITEM_SECTION, "Patches", 0, 0 },
-    { ITEM_TOGGLE,  "Probe patches",           F_PROBE_PATCHES,        0 },
-    { ITEM_TOGGLE,  "Hard dongle probe",       F_HARD_DONGLE_PROBE,    0 },
-    { ITEM_TOGGLE,  "Auth stat bypass",        F_AUTH_STAT_BYPASS,     0 },
-    { ITEM_TOGGLE,  "fcntl dispatch",          F_FCNTL_DISPATCH,       0 },
-    { ITEM_TOGGLE,  "USIO endpoint filter",    F_USIO_ENDPOINT_FILTER, 0 },
-    { ITEM_TOGGLE,  "PS3A-USJ exact PID",      F_PS3A_USJ_EXACT_PID,   0 },
-    { ITEM_TOGGLE,  "XMB exit patch",          F_XMB_EXIT_PATCH,       0 },
-    { ITEM_TOGGLE,  "Watchdog patches",        F_WATCHDOG_PATCHES,     0 },
-    { ITEM_TOGGLE,  "Net cleanup guard",       F_NET_CLEANUP_GUARD,    0 },
-    { ITEM_TOGGLE,  "clearlocks stub",         F_CLEARLOCKS_STUB,      0 },
-    { ITEM_TOGGLE,  "Allow screen tearing",    F_ALLOW_SCREEN_TEARING, 0 },
+    { ITEM_SECTION, "Network", "", 0, 0 },
+    { ITEM_TOGGLE,  "Online redirect",
+      "Routes game HTTP/DNS/socket traffic to the configured private server. OFF restores stock net hooks.",
+      F_ONLINE_REDIRECT_ENABLE, 0 },
+    { ITEM_HOST_EDIT, "Redirect host",
+      "Private server hostname. Used for DNS target, HTTP Host, and TLS SNI.",
+      0, 0 },
+    { ITEM_PORT_EDIT, "Redirect port",
+      "Private server TCP port. Usually 443.",
+      0, 0 },
 
-    { ITEM_SECTION, "Network", 0, 0 },
-    { ITEM_TOGGLE,    "Online redirect",       F_ONLINE_REDIRECT_ENABLE, 0 },
-    { ITEM_HOST_EDIT, "Redirect host",         0,                        0 },
-    { ITEM_PORT_EDIT, "Redirect port",         0,                        0 },
+    { ITEM_SECTION, "Advanced", "", 0, 0 },
+    { ITEM_TOGGLE,  "Camera input hooks",
+      "Captures camera frames for QR scanning and logs camera probe attempts.",
+      F_CAMERA_DIAG_HOOKS, 0 },
+    { ITEM_TOGGLE,  "DATA00000 redirect",
+      "Reads DATA00000.BIN from game USRDIR instead of a USB stick.",
+      F_DATA00000_REDIRECT, 0 },
+    { ITEM_TOGGLE,  "Cert replacement",
+      "Loads replacement TLS certificates from disk. Useful for private online servers.",
+      F_CERT_REPLACEMENT, 0 },
+    { ITEM_TOGGLE,  "Online diagnostics",
+      "Periodically writes network and online state to the debug log.",
+      F_ONLINE_DIAG, 0 },
+    { ITEM_TOGGLE,  "Probe patches",
+      "Makes the game recognize the virtual dongle and VU device at the expected USB index.",
+      F_PROBE_PATCHES, 0 },
+    { ITEM_TOGGLE,  "Strict dongle probe",
+      "Uses the earlier hard probe site. Normally leave this enabled with probe patches.",
+      F_HARD_DONGLE_PROBE, 0 },
+    { ITEM_TOGGLE,  "Auth stat bypass",
+      "Skips filesystem stat checks during dongle/VU auth so no real device is needed.",
+      F_AUTH_STAT_BYPASS, 0 },
+    { ITEM_TOGGLE,  "Virtual FD dispatch",
+      "Allows the game to route file-control calls to the virtual device handlers.",
+      F_FCNTL_DISPATCH, 0 },
+    { ITEM_TOGGLE,  "USIO endpoint filter",
+      "Filters USB endpoint enumeration so only the emulated IO board is exposed.",
+      F_USIO_ENDPOINT_FILTER, 0 },
+    { ITEM_TOGGLE,  "PS3A-USJ exact PID",
+      "Forces the USB PID expected by this game build.",
+      F_PS3A_USJ_EXACT_PID, 0 },
+    { ITEM_TOGGLE,  "XMB exit patch",
+      "Prevents XMB-triggered process exit from tearing down the resident module.",
+      F_XMB_EXIT_PATCH, 0 },
+    { ITEM_TOGGLE,  "Watchdog patches",
+      "Disables arcade watchdog resets during slow patching or network waits.",
+      F_WATCHDOG_PATCHES, 0 },
+    { ITEM_TOGGLE,  "Net cleanup guard",
+      "Skips game network cleanup paths that can crash after hooks are installed.",
+      F_NET_CLEANUP_GUARD, 0 },
+    { ITEM_TOGGLE,  "Clearlocks stub",
+      "No-ops file lock cleanup that conflicts with the patch flow.",
+      F_CLEARLOCKS_STUB, 0 },
+    { ITEM_TOGGLE,  "Allow screen tearing",
+      "Uses HSYNC flips instead of VSYNC. Can tear, but may reduce rhythm-lane jumps.",
+      F_ALLOW_SCREEN_TEARING, 0 },
 
-    { ITEM_SECTION, "Actions", 0, 0 },
-    { ITEM_ACTION,  "Delete usiobackup.bin",        0, A_DELETE_USIO_BACKUP },
-    { ITEM_ACTION,  "Delete config + reboot",       0, A_DELETE_CONFIG_REBOOT },
-    { ITEM_ACTION,  "Save & reboot",                0, A_SAVE_AND_REBOOT },
-    { ITEM_ACTION,  "Discard changes & reboot",     0, A_DISCARD_AND_REBOOT },
-    { ITEM_ACTION,  "Exit to XMB",                  0, A_EXIT_TO_XMB },
+    { ITEM_SECTION, "Actions", "", 0, 0 },
+    { ITEM_ACTION,  "Delete usiobackup.bin",
+      "Deletes saved virtual USIO SRAM so it will be rebuilt next boot.",
+      0, A_DELETE_USIO_BACKUP },
+    { ITEM_ACTION,  "Delete config + reboot",
+      "Removes taiko_config.cfg and reboots so defaults are regenerated.",
+      0, A_DELETE_CONFIG_REBOOT },
+    { ITEM_ACTION,  "Save & reboot",
+      "Writes this config and restarts the game.",
+      0, A_SAVE_AND_REBOOT },
+    { ITEM_ACTION,  "Discard changes & reboot",
+      "Restarts without saving changes made in this menu.",
+      0, A_DISCARD_AND_REBOOT },
+    { ITEM_ACTION,  "Exit to XMB",
+      "Leaves the game and returns to the system menu.",
+      0, A_EXIT_TO_XMB },
 };
 #define ITEM_COUNT ((int)(sizeof(g_items) / sizeof(g_items[0])))
 
 static int g_sel = 1;          /* skip first section header */
 static int g_scroll = 0;
 static const char *g_status = NULL;
+
+static void build_ftp_line(char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = 0;
+
+    const char *prefix = ftp_server_is_running() ? "FTP: ftp://" : "FTP: not running";
+    const char *ip = ftp_server_is_running() ? ftp_server_ip() : "";
+    int n = 0;
+    for (const char *p = prefix; *p && n < (int)cap - 1; p++)
+        out[n++] = *p;
+    for (const char *p = ip; *p && n < (int)cap - 1; p++)
+        out[n++] = *p;
+
+    if (ftp_server_is_running()) {
+        if (n < (int)cap - 1) out[n++] = ':';
+        char digits[8];
+        int dn = 0;
+        int port = FTP_CTRL_PORT;
+        if (port == 0) digits[dn++] = '0';
+        while (port > 0 && dn < (int)sizeof(digits)) {
+            digits[dn++] = (char)('0' + (port % 10));
+            port /= 10;
+        }
+        while (dn-- > 0 && n < (int)cap - 1)
+            out[n++] = digits[dn];
+        const char *suffix = " (anonymous)";
+        for (const char *p = suffix; *p && n < (int)cap - 1; p++)
+            out[n++] = *p;
+    }
+    out[n] = 0;
+}
+
+static void toggle_field(field_id_t id) {
+    int new_value = !field_get(id);
+    field_set(id, new_value);
+    g_status = NULL;
+
+    if (id == F_QR_CARD_READER && new_value) {
+        if (!g_cfg.usio_emulation || !g_cfg.camera_diag_hooks)
+            g_status = "QR enabled: USIO and camera input hooks also enabled";
+        g_cfg.usio_emulation = 1;
+        g_cfg.camera_diag_hooks = 1;
+    } else if (id == F_USIO_EMULATION && !new_value && g_cfg.qr_card_reader) {
+        g_cfg.qr_card_reader = 0;
+        g_status = "QR disabled because it requires USIO emulation";
+    } else if (id == F_CAMERA_DIAG_HOOKS && !new_value && g_cfg.qr_card_reader) {
+        g_cfg.qr_card_reader = 0;
+        g_status = "QR disabled because it requires camera input hooks";
+    } else if (id == F_ONLINE_REDIRECT_ENABLE) {
+        g_status = new_value
+            ? "Online redirect enabled: HTTP/DNS/socket hooks will activate next boot"
+            : "Online redirect disabled: stock network hooks restored next boot";
+    }
+}
 
 static int next_selectable(int from, int dir) {
     int i = from;
@@ -204,6 +305,14 @@ static void draw_frame(void) {
     /* Title */
     menu_draw_text(&menu_font_28_font, 80, 30, COLOR_TITLE,
                    "Taiko Zucchini - Mod Config");
+    {
+        char ftp_line[128];
+        build_ftp_line(ftp_line, sizeof ftp_line);
+        int tw = menu_text_width(&menu_font_20_font, ftp_line);
+        uint32_t c = ftp_server_is_running() ? COLOR_ON : COLOR_DIM;
+        menu_draw_text(&menu_font_20_font,
+                       LIST_X + LIST_W - tw, 40, c, ftp_line);
+    }
     menu_draw_rect(80, 78, 1120, 2, COLOR_BORDER);
 
     /* List */
@@ -282,38 +391,10 @@ static void draw_frame(void) {
     /* Footer */
     menu_draw_rect(80, 600, 1120, 2, COLOR_BORDER);
 
-    /* FTP status line. snprintf in libc pulls TLS, banned in PRX, so
-     * build the line by string concatenation. Port digits formatted
-     * manually from the FTP_CTRL_PORT compile-time constant. */
-    if (ftp_server_is_running()) {
-        char ftp_line[128];
-        const char *ip = ftp_server_ip();
-        const char *prefix = "FTP: ftp://";
-        int n = 0;
-        for (const char *p = prefix; *p && n < (int)sizeof(ftp_line) - 1; p++)
-            ftp_line[n++] = *p;
-        for (const char *p = ip; *p && n < (int)sizeof(ftp_line) - 1; p++)
-            ftp_line[n++] = *p;
-        if (n < (int)sizeof(ftp_line) - 1) ftp_line[n++] = ':';
-        /* int -> decimal */
-        char digits[8];
-        int dn = 0;
-        int port = FTP_CTRL_PORT;
-        if (port == 0) digits[dn++] = '0';
-        while (port > 0 && dn < (int)sizeof(digits)) {
-            digits[dn++] = (char)('0' + (port % 10));
-            port /= 10;
-        }
-        while (dn-- > 0 && n < (int)sizeof(ftp_line) - 1)
-            ftp_line[n++] = digits[dn];
-        const char *suffix = "  (anonymous)";
-        for (const char *p = suffix; *p && n < (int)sizeof(ftp_line) - 1; p++)
-            ftp_line[n++] = *p;
-        ftp_line[n] = '\0';
-        menu_draw_text(&menu_font_20_font, 80, 612, COLOR_ON, ftp_line);
-    } else {
-        menu_draw_text(&menu_font_20_font, 80, 612, COLOR_DIM,
-                       "FTP: not running (no network)");
+    {
+        const char *desc = g_items[g_sel].desc;
+        if (!desc || !desc[0]) desc = "Select an option to see what it changes.";
+        menu_draw_text(&menu_font_20_font, 80, 612, COLOR_TEXT, desc);
     }
 
     menu_draw_text(&menu_font_20_font, 80, 644, COLOR_DIM,
@@ -384,8 +465,7 @@ static void menu_loop(void) {
 
         if (edge & (MENU_BTN_CROSS | MENU_BTN_LEFT | MENU_BTN_RIGHT)) {
             if (it->kind == ITEM_TOGGLE) {
-                field_set(it->field, !field_get(it->field));
-                g_status = NULL;
+                toggle_field(it->field);
             } else if (it->kind == ITEM_ACTION && (edge & MENU_BTN_CROSS)) {
                 run_action(it->action);
             } else if (it->kind == ITEM_HOST_EDIT && (edge & MENU_BTN_CROSS)) {

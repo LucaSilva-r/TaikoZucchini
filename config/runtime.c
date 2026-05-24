@@ -11,7 +11,7 @@
 #include "pad_input.h"
 #include "kb_input.h"
 
-#define TAIKO_CFG_VERSION 5
+#define TAIKO_CFG_VERSION 6
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
@@ -22,7 +22,6 @@ taiko_runtime_cfg_t g_cfg = {
     .camera_diag_hooks    = TAIKO_FEATURE_CAMERA_DIAG_HOOKS,
     .data00000_redirect   = TAIKO_FEATURE_DATA00000_REDIRECT,
     .cert_replacement     = TAIKO_FEATURE_CERT_REPLACEMENT,
-    .http_hooks           = TAIKO_FEATURE_HTTP_HOOKS,
     .online_diag          = TAIKO_FEATURE_ONLINE_DIAG,
 
     .probe_patches        = TAIKO_PATCH_PROBE_PATCHES,
@@ -59,7 +58,7 @@ static void handle_features(const char *key, const char *value, void *u) {
     SET_BIT("camera_diag_hooks",  camera_diag_hooks);
     SET_BIT("data00000_redirect", data00000_redirect);
     SET_BIT("cert_replacement",   cert_replacement);
-    SET_BIT("http_hooks",         http_hooks);
+    if (cfg_file_str_eq_ci(key, "http_hooks")) return; /* legacy v5 key */
     SET_BIT("online_diag",        online_diag);
 }
 
@@ -137,6 +136,10 @@ void taiko_cfg_normalize_host(char *dst, size_t cap, const char *src) {
         i++;
     }
     dst[i] = 0;
+}
+
+int taiko_online_redirect_active(void) {
+    return g_cfg.online_redirect_enable && g_cfg.online_redirect_host[0];
 }
 
 static void handle_network(const char *key, const char *value, void *u) {
@@ -323,9 +326,6 @@ static void write_cfg_file(const char *path) {
     emit_kv_bool(fd,
         "Replace TLS certs at runtime (needed for online auth on private servers).",
         "cert_replacement", g_cfg.cert_replacement);
-    emit_kv_bool(fd,
-        "Hook HTTP requests to retarget URLs (server swap).",
-        "http_hooks", g_cfg.http_hooks);
     emit_kv_bool(fd,
         "Periodic dump of network/online state to log.",
         "online_diag", g_cfg.online_diag);
