@@ -1,0 +1,51 @@
+#ifndef TAIKO_EBOOT_FPT_H
+#define TAIKO_EBOOT_FPT_H
+
+#include <stdint.h>
+
+#define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
+#define TAIKO_FPT_VERSION 1u
+#define TAIKO_FPT_V1_SLOT_COUNT 64u
+
+enum {
+    TAIKO_FPT_HTTP_BASE = 0,
+    TAIKO_FPT_HTTP_COUNT = 23,
+
+    TAIKO_FPT_USB_BASE = 32,
+    TAIKO_FPT_USB_COUNT = 9,
+
+    TAIKO_FPT_CAMERA_BASE = 48,
+    TAIKO_FPT_CAMERA_COUNT = 15,
+
+    TAIKO_FPT_FS_OPEN = 63,
+
+    TAIKO_FPT_NET_BASE = 64,
+    TAIKO_FPT_NET_RECVFROM = TAIKO_FPT_NET_BASE + 0,
+    TAIKO_FPT_NET_CONNECT  = TAIKO_FPT_NET_BASE + 1,
+    TAIKO_FPT_NET_CLOSE    = TAIKO_FPT_NET_BASE + 2,
+    TAIKO_FPT_NET_GETHOSTBYNAME = TAIKO_FPT_NET_BASE + 3,
+    TAIKO_FPT_NET_SOCKET   = TAIKO_FPT_NET_BASE + 4,
+    TAIKO_FPT_NET_SENDTO   = TAIKO_FPT_NET_BASE + 5,
+    TAIKO_FPT_NET_SEND     = TAIKO_FPT_NET_BASE + 6,
+    TAIKO_FPT_NET_RECV     = TAIKO_FPT_NET_BASE + 7,
+    TAIKO_FPT_NET_SOCKETSELECT = TAIKO_FPT_NET_BASE + 8,
+    TAIKO_FPT_NET_SOCKETPOLL   = TAIKO_FPT_NET_BASE + 9,
+    TAIKO_FPT_NET_COUNT    = 10,
+
+    TAIKO_FPT_SLOT_COUNT = 74,
+};
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t slot_count;
+    uint32_t reserved;
+    uint32_t got_slots[TAIKO_FPT_SLOT_COUNT];
+    uint32_t slots[TAIKO_FPT_SLOT_COUNT];
+} taiko_fpt_t;
+
+int taiko_fpt_publish(uint32_t slot, const void *opd);
+uintptr_t taiko_fpt_original_opd(uint32_t slot);
+int taiko_fpt_available(void);
+
+#endif

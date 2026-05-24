@@ -1,0 +1,40 @@
+# Build outputs
+/bin/
+*.o
+*.ppu.o
+*.spu.o
+*.elf
+*.prx
+*.sprx
+*.sym
+*.map
+
+# Local toolchains and proprietary SDK files
+/cell/
+/host-linux/
+/target/
+/wine_prefix/
+CELL_SDK/
+
+# Proprietary game dumps and keys
+EBOOT*
+*.self
+*.pkg
+*.rap
+*.rif
+*.edat
+*.sdat
+*.bin
+*.iso
+*.pem
+*.key
+*.der
+*.crt
+
+# Local/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*~
