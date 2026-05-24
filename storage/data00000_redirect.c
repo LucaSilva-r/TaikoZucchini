@@ -38,6 +38,7 @@
 #include "data00000_redirect.h"
 #include "runtime.h"
 #include "usrdir_path.h"
+#include "chassisinfo_hook.h"
 
 #define CELLFS_OPEN_FNID 0x718BF5F8u
 #define TARGET_PATH_TAIL "DATA00000.BIN"
@@ -77,7 +78,13 @@ static int path_matches(const char *p) {
  * the EBOOT's stub. Calling it here forwards to firmware. */
 static int hk_cellFsOpen(const char *path, int flags, int *fd,
                          const void *arg, uint64_t size) {
-    if (path_matches(path)) {
+    /* chassisinfo synth short-circuits before any disk-bound logic.
+     * Returns a virtual fd that chassisinfo_hook.c's Read/Lseek/Close/
+     * Fstat hooks recognize and back with an in-memory XML buffer. */
+    if (chassisinfo_synth_try_open(path, fd))
+        return CELL_FS_SUCCEEDED;
+
+    if (g_cfg.data00000_redirect && path_matches(path)) {
         if (!g_redirect_ready) resolve_redirect_path();
         if (g_redirect_ready) {
             dbg_print("[data00000] redirecting open to ");
@@ -185,16 +192,16 @@ void data00000_redirect_install(void) {
         if (original)
             taiko_fpt_publish(TAIKO_FPT_FS_OPEN, (const void *)original);
 
-        if (!g_cfg.data00000_redirect) {
-            dbg_print("[data00000] FPT pass-through slot published\n");
-            return;
-        }
+        /* Always publish the combined hook: chassisinfo_synth_try_open
+         * needs to intercept regardless of g_cfg.data00000_redirect.
+         * The DATA00000.BIN branch inside hk_cellFsOpen is gated on the
+         * cfg flag, so disabling data00000 still works. */
         if (!original) {
             dbg_print("[data00000] FPT original OPD lookup failed\n");
             return;
         }
         taiko_fpt_publish(TAIKO_FPT_FS_OPEN, hk_cellFsOpen_opd);
-        dbg_print("[data00000] FPT cellFsOpen redirect published\n");
+        dbg_print("[data00000] FPT cellFsOpen hook published\n");
         return;
     }
 

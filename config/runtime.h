@@ -10,6 +10,8 @@
  * Features are boot-only: changes require restart. */
 
 #define TAIKO_REDIRECT_HOST_MAX 64
+#define TAIKO_DONGLE_SERIAL_LEN 12  /* 12 ASCII digits, "26841" prefix */
+#define TAIKO_CHASSIS_FLAG_COUNT 20 /* must match CI_F__COUNT in storage/chassisinfo_schema.h */
 
 typedef struct {
     /* features (subsystem on/off) */
@@ -52,6 +54,19 @@ typedef struct {
     unsigned char eboot_patcher_hash[20];     /* SHA1 of zucchini.sprx that patched it */
     int           eboot_have_patched_hash;
     int           eboot_have_patcher_hash;
+
+    /* Dongle serial as 12 ASCII digits + NUL. Loaded from
+     * [identity] dongle_serial in taiko_config.cfg. Empty string
+     * means "use compile-time CFG_DONGLE_SERIAL fallback". */
+    char          dongle_serial[TAIKO_DONGLE_SERIAL_LEN + 1];
+
+    /* chassisinfo.xml operator flags. Indices are CI_F_* from
+     * storage/chassisinfo_schema.h; the array is sized to the union
+     * across all known builds. Flags absent from the running
+     * version's schema are inert at emission. Stored as bytes (not
+     * bitfield) so the menu can pass &g_cfg.chassis_flags[id] to
+     * generic toggle helpers. */
+    uint8_t       chassis_flags[TAIKO_CHASSIS_FLAG_COUNT];
 } taiko_runtime_cfg_t;
 
 extern taiko_runtime_cfg_t g_cfg;
@@ -81,5 +96,11 @@ void taiko_cfg_normalize_host(char *dst, size_t cap, const char *src);
  * HTTP/DNS/socket redirect hooks; legacy standalone http_hooks config is
  * intentionally ignored. */
 int taiko_online_redirect_active(void);
+
+/* Returns NUL-terminated 12-digit serial. Order of precedence:
+ *   1. g_cfg.dongle_serial if populated
+ *   2. compile-time CFG_DONGLE_SERIAL
+ * Validation (prefix "26841", 12 digits) happens at cfg parse time. */
+const char *taiko_cfg_dongle_serial(void);
 
 #endif

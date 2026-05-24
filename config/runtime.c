@@ -10,8 +10,9 @@
 #include "usrdir_path.h"
 #include "pad_input.h"
 #include "kb_input.h"
+#include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 6
+#define TAIKO_CFG_VERSION 8
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
@@ -39,10 +40,20 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_enable = 0,
     .online_redirect_host   = {0},
     .online_redirect_port   = 443,
+
+    /* Sane defaults: only the three "go-online" gates are ON so
+     * stock cabinets boot past the network check without operator
+     * intervention. CI_F_* indices come from chassisinfo_schema.h. */
+    .chassis_flags = {
+        [CI_F_IGNORE_NETWORK_AUTHENTICATION] = 1,
+        [CI_F_IGNORE_NETWORK_CONNECTION]     = 1,
+        [CI_F_IGNORE_MUCHA_INVALID_ENFORCED] = 1,
+    },
 };
 
 static int g_loaded_version  = -1;
 static int g_loaded_from_file = 0;
+static int g_dongle_serial_reset = 0;  /* set when invalid cfg value coerced to default */
 
 /* ------------------------- Section handlers ------------------------- */
 
@@ -203,6 +214,72 @@ static int hex_to_bytes(const char *v, unsigned char *out, size_t n) {
     return 1;
 }
 
+static int dongle_serial_validate(const char *s) {
+    static const char prefix[5] = { '2','6','8','4','1' };
+    for (int i = 0; i < 5; i++)
+        if (s[i] != prefix[i]) return 0;
+    for (int i = 5; i < TAIKO_DONGLE_SERIAL_LEN; i++)
+        if (s[i] < '0' || s[i] > '9') return 0;
+    return 1;
+}
+
+/* Replace g_cfg.dongle_serial with the compile-time default and mark
+ * the cfg file as needing a rewrite so the user sees the corrected
+ * value persisted. Used whenever the cfg-provided serial is missing
+ * or fails validation — never leave g_cfg.dongle_serial empty since
+ * the game won't boot with a malformed Info key. */
+static void coerce_dongle_serial_to_default(const char *reason) {
+    memcpy(g_cfg.dongle_serial, CFG_DONGLE_SERIAL, TAIKO_DONGLE_SERIAL_LEN);
+    g_cfg.dongle_serial[TAIKO_DONGLE_SERIAL_LEN] = '\0';
+    g_dongle_serial_reset = 1;
+    dbg_print("[cfg] dongle_serial ");
+    dbg_print(reason);
+    dbg_print(", reset to default\n");
+}
+
+static void handle_identity(const char *key, const char *value, void *u) {
+    (void)u;
+    if (!cfg_file_str_eq_ci(key, "dongle_serial")) return;
+
+    while (*value == ' ' || *value == '\t') value++;
+
+    /* Length: must be exactly 12 digits before terminator/whitespace. */
+    int n = 0;
+    while (value[n] >= '0' && value[n] <= '9' &&
+           n < TAIKO_DONGLE_SERIAL_LEN + 1)
+        n++;
+    if (n != TAIKO_DONGLE_SERIAL_LEN) {
+        coerce_dongle_serial_to_default("invalid length / non-digit");
+        return;
+    }
+    char tmp[TAIKO_DONGLE_SERIAL_LEN + 1];
+    memcpy(tmp, value, TAIKO_DONGLE_SERIAL_LEN);
+    tmp[TAIKO_DONGLE_SERIAL_LEN] = '\0';
+
+    if (!dongle_serial_validate(tmp)) {
+        coerce_dongle_serial_to_default("invalid prefix");
+        return;
+    }
+    memcpy(g_cfg.dongle_serial, tmp, sizeof tmp);
+}
+
+const char *taiko_cfg_dongle_serial(void) {
+    if (g_cfg.dongle_serial[0]) return g_cfg.dongle_serial;
+    return CFG_DONGLE_SERIAL;
+}
+
+static void handle_chassis(const char *key, const char *value, void *u) {
+    (void)u;
+    for (int id = 0; id < CI_F__COUNT; id++) {
+        const char *name = chassisinfo_field_name(id);
+        if (name && cfg_file_str_eq_ci(key, name)) {
+            g_cfg.chassis_flags[id] =
+                (uint8_t)cfg_file_parse_bool(value, g_cfg.chassis_flags[id]);
+            return;
+        }
+    }
+}
+
 static void handle_eboot(const char *key, const char *value, void *u) {
     (void)u;
     if (cfg_file_str_eq_ci(key, "expected_patched_hash")) {
@@ -227,9 +304,11 @@ static void handle_eboot(const char *key, const char *value, void *u) {
 
 static const cfg_section_t SECTIONS[] = {
     {"meta",     handle_meta,     NULL},
+    {"identity", handle_identity, NULL},
     {"features", handle_features, NULL},
     {"patches",  handle_patches,  NULL},
     {"network",  handle_network,  NULL},
+    {"chassis",  handle_chassis,  NULL},
     {"eboot",    handle_eboot,    NULL},
     {"p1",       handle_p1,       NULL},
     {"p2",       handle_p2,       NULL},
@@ -309,6 +388,15 @@ static void write_cfg_file(const char *path) {
     cfg_file_write_uint(fd, (unsigned)TAIKO_CFG_VERSION);
     cfg_file_write_str(fd, "\n\n");
 
+    cfg_file_write_str(fd, "[identity]\n");
+    emit_kv_str(fd,
+        "12-digit USB dongle serial. Must start with '26841'. "
+        "Game chassisinfo lookup keys on this value; mismatched serial "
+        "means operator flags silently fall back to zero.",
+        "dongle_serial",
+        g_cfg.dongle_serial[0] ? g_cfg.dongle_serial : CFG_DONGLE_SERIAL);
+    cfg_file_write_str(fd, "\n");
+
     cfg_file_write_str(fd, "[features]\n");
     emit_kv_bool(fd,
         "Replaces real USB USIO + card reader. DualShock drives input.",
@@ -384,6 +472,19 @@ static void write_cfg_file(const char *path) {
         "online_redirect_port", (unsigned)g_cfg.online_redirect_port);
     cfg_file_write_str(fd, "\n");
 
+    cfg_file_write_str(fd, "[chassis]\n");
+    cfg_file_write_str(fd,
+        "# Operator flags emitted into the synthesized chassisinfo.xml.\n"
+        "# Field names mirror the XML elements. Flags that don't apply\n"
+        "# to the running build are kept in the cfg but dropped at\n"
+        "# emission time.\n");
+    for (int id = 0; id < CI_F__COUNT; id++) {
+        const char *name = chassisinfo_field_name(id);
+        if (!name) continue;
+        emit_kv_bool(fd, NULL, name, g_cfg.chassis_flags[id]);
+    }
+    cfg_file_write_str(fd, "\n");
+
     cfg_file_write_str(fd, "[eboot]\n");
     cfg_file_write_str(fd,
         "# Set by SPRX after a successful on-disk EBOOT patch flow.\n"
@@ -433,8 +534,13 @@ static int try_load(void) {
                    SECTIONS, sizeof SECTIONS / sizeof SECTIONS[0]);
     g_loaded_from_file = 1;
 
-    if (g_loaded_version != TAIKO_CFG_VERSION) {
-        dbg_print_hex32("[cfg] migrating from version", (uint32_t)g_loaded_version);
+    /* No dongle_serial key seen at all (parser never fired for it). */
+    if (!g_cfg.dongle_serial[0])
+        coerce_dongle_serial_to_default("missing");
+
+    if (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset) {
+        dbg_print_hex32("[cfg] rewriting; loaded version",
+                        (uint32_t)g_loaded_version);
         write_cfg_file(path);
     }
     return 1;

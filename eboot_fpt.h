@@ -20,6 +20,8 @@ enum {
     TAIKO_FPT_FS_OPEN = 63,
 
     TAIKO_FPT_NET_BASE = 64,
+    /* (defined below — keep the FS_READ.. block after NET_COUNT so the
+     * NET slot enumeration remains contiguous and unchanged.) */
     TAIKO_FPT_NET_RECVFROM = TAIKO_FPT_NET_BASE + 0,
     TAIKO_FPT_NET_CONNECT  = TAIKO_FPT_NET_BASE + 1,
     TAIKO_FPT_NET_CLOSE    = TAIKO_FPT_NET_BASE + 2,
@@ -32,7 +34,18 @@ enum {
     TAIKO_FPT_NET_SOCKETPOLL   = TAIKO_FPT_NET_BASE + 9,
     TAIKO_FPT_NET_COUNT    = 10,
 
-    TAIKO_FPT_SLOT_COUNT = 74,
+    /* Extra cellFs* slots for virtual-fd backed reads (chassisinfo synth).
+     * FS_OPEN above stays at 63 for backward compatibility with already-
+     * patched EBOOTs; the new Read/Lseek/Close/Fstat slots are appended.
+     * EBOOTs patched before these were added will return 0 from
+     * taiko_fpt_publish on these slots — the virtual-fd path then is
+     * impossible and chassisinfo synthesis stays inert. */
+    TAIKO_FPT_FS_READ  = 74,
+    TAIKO_FPT_FS_LSEEK = 75,
+    TAIKO_FPT_FS_CLOSE = 76,
+    TAIKO_FPT_FS_FSTAT = 77,
+
+    TAIKO_FPT_SLOT_COUNT = 78,
 };
 
 typedef struct {

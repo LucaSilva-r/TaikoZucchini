@@ -18,6 +18,8 @@
 #include "menu_font_28.h"
 #include "menu_osk.h"
 #include "ftp_server.h"
+#include "storage/chassisinfo_schema.h"
+#include "game_version.h"
 
 #define COLOR_BG        MENU_RGB(0x00, 0x00, 0x00)
 #define COLOR_PANEL     MENU_RGB(0x10, 0x14, 0x18)
@@ -63,9 +65,17 @@ typedef enum {
     F_ALLOW_SCREEN_TEARING,
     /* network */
     F_ONLINE_REDIRECT_ENABLE,
+
+    /* chassisinfo flags: F_CHASSIS_BASE + CI_F_* (storage/chassisinfo_schema.h).
+     * Keep this last so g_cfg.chassis_flags[id - F_CHASSIS_BASE] indexes
+     * cleanly. */
+    F_CHASSIS_BASE,
+    F_CHASSIS_LAST = F_CHASSIS_BASE + TAIKO_CHASSIS_FLAG_COUNT - 1,
 } field_id_t;
 
 static int field_get(field_id_t id) {
+    if (id >= F_CHASSIS_BASE && id <= F_CHASSIS_LAST)
+        return g_cfg.chassis_flags[id - F_CHASSIS_BASE];
     switch (id) {
     case F_USIO_EMULATION:      return g_cfg.usio_emulation;
     case F_QR_CARD_READER:      return g_cfg.qr_card_reader;
@@ -85,12 +95,17 @@ static int field_get(field_id_t id) {
     case F_CLEARLOCKS_STUB:     return g_cfg.clearlocks_stub;
     case F_ALLOW_SCREEN_TEARING:return g_cfg.allow_screen_tearing;
     case F_ONLINE_REDIRECT_ENABLE: return g_cfg.online_redirect_enable;
+    default: break;
     }
     return 0;
 }
 
 static void field_set(field_id_t id, int v) {
     v = v ? 1 : 0;
+    if (id >= F_CHASSIS_BASE && id <= F_CHASSIS_LAST) {
+        g_cfg.chassis_flags[id - F_CHASSIS_BASE] = (uint8_t)v;
+        return;
+    }
     switch (id) {
     case F_USIO_EMULATION:      g_cfg.usio_emulation = v; break;
     case F_QR_CARD_READER:      g_cfg.qr_card_reader = v; break;
@@ -110,6 +125,7 @@ static void field_set(field_id_t id, int v) {
     case F_CLEARLOCKS_STUB:     g_cfg.clearlocks_stub = v; break;
     case F_ALLOW_SCREEN_TEARING:g_cfg.allow_screen_tearing = v; break;
     case F_ONLINE_REDIRECT_ENABLE: g_cfg.online_redirect_enable = v; break;
+    default: break;
     }
 }
 
@@ -205,6 +221,70 @@ static const menu_item_t g_items[] = {
       "Uses HSYNC flips instead of VSYNC. Can tear, but may reduce rhythm-lane jumps.",
       F_ALLOW_SCREEN_TEARING, 0 },
 
+    { ITEM_SECTION, "Chassis settings (chassisinfo.xml)", "", 0, 0 },
+    { ITEM_TOGGLE, "is_promotion",
+      "Promotion mode: free play + locked song list. Use for demo/event cabinets.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IS_PROMOTION), 0 },
+    { ITEM_TOGGLE, "force_offline",
+      "Forces the cabinet into offline mode regardless of network state.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_OFFLINE), 0 },
+    { ITEM_TOGGLE, "force_freeplay",
+      "Skips coin requirement. Required for cabinets without a coin mech.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_FREEPLAY), 0 },
+    { ITEM_TOGGLE, "force_autoplay",
+      "Demo-style auto-play. Useful for screenshots and attract loops.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_AUTOPLAY), 0 },
+    { ITEM_TOGGLE, "force_serious",
+      "Forces tournament/competition rules (no easy-mode mercy).",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_SERIOUS), 0 },
+    { ITEM_TOGGLE, "force_musicinfo_allrelease",
+      "Unlocks all released songs in the music info screen.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_MUSICINFO_ALLRELEASE), 0 },
+    { ITEM_TOGGLE, "force_burst_mode",
+      "Always-on burst (high-difficulty) mode. Build 0x20151206+.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_BURST_MODE), 0 },
+    { ITEM_TOGGLE, "ignore_network_authentication",
+      "Skip the BanaID online auth. ON by default — required to boot offline.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_NETWORK_AUTHENTICATION), 0 },
+    { ITEM_TOGGLE, "ignore_network_connection",
+      "Skip the link-state check. ON by default — required to boot offline.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_NETWORK_CONNECTION), 0 },
+    { ITEM_TOGGLE, "ignore_closetime",
+      "Ignore the configured business-hours close time.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_CLOSETIME), 0 },
+    { ITEM_TOGGLE, "ignore_nblinepoint",
+      "Skip Nesica line-point checks. Build 0x20140713+.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_NBLINEPOINT), 0 },
+    { ITEM_TOGGLE, "ignore_mucha_invalid_enforced",
+      "Skip Mucha license-server enforcement. ON by default — required offline.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_MUCHA_INVALID_ENFORCED), 0 },
+    { ITEM_TOGGLE, "disable_countdowntimer",
+      "Suppress the song-select countdown. XML name auto-picks per build.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_DISABLE_COUNTDOWNTIMER), 0 },
+    { ITEM_TOGGLE, "anytime_tokkun",
+      "Practice (tokkun) mode always selectable. Build 0x20160406+. "
+      "Note: ST5..S10 honor this; S11 (Green) keeps the field in XML but "
+      "the feature was disabled in code — toggle has no visible effect.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_ANYTIME_TOKKUN), 0 },
+    { ITEM_TOGGLE, "anytime_dani",
+      "Dan grading mode always selectable. Build 0x20160808+.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_ANYTIME_DANI), 0 },
+    { ITEM_TOGGLE, "force_dani",
+      "Force-enter dan grading flow at startup. Build 0x20160808+.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_DANI), 0 },
+    { ITEM_TOGGLE, "anytime_ghostbattle",
+      "Ghost battle always selectable. S11100-1 (Green) only.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_ANYTIME_GHOSTBATTLE), 0 },
+    { ITEM_TOGGLE, "force_battlestage_allrelease",
+      "Unlock all battle stages. S10100-1 (Yellow) only.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_BATTLESTAGE_ALLRELEASE), 0 },
+    { ITEM_TOGGLE, "force_battlespecial_allrelease",
+      "Unlock all special battle content. S10100-1 (Yellow) only.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_FORCE_BATTLESPECIAL_ALLRELEASE), 0 },
+    { ITEM_TOGGLE, "ignore_battlenpc_lvcap",
+      "Disable level cap on NPC battle opponents. S10100-1 (Yellow) only.",
+      (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_BATTLENPC_LVCAP), 0 },
+
     { ITEM_SECTION, "Actions", "", 0, 0 },
     { ITEM_ACTION,  "Delete usiobackup.bin",
       "Deletes saved virtual USIO SRAM so it will be rebuilt next boot.",
@@ -227,6 +307,45 @@ static const menu_item_t g_items[] = {
 static int g_sel = 1;          /* skip first section header */
 static int g_scroll = 0;
 static const char *g_status = NULL;
+
+/* Visibility mask for chassisinfo flags: 1 if the field is in the
+ * detected build's schema, 0 if it's a flag from a different build
+ * that doesn't apply here. Filled lazily on first menu open. */
+static uint8_t g_chassis_visible[TAIKO_CHASSIS_FLAG_COUNT];
+static int     g_chassis_visible_ready;
+
+static void compute_chassis_visibility(void) {
+    if (g_chassis_visible_ready) return;
+    g_chassis_visible_ready = 1;
+    memset(g_chassis_visible, 0, sizeof g_chassis_visible);
+    const char *dir = taiko_game_chassisinfo_dir();
+    const chassisinfo_schema_t *s = chassisinfo_schema_for_dir(dir);
+    if (!s) {
+        /* Unknown build → show everything so the operator can still
+         * edit the cfg, even if the synth won't emit a given flag. */
+        memset(g_chassis_visible, 1, sizeof g_chassis_visible);
+        return;
+    }
+    for (uint8_t i = 0; i < s->field_count; i++) {
+        uint8_t id = s->field_ids[i];
+        if (id < TAIKO_CHASSIS_FLAG_COUNT)
+            g_chassis_visible[id] = 1;
+    }
+}
+
+static int item_is_chassis(int idx);
+static int item_visible(int idx);
+
+/* Filtered view: section headers are always shown; non-section items
+ * are shown only when item_visible() agrees (chassis flags absent
+ * from the detected schema get dropped). Rebuilt on demand. */
+#define ITEM_COUNT_MAX 256
+static int g_view_idx[ITEM_COUNT_MAX];
+static int g_view_count;
+static int g_view_ready;
+
+static void rebuild_view(void);
+static int  view_pos_of(int item_idx);
 
 static void build_ftp_line(char *out, size_t cap) {
     if (!out || cap == 0) return;
@@ -282,21 +401,56 @@ static void toggle_field(field_id_t id) {
     }
 }
 
+static int item_is_chassis(int idx) {
+    if (g_items[idx].kind != ITEM_TOGGLE) return 0;
+    field_id_t f = g_items[idx].field;
+    return f >= F_CHASSIS_BASE && f <= F_CHASSIS_LAST;
+}
+
+static int item_visible(int idx) {
+    if (!item_is_chassis(idx)) return 1;
+    int cf = g_items[idx].field - F_CHASSIS_BASE;
+    compute_chassis_visibility();
+    return g_chassis_visible[cf];
+}
+
+static void rebuild_view(void) {
+    g_view_count = 0;
+    for (int i = 0; i < ITEM_COUNT && g_view_count < ITEM_COUNT_MAX; i++) {
+        if (g_items[i].kind == ITEM_SECTION || item_visible(i))
+            g_view_idx[g_view_count++] = i;
+    }
+    g_view_ready = 1;
+}
+
+static int view_pos_of(int item_idx) {
+    if (!g_view_ready) rebuild_view();
+    for (int v = 0; v < g_view_count; v++)
+        if (g_view_idx[v] == item_idx) return v;
+    return -1;
+}
+
 static int next_selectable(int from, int dir) {
-    int i = from;
-    for (int n = 0; n < ITEM_COUNT; n++) {
-        i += dir;
-        if (i < 0) i = ITEM_COUNT - 1;
-        if (i >= ITEM_COUNT) i = 0;
-        if (g_items[i].kind != ITEM_SECTION) return i;
+    if (!g_view_ready) rebuild_view();
+    int vp = view_pos_of(from);
+    if (vp < 0) vp = 0;
+    for (int n = 0; n < g_view_count; n++) {
+        vp += dir;
+        if (vp < 0) vp = g_view_count - 1;
+        if (vp >= g_view_count) vp = 0;
+        int it = g_view_idx[vp];
+        if (g_items[it].kind != ITEM_SECTION) return it;
     }
     return from;
 }
 
 static void ensure_visible(void) {
-    if (g_sel < g_scroll) g_scroll = g_sel;
-    if (g_sel >= g_scroll + MAX_VISIBLE_ROWS)
-        g_scroll = g_sel - MAX_VISIBLE_ROWS + 1;
+    if (!g_view_ready) rebuild_view();
+    int vp = view_pos_of(g_sel);
+    if (vp < 0) vp = 0;
+    if (vp < g_scroll) g_scroll = vp;
+    if (vp >= g_scroll + MAX_VISIBLE_ROWS)
+        g_scroll = vp - MAX_VISIBLE_ROWS + 1;
 }
 
 static void draw_frame(void) {
@@ -315,11 +469,13 @@ static void draw_frame(void) {
     }
     menu_draw_rect(80, 78, 1120, 2, COLOR_BORDER);
 
-    /* List */
-    int visible = ITEM_COUNT - g_scroll;
+    /* List (filtered view) */
+    if (!g_view_ready) rebuild_view();
+    int visible = g_view_count - g_scroll;
     if (visible > MAX_VISIBLE_ROWS) visible = MAX_VISIBLE_ROWS;
+    if (visible < 0) visible = 0;
     for (int row = 0; row < visible; row++) {
-        int idx = g_scroll + row;
+        int idx = g_view_idx[g_scroll + row];
         const menu_item_t *it = &g_items[idx];
         int rx = LIST_X;
         int ry = LIST_Y + row * ROW_H;
@@ -378,11 +534,11 @@ static void draw_frame(void) {
     }
 
     /* Scroll indicator (right side dashes). */
-    if (ITEM_COUNT > MAX_VISIBLE_ROWS) {
+    if (g_view_count > MAX_VISIBLE_ROWS) {
         if (g_scroll > 0)
             menu_draw_text(&menu_font_20_font, LIST_X + LIST_W + 24,
                            LIST_Y, COLOR_DIM, "^");
-        if (g_scroll + MAX_VISIBLE_ROWS < ITEM_COUNT)
+        if (g_scroll + MAX_VISIBLE_ROWS < g_view_count)
             menu_draw_text(&menu_font_20_font, LIST_X + LIST_W + 24,
                            LIST_Y + (MAX_VISIBLE_ROWS - 1) * ROW_H,
                            COLOR_DIM, "v");

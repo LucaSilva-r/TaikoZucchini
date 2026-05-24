@@ -140,6 +140,10 @@ static const fpt_stub_patch_t FPT_STUB_PATCHES[] = {
     { 0x00a1ed90u, TAIKO_FPT_CAMERA_BASE + 14 },
 
     { 0x00a1d7f0u, TAIKO_FPT_FS_OPEN },
+    { 0x00a1d7b0u, TAIKO_FPT_FS_READ },
+    { 0x00a1d870u, TAIKO_FPT_FS_LSEEK },
+    { 0x00a1d750u, TAIKO_FPT_FS_CLOSE },
+    { 0x00a1d910u, TAIKO_FPT_FS_FSTAT },
 
     { 0x00a1d250u, TAIKO_FPT_NET_RECVFROM },
     { 0x00a1d310u, TAIKO_FPT_NET_CONNECT },

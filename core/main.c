@@ -21,6 +21,8 @@
 #include "camera_diag.h"
 #include "camera_qr.h"
 #include "bpreader_hook.h"
+#include "chassisinfo_hook.h"
+#include "game_version.h"
 #include "pad_input.h"
 #include "kb_input.h"
 #include "taiko_frame.h"
@@ -412,6 +414,8 @@ int taiko_start(unsigned int args, void *argp) {
     if (g_cfg.qr_card_reader)
         camera_qr_init();
     bpreader_hook_install();
+    (void)taiko_game_chassisinfo_dir();  /* warm cache + log detected version */
+    chassisinfo_hook_install();
     if (g_cfg.usio_emulation) {
         taiko_frame_init();
         pad_input_init();

@@ -510,36 +510,6 @@ static void encode_serial_writes(uint32_t *out, const char *serial) {
     }
 }
 
-/* Load /dev_hdd0/.../dongle_serial.txt at PRX init time, validate as 12
- * ASCII digits prefixed "26841", and copy into out[12]. Returns 0 on
- * success, -1 on any failure (file missing, short read, wrong prefix,
- * non-digit). Mirrors the runtime validator emitted by
- * scripts/patch_eboot_usb_probe.py:build_runtime_fcntl_dispatch_patch.
- *
- * Trailing whitespace (\r, \n, spaces, tabs) is tolerated so the file
- * can be edited on a Windows host without breaking the prefix check. */
-static int load_runtime_dongle_serial(char out[12]) {
-    int fd = -1;
-    if (cellFsOpen(CFG_DONGLE_SERIAL_PATH, CELL_FS_O_RDONLY, &fd, NULL, 0)
-            != CELL_FS_SUCCEEDED)
-        return -1;
-
-    char buf[32];
-    uint64_t got = 0;
-    int rc = cellFsRead(fd, buf, sizeof(buf), &got);
-    cellFsClose(fd);
-    if (rc != CELL_FS_SUCCEEDED || got < 12) return -1;
-
-    static const char prefix[5] = { '2','6','8','4','1' };
-    for (int i = 0; i < 5; i++)
-        if (buf[i] != prefix[i]) return -1;
-    for (int i = 5; i < 12; i++)
-        if (buf[i] < '0' || buf[i] > '9') return -1;
-
-    memcpy(out, buf, 12);
-    return 0;
-}
-
 static void apply_fcntl_dispatch(void) {
     enum { PREFIX_W = 24,
            SUFFIX_W = sizeof(fcntl_suffix) / 4,
@@ -547,8 +517,7 @@ static void apply_fcntl_dispatch(void) {
            TOTAL_W  = PREFIX_W + SERIAL_W + SUFFIX_W };
 
     char serial[13];
-    if (load_runtime_dongle_serial(serial) != 0)
-        memcpy(serial, CFG_DONGLE_SERIAL, 12);
+    memcpy(serial, taiko_cfg_dongle_serial(), 12);
     serial[12] = '\0';
 
     uint32_t payload[TOTAL_W];
