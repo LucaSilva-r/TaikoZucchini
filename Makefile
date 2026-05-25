@@ -72,7 +72,7 @@ SPRX    := $(BIN_DIR)/$(TARGET_NAME).sprx
 SYM     := $(BIN_DIR)/$(TARGET_NAME).sym
 BOOTSTRAP_EBOOT := bootstrap_eboot/bin/eboot.elf
 
-SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_init.c eboot_fpt.c \
+SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_init.c core/overlay.c eboot_fpt.c \
            mod_menu/menu.c mod_menu/menu_draw.c mod_menu/menu_pad.c mod_menu/menu_actions.c \
            mod_menu/menu_osk.c \
            ftp/ftp_server.c \
@@ -99,7 +99,7 @@ SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_i
            network/online_diag.c \
            hooks/http_hook.c hooks/cell_http_shim.c \
            hooks/dns_hook.c hooks/socket_hook.c \
-           network/uri.c network/http_client.c
+           network/uri.c network/http_client.c network/version_check.c
 OBJS    := $(SRCS:.c=.o)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf
@@ -208,7 +208,7 @@ $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
 
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
-core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h network/certs.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h
+core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h network/certs.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h
 eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
@@ -223,6 +223,7 @@ storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_s
 patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h core/icache.h core/debug.h
 network/certs.o:     network/certs.c     config.h network/certs.h core/icache.h core/debug.h
 core/debug.o:     core/debug.c     core/debug.h config.h config/runtime.h
+core/overlay.o:   core/overlay.c   core/overlay.h core/debug.h eboot_fpt.h mod_menu/menu_font_20.h mod_menu/menu_font.h
 input/pad_input.o: input/pad_input.c input/pad_input.h input/kb_input.h config/cfg_file.h config/runtime.h core/debug.h
 input/kb_input.o:  input/kb_input.c  input/kb_input.h  input/pad_input.h config/cfg_file.h config/runtime.h core/debug.h
 network/online_diag.o:   network/online_diag.c   network/online_diag.h config.h core/debug.h
@@ -231,6 +232,7 @@ hooks/dns_hook.o:       hooks/dns_hook.c       hooks/dns_hook.h core/icache.h co
 hooks/socket_hook.o:    hooks/socket_hook.c    hooks/socket_hook.h core/icache.h core/debug.h eboot_fpt.h network/http_client.h config/runtime.h config.h
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config.h
+network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h config/version.h core/debug.h core/overlay.h
 hooks/cell_http_shim.o: hooks/cell_http_shim.c hooks/cell_http_shim.h network/http_client.h core/debug.h config/runtime.h config.h
 
 RPCS3_DEV_HDD0 ?= $(HOME)/.config/rpcs3/dev_hdd0

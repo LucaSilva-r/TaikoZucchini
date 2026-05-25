@@ -155,6 +155,9 @@ static const fpt_stub_patch_t FPT_STUB_PATCHES[] = {
     { 0x00a1d510u, TAIKO_FPT_NET_RECV },
     { 0x00a1d2b0u, TAIKO_FPT_NET_SOCKETSELECT },
     { 0x00a1d210u, TAIKO_FPT_NET_SOCKETPOLL },
+
+    { 0x00a1f290u, TAIKO_FPT_GCM_SET_DISPLAY_BUFFER },
+    { 0x00a1f3f0u, TAIKO_FPT_GCM_FLIP_COMMAND },
 };
 
 static int import_stub_matches_buf(const uint8_t *p) {

@@ -57,7 +57,7 @@ void *memalign(size_t alignment, size_t size) {
     return (void *)a;
 }
 
-enum { HEAP_SIZE = 384 * 1024 };
+enum { HEAP_SIZE = 3 * 1024 * 1024 };
 static unsigned char g_heap[HEAP_SIZE] __attribute__((aligned(16)));
 
 typedef struct HeapBlock {

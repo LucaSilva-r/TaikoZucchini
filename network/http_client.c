@@ -794,6 +794,56 @@ int http_request(const char *method,
     return a.rc;
 }
 
+int http_request_direct(const char *method,
+                        const char *host, int port,
+                        const char *path,
+                        const char *extra_headers, size_t extra_headers_len,
+                        const void *body, size_t body_len,
+                        http_response_t *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!method || !host || !path || !out) return -1;
+
+    http_worker_args_t a;
+    a.method            = method;
+    a.host              = host;
+    a.port              = port;
+    a.path              = path;
+    a.extra_headers     = extra_headers;
+    a.extra_headers_len = extra_headers_len;
+    a.body              = body;
+    a.body_len          = body_len;
+    a.out               = out;
+    a.rc                = -1;
+
+    sys_semaphore_attribute_t sem_attr;
+    sys_semaphore_attribute_initialize(sem_attr);
+    int rc = sys_semaphore_create(&a.done_sem, &sem_attr, 0, 1);
+    if (rc != CELL_OK) {
+        net_log_hex32("[http] sem_create", (uint32_t)rc);
+        return -1;
+    }
+
+    sys_ppu_thread_t tid = 0;
+    rc = sys_ppu_thread_create(&tid, http_worker_entry,
+                               (uint64_t)(uintptr_t)&a,
+                               1500, 128 * 1024,
+                               SYS_PPU_THREAD_CREATE_JOINABLE,
+                               "taiko_http_direct");
+    if (rc != CELL_OK) {
+        net_log_hex32("[http] thread_create", (uint32_t)rc);
+        sys_semaphore_destroy(a.done_sem);
+        return -1;
+    }
+
+    sys_semaphore_wait(a.done_sem, 0);
+
+    uint64_t exit_status = 0;
+    sys_ppu_thread_join(tid, &exit_status);
+    sys_semaphore_destroy(a.done_sem);
+
+    return a.rc;
+}
+
 int http_get(const char *url, http_response_t *out) {
     if (out) memset(out, 0, sizeof *out);
     if (!url || !out) return -1;
@@ -808,6 +858,23 @@ int http_get(const char *url, http_response_t *out) {
         return -1;
     }
     return http_request("GET", u.host, u.port, u.path, NULL, 0, NULL, 0, out);
+}
+
+int http_get_direct(const char *url, http_response_t *out) {
+    if (out) memset(out, 0, sizeof *out);
+    if (!url || !out) return -1;
+    uri_t u;
+    int rc = uri_parse(url, &u);
+    if (rc != 0) {
+        net_log_hex32("[http] uri_parse failed", (uint32_t)rc);
+        return -1;
+    }
+    if (!u.is_https) {
+        net_log("[http] only https:// supported\n");
+        return -1;
+    }
+    return http_request_direct("GET", u.host, u.port, u.path,
+                               NULL, 0, NULL, 0, out);
 }
 
 /* ------------------------------------------------------------------ */

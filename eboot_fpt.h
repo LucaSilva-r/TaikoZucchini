@@ -45,7 +45,10 @@ enum {
     TAIKO_FPT_FS_CLOSE = 76,
     TAIKO_FPT_FS_FSTAT = 77,
 
-    TAIKO_FPT_SLOT_COUNT = 78,
+    TAIKO_FPT_GCM_FLIP_COMMAND       = 78,
+    TAIKO_FPT_GCM_SET_DISPLAY_BUFFER = 79,
+
+    TAIKO_FPT_SLOT_COUNT = 80,
 };
 
 typedef struct {

@@ -29,9 +29,11 @@
 #include "usrdir_path.h"
 #include "eboot_flow.h"
 #include "patch_ui.h"
+#include "overlay.h"
 #include "menu.h"
 #include "menu_actions.h"
 #include "ftp_server.h"
+#include "version_check.h"
 
 SYS_MODULE_INFO(taiko_dongle, 0, 1, 1);
 SYS_MODULE_START(taiko_start);
@@ -410,6 +412,8 @@ int taiko_start(unsigned int args, void *argp) {
      * HTTP conversation in-process and forwards it through mbedTLS. */
     dns_hook_install();
     socket_hook_install();
+    taiko_overlay_hooks_install();
+    taiko_version_check_start();
     camera_diag_hooks_install();
     if (g_cfg.qr_card_reader)
         camera_qr_init();
