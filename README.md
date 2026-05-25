@@ -23,7 +23,7 @@ EBOOT to patch the game's original EBOOT on the console.
 ## Compatibility
 
 **Big disclaimer:** Taiko Zucchini currently works only with **Taiko no
-Tatsujin Green v11r01**.
+Tatsujin Green v11rXX**, **Taiko no Tatsujin Blue v10rXX**.
 
 Do not install this release on another Taiko version unless support for that
 version is explicitly documented. The patcher depends on version-specific
