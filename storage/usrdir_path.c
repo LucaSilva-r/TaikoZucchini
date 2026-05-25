@@ -11,20 +11,11 @@
 #include <sys/prx.h>
 #include <sys/return_code.h>
 
-#include <cell/sysmodule.h>
-
 #include "usrdir_path.h"
-#include "config.h"
 #include "debug.h"
-#include "icache.h"
+#include "eboot_fpt.h"
 
 /* ---------------- Passive cellGameContentPermit hook ---------------- */
-
-#define CELLGAME_CONTENT_PERMIT_FNID 0x70ACEC67u
-/* libsysutil_game .lib.stub can sit past the text/code range used by
- * patches.c; mirror the wider window used by data00000_redirect. */
-#define SCAN_TEXT_START 0x00010000u
-#define SCAN_TEXT_END   0x01200000u
 
 static char g_cached_usrdir[256];
 static int  g_cached_usrdir_ready;
@@ -35,7 +26,7 @@ static uintptr_t g_permit_original_opd;
 static int hk_permit(void *contentInfo, void *usrdir_buf) {
     permit_fn orig = (permit_fn)g_permit_original_opd;
     int rc = orig(contentInfo, usrdir_buf);
-    if (rc == 0 && usrdir_buf && !g_cached_usrdir_ready) {
+    if (rc == 0 && usrdir_buf) {
         const char *s = (const char *)usrdir_buf;
         size_t i = 0;
         while (i + 1 < sizeof g_cached_usrdir && s[i]) {
@@ -43,8 +34,12 @@ static int hk_permit(void *contentInfo, void *usrdir_buf) {
             i++;
         }
         g_cached_usrdir[i] = '\0';
-        if (i > 0)
+        if (i > 0) {
             g_cached_usrdir_ready = 1;
+            dbg_print("[usrdir] captured permit path: ");
+            dbg_print(g_cached_usrdir);
+            dbg_print("\n");
+        }
     }
     return rc;
 }
@@ -69,100 +64,22 @@ void usrdir_seed_path(const char *path) {
     }
 }
 
-static int import_stub_matches_usrdir(uintptr_t addr, uintptr_t *got_slot_out) {
-    const volatile uint32_t *p = (const volatile uint32_t *)addr;
-    uint32_t w0 = p[0], w1 = p[1], w2 = p[2];
-    if (w0 != 0x39800000u) return 0;
-    if ((w1 & 0xFFFF0000u) != 0x658C0000u) return 0;
-    if ((w2 & 0xFFFF0000u) != 0x818C0000u) return 0;
-    if (p[3] != 0xF8410028u || p[4] != 0x800C0000u ||
-        p[5] != 0x804C0004u || p[6] != 0x7C0903A6u ||
-        p[7] != 0x4E800420u)
-        return 0;
-    if (got_slot_out) {
-        uintptr_t hi = (uintptr_t)(w1 & 0xFFFFu) << 16;
-        int32_t   lo = (int32_t)(int16_t)(w2 & 0xFFFFu);
-        *got_slot_out = hi + lo;
-    }
-    return 1;
-}
-
-static int lib_stub_lookup_fnid(uint32_t fnid, uintptr_t *out_got_slot) {
-    for (uintptr_t p = SCAN_TEXT_START;
-         p + 0x2C <= SCAN_TEXT_END; p += 4) {
-        const volatile uint8_t *e = (const volatile uint8_t *)p;
-        if (e[0] != 0x2C || e[1] != 0x00) continue;
-        uint16_t version = ((uint16_t)e[2] << 8) | e[3];
-        if (version != 0x0001) continue;
-        uint16_t count = ((uint16_t)e[6] << 8) | e[7];
-        if (count == 0 || count > 256) continue;
-        uint32_t lib_fnid  = (uint32_t)e[0x14] << 24 |
-                             (uint32_t)e[0x15] << 16 |
-                             (uint32_t)e[0x16] << 8  |
-                             (uint32_t)e[0x17];
-        uint32_t lib_fstub = (uint32_t)e[0x18] << 24 |
-                             (uint32_t)e[0x19] << 16 |
-                             (uint32_t)e[0x1A] << 8  |
-                             (uint32_t)e[0x1B];
-        if (lib_fnid < 0x00010000u || lib_fstub < 0x00010000u) continue;
-        const volatile uint32_t *fids = (const volatile uint32_t *)(uintptr_t)lib_fnid;
-        for (uint32_t i = 0; i < count; i++) {
-            if (fids[i] == fnid) {
-                if (out_got_slot)
-                    *out_got_slot = (uintptr_t)lib_fstub + i * 4u;
-                return 1;
-            }
-        }
-    }
-    return 0;
-}
-
-static uintptr_t find_stub_by_got_usrdir(uintptr_t target_got) {
-    for (uintptr_t p = SCAN_TEXT_START;
-         p + 0x20 <= SCAN_TEXT_END; p += 4) {
-        uintptr_t got = 0;
-        if (!import_stub_matches_usrdir(p, &got)) continue;
-        if (got == target_got) return p;
-    }
-    return 0;
-}
-
-static void patch_stub_usrdir(uintptr_t stub_addr, const void *opd) {
-    uint32_t our_opd = (uint32_t)(uintptr_t)opd;
-    uint32_t insns[3] = {
-        0x3D800000u | ((our_opd >> 16) & 0xFFFFu),
-        0x618C0000u |  (our_opd        & 0xFFFFu),
-        0x60000000u,
-    };
-    mem_write_and_flush((void *)stub_addr, insns, sizeof insns);
-}
-
 void usrdir_install_hook(void) {
-    /* libsysutil_game owns cellGameContentPermit. On real HW the GOT
-     * slot is lazy-resolved when the module first loads, and we run
-     * during taiko_start before the game's GameContent constructor.
-     * Force-load it so the GOT slot is populated before we snapshot
-     * the original OPD; otherwise we cache 0 and crash on first call.
-     * See memory [[prx-import-got-unresolved-realhw]]. */
-    cellSysmoduleLoadModule(CELL_SYSMODULE_SYSUTIL_GAME);
+    if (!taiko_fpt_available()) {
+        dbg_print("[usrdir] FPT unavailable; permit hook skipped\n");
+        return;
+    }
 
-    uintptr_t got_slot = 0;
-    if (!lib_stub_lookup_fnid(CELLGAME_CONTENT_PERMIT_FNID, &got_slot)) {
-        dbg_print("[usrdir] permit FNID lookup failed\n");
-        return;
-    }
-    uintptr_t stub = find_stub_by_got_usrdir(got_slot);
-    if (!stub) {
-        dbg_print("[usrdir] permit stub not found\n");
-        return;
-    }
-    uint32_t opd = *(volatile uint32_t *)got_slot;
-    if (opd == 0) {
-        dbg_print("[usrdir] permit GOT slot unresolved; libsysutil_game not resident\n");
+    uintptr_t opd = taiko_fpt_original_opd(TAIKO_FPT_GAME_CONTENT_PERMIT);
+    if (!opd) {
+        dbg_print("[usrdir] FPT permit original OPD lookup failed\n");
         return;
     }
     g_permit_original_opd = opd;
-    patch_stub_usrdir(stub, g_hk_permit_opd);
+    if (taiko_fpt_publish(TAIKO_FPT_GAME_CONTENT_PERMIT, g_hk_permit_opd))
+        dbg_print("[usrdir] FPT content permit hook published\n");
+    else
+        dbg_print("[usrdir] FPT content permit publish failed\n");
 }
 
 /* ------------------------- Path resolver --------------------------- */
@@ -175,6 +92,23 @@ static const char *find_usrdir_marker(const char *fn) {
             hit = p;
     }
     return hit;
+}
+
+int usrdir_path_authoritative(void) {
+    return g_cached_usrdir_ready;
+}
+
+int usrdir_seed_from_fpt(void) {
+    const char *p = taiko_fpt_eboot_usrdir();
+    if (!p || !*p) {
+        dbg_print("[usrdir] FPT eboot_usrdir unavailable (v1 EBOOT?)\n");
+        return 0;
+    }
+    dbg_print("[usrdir] FPT eboot_usrdir: ");
+    dbg_print(p);
+    dbg_print("\n");
+    usrdir_seed_path(p);
+    return 1;
 }
 
 static int contains_substr(const char *hay, const char *needle) {

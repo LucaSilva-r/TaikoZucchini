@@ -8,6 +8,7 @@
 
 #define PF_X 1u
 #define PF_W 2u
+#define FPT_BSS_RESERVE 0x4000u
 
 static const uint8_t PRX_LOADER_BIN[] = {
     0xF8,0x01,0x00,0x50,0xF8,0x21,0x00,0x58,0xF8,0x41,0x00,0x60,0xF8,0x61,0x00,0x68,
@@ -160,6 +161,8 @@ static const fpt_stub_patch_t FPT_STUB_PATCHES[] = {
 
     { 0x00a1f290u, TAIKO_FPT_GCM_SET_DISPLAY_BUFFER },
     { 0x00a1f3f0u, TAIKO_FPT_GCM_FLIP_COMMAND },
+
+    { 0x00a1e0d0u, TAIKO_FPT_GAME_CONTENT_PERMIT },
 };
 
 static int import_stub_matches_buf(const uint8_t *p) {
@@ -285,8 +288,37 @@ static int update_embedded_phdr(self_ctx_t *ctx, uint16_t ph_index,
     return 0;
 }
 
+static void update_self_section_size(self_ctx_t *ctx, uint16_t ph_index,
+                                     uint64_t old_size, uint64_t new_size) {
+    if (!ctx || !ctx->si)
+        return;
+
+    uint64_t data_off = ctx->si[ph_index].offset;
+    ctx->si[ph_index].size = new_size;
+
+    if (!ctx->decrypted || !ctx->metah || !ctx->metash)
+        return;
+
+    for (uint32_t i = 0; i < ctx->metah->section_count; i++) {
+        metadata_section_header_t *m = &ctx->metash[i];
+        if (m->data_offset == data_off) {
+            if (m->data_size != old_size)
+                dbg_print_hex32("[patch] metash old size mismatch",
+                                (uint32_t)m->data_size);
+            m->data_size = new_size;
+            dbg_print_hex32("[patch] metash section", i);
+            dbg_print_hex32("[patch] metash new size", (uint32_t)new_size);
+            return;
+        }
+    }
+
+    dbg_print_hex32("[patch] metash size match missing", (uint32_t)data_off);
+}
+
 static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
-                                      uint16_t phnum, uint32_t *out_va) {
+                                      uint16_t phnum,
+                                      const char *eboot_usrdir,
+                                      uint32_t *out_va) {
     int rw_index = -1;
     uint64_t next_load_off = 0;
     int prefer_elf = use_elf_file_offsets(ctx);
@@ -315,8 +347,24 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
             next_load_off = p_off;
     }
 
-    uint64_t fpt_off = align_u64(rw_off + rw_file_size, 16);
-    uint64_t fpt_va = align_u64(rw->p_vaddr + rw->p_filesz, 16);
+    /* Place the FPT PAST the segment's original BSS region (p_memsz),
+     * not inside it. Game-side BSS variables live in
+     * [p_filesz, p_memsz); putting the FPT there means the game's own
+     * .bss writes silently zero our slot values once the game starts
+     * running, and a stub redirector then reads 0 → crash at the
+     * first hooked import call after the overwrite. Extending p_memsz
+     * to cover the FPT puts the table in a VA range no static data
+     * references, so the game cannot collide with it. */
+    uint64_t bss_orig = (rw->p_memsz > rw->p_filesz)
+                        ? (rw->p_memsz - rw->p_filesz) : 0;
+    uint64_t fpt_off = align_u64(rw_off + rw_file_size + bss_orig + FPT_BSS_RESERVE, 16);
+    /* fpt_va must track fpt_off through the segment's offset↔vaddr
+     * mapping; deriving fpt_va from p_filesz independently breaks
+     * whenever ctx->si[].size != p_filesz (some FSELF builds), which
+     * makes the stub redirectors point to a different VA than where
+     * the loader actually maps the FPT bytes — silently misrouting
+     * every FPT slot read. */
+    uint64_t fpt_va = rw->p_vaddr + (fpt_off - rw_off);
     uint64_t fpt_end = fpt_off + sizeof(taiko_fpt_t);
     if (fpt_end > ctx->buf_len)
         return -2;
@@ -328,6 +376,15 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     store_be32(ctx->buf + fpt_off + 0x00, TAIKO_FPT_MAGIC);
     store_be32(ctx->buf + fpt_off + 0x04, TAIKO_FPT_VERSION);
     store_be32(ctx->buf + fpt_off + 0x08, TAIKO_FPT_SLOT_COUNT);
+
+    if (eboot_usrdir && eboot_usrdir[0]) {
+        size_t len = 0;
+        while (eboot_usrdir[len] && len < TAIKO_FPT_USRDIR_MAX - 1)
+            len++;
+        memcpy(ctx->buf + fpt_off + offsetof(taiko_fpt_t, eboot_usrdir),
+               eboot_usrdir, len);
+        /* trailing NUL already from memset zero */
+    }
 
     uint32_t http_stub_anchor = 0;
     int anchor_rc = find_http_stub_anchor_buf(ctx, phdrs, phnum, &http_stub_anchor);
@@ -358,18 +415,20 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
                                   s->slot * sizeof(uint32_t)));
     }
 
+    uint64_t old_rw_size = rw_file_size;
     rw->p_filesz = fpt_end - rw_off;
     if (rw->p_memsz < rw->p_filesz)
         rw->p_memsz = rw->p_filesz;
-    if (ctx->si)
-        ctx->si[rw_index].size = rw->p_filesz;
+    update_self_section_size(ctx, (uint16_t)rw_index, old_rw_size,
+                             rw->p_filesz);
     update_embedded_phdr(ctx, (uint16_t)rw_index, rw);
 
     *out_va = (uint32_t)fpt_va;
     return 0;
 }
 
-int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
+int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path,
+                            const char *eboot_usrdir) {
     if (!ctx || !ctx->buf || !ctx->selfh || !sprx_path)
         return -1;
 
@@ -452,7 +511,8 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
         return -7;
 
     uint32_t fpt_va = 0;
-    int fpt_rc = append_fpt_and_patch_stubs(ctx, phdrs, phnum, &fpt_va);
+    int fpt_rc = append_fpt_and_patch_stubs(ctx, phdrs, phnum, eboot_usrdir,
+                                            &fpt_va);
     if (fpt_rc != 0)
         return -800 + fpt_rc;
 
@@ -471,11 +531,12 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
 
     write_abs_jump(ctx->buf + entry_off, (uint32_t)payload_va);
 
+    uint64_t old_rx_size = rx_size;
     uint64_t growth = payload_end - (rx_off + rx_size);
     rx->p_filesz += growth;
     rx->p_memsz += growth;
-    if (ctx->si)
-        ctx->si[rx_index].size += growth;
+    update_self_section_size(ctx, (uint16_t)rx_index, old_rx_size,
+                             rx->p_filesz);
 
     /* For DEBUG/FSELF SELFs RPCS3 strips the first header_len bytes and
      * parses the remainder as a raw ELF. That ELF has its own ehdr +

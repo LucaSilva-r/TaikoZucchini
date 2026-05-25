@@ -14,6 +14,17 @@ void usrdir_install_hook(void);
  * mapped. path may include or omit the trailing slash. */
 void usrdir_seed_path(const char *path);
 
+/* Try to seed from the EBOOT-baked USRDIR string in the FPT. Patcher
+ * writes this when stamping the SPRX loader trampoline, so it is
+ * available from the first instruction of taiko_start (long before
+ * cellGameContentPermit). Returns 1 on seed, 0 if FPT absent or v1. */
+int usrdir_seed_from_fpt(void);
+
+/* Returns 1 once usrdir has been seeded authoritatively (bootstrap arg,
+ * FPT, or cellGameContentPermit hook). 0 means usrdir_resolve_path's
+ * answer is a best-guess fallback that callers should not overwrite. */
+int usrdir_path_authoritative(void);
+
 /* Resolve /dev_hdd0/game/<DIR>/USRDIR/<tail> for the running title.
  *
  * Strategy:

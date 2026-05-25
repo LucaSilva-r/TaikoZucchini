@@ -72,7 +72,8 @@ static int append_path3(char *out, size_t out_size,
 
 static int resolve_bootstrap_paths(const taiko_bootstrap_args_t *boot_args,
                                    char *orig, size_t orig_size,
-                                   char *boot, size_t boot_size) {
+                                   char *boot, size_t boot_size,
+                                   int allow_game_scan) {
     if (boot_args && boot_args->usrdir[0]) {
         usrdir_seed_path(boot_args->usrdir);
         if (append_path3(orig, orig_size, boot_args->usrdir,
@@ -93,6 +94,9 @@ static int resolve_bootstrap_paths(const taiko_bootstrap_args_t *boot_args,
         usrdir_resolve_path("EBOOT.BIN", boot, boot_size))
         return 1;
 
+    if (!allow_game_scan)
+        return 0;
+
     /* Bootstrap starts before the real game EBOOT is mapped, and on RPCS3
      * the plugin is loaded from /dev_hdd0/plugins/, so the generic USRDIR
      * resolver may have no game-path signal yet. Scan installed games for
@@ -103,6 +107,16 @@ static int resolve_bootstrap_paths(const taiko_bootstrap_args_t *boot_args,
 
     CellFsDirent de;
     uint64_t nread = 0;
+    int matches = 0;
+    int missing_cfg_matches = 0;
+    char found_orig[256];
+    char found_boot[256];
+    char missing_cfg_orig[256];
+    char missing_cfg_boot[256];
+    found_orig[0] = 0;
+    found_boot[0] = 0;
+    missing_cfg_orig[0] = 0;
+    missing_cfg_boot[0] = 0;
     while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
         if (de.d_name[0] == '.') continue;
         if (de.d_type != CELL_FS_TYPE_DIRECTORY &&
@@ -119,12 +133,51 @@ static int resolve_bootstrap_paths(const taiko_bootstrap_args_t *boot_args,
             continue;
         if (!append_path3(boot, boot_size, usrdir, "EBOOT.BIN", ""))
             continue;
-        usrdir_seed_path(usrdir);
-        cellFsClosedir(fd);
-        return 1;
+        char cfg[256];
+        int cfg_missing = 0;
+        if (append_path3(cfg, sizeof(cfg), usrdir, "taiko_config.cfg", "") &&
+            !file_exists(cfg))
+            cfg_missing = 1;
+        if (matches == 0) {
+            strncpy(found_orig, orig, sizeof(found_orig));
+            found_orig[sizeof(found_orig) - 1] = 0;
+            strncpy(found_boot, boot, sizeof(found_boot));
+            found_boot[sizeof(found_boot) - 1] = 0;
+        }
+        if (cfg_missing) {
+            if (missing_cfg_matches == 0) {
+                strncpy(missing_cfg_orig, orig, sizeof(missing_cfg_orig));
+                missing_cfg_orig[sizeof(missing_cfg_orig) - 1] = 0;
+                strncpy(missing_cfg_boot, boot, sizeof(missing_cfg_boot));
+                missing_cfg_boot[sizeof(missing_cfg_boot) - 1] = 0;
+            }
+            missing_cfg_matches++;
+        }
+        matches++;
     }
 
     cellFsClosedir(fd);
+    if (missing_cfg_matches == 1) {
+        strncpy(orig, missing_cfg_orig, orig_size);
+        orig[orig_size - 1] = 0;
+        strncpy(boot, missing_cfg_boot, boot_size);
+        boot[boot_size - 1] = 0;
+        dbg_print("[eboot] fallback selected folder with missing config\n");
+        return 1;
+    }
+    if (missing_cfg_matches > 1) {
+        dbg_print("[eboot] multiple missing-config candidates; refusing fallback scan\n");
+        return 0;
+    }
+    if (matches == 1) {
+        strncpy(orig, found_orig, orig_size);
+        orig[orig_size - 1] = 0;
+        strncpy(boot, found_boot, boot_size);
+        boot[boot_size - 1] = 0;
+        return 1;
+    }
+    if (matches > 1)
+        dbg_print("[eboot] multiple EBOOT_ORIGINAL.BIN candidates; refusing fallback scan\n");
     return 0;
 }
 
@@ -209,7 +262,7 @@ static void fill_patch_args(eboot_flow_args_t *a, const char *orig,
 static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
     char orig[256], boot[256], keys[256];
     if (!resolve_bootstrap_paths(boot_args, orig, sizeof(orig),
-                                 boot, sizeof(boot))) {
+                                 boot, sizeof(boot), 1)) {
         if (boot_args)
             dbg_print("[eboot] bootstrap mode aborted before patch flow\n");
         return 0;
@@ -290,7 +343,7 @@ static int maybe_repatch_from_original(void) {
         return 0;
 
     char orig[256], boot[256], keys[256];
-    if (!resolve_bootstrap_paths(NULL, orig, sizeof(orig), boot, sizeof(boot))) {
+    if (!resolve_bootstrap_paths(NULL, orig, sizeof(orig), boot, sizeof(boot), 1)) {
         dbg_print("[eboot] repatch needed, but EBOOT_ORIGINAL.BIN not found\n");
         return 0;
     }
@@ -353,7 +406,11 @@ int taiko_start(unsigned int args, void *argp) {
             dbg_print(boot_args->eboot_path);
             dbg_print("\n");
         }
+    } else {
+        usrdir_seed_from_fpt();
     }
+
+    usrdir_install_hook();
 
     /* Load config first so feature gates below see runtime values. Falls
      * back to compile-time defaults if USRDIR isn't resolvable yet. */
@@ -391,7 +448,7 @@ int taiko_start(unsigned int args, void *argp) {
     {
         char orig[256], boot[256];
         if (resolve_bootstrap_paths(NULL, orig, sizeof(orig),
-                                    boot, sizeof(boot))) {
+                                    boot, sizeof(boot), 0)) {
             taiko_cfg_try_late_load();
         }
     }

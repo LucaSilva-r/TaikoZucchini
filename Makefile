@@ -71,6 +71,7 @@ PRX     := $(BIN_DIR)/$(TARGET_NAME).prx
 SPRX    := $(BIN_DIR)/$(TARGET_NAME).sprx
 SYM     := $(BIN_DIR)/$(TARGET_NAME).sym
 BOOTSTRAP_EBOOT := bootstrap_eboot/bin/eboot.elf
+FTP_EBOOT := ftp_eboot/bin/ftp_eboot.elf
 
 SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_init.c core/overlay.c eboot_fpt.c \
            mod_menu/menu.c mod_menu/menu_draw.c mod_menu/menu_pad.c mod_menu/menu_actions.c \
@@ -144,12 +145,16 @@ QUIRC_SRCS      := $(addprefix $(QUIRC_DIR)/lib/,$(QUIRC_SRC_NAMES))
 QUIRC_OBJS      := $(QUIRC_SRCS:.c=.o)
 OBJS            += $(QUIRC_OBJS)
 
-all: $(SPRX) $(BOOTSTRAP_EBOOT)
+all: $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
 
 bootstrap: $(BOOTSTRAP_EBOOT)
+ftp-eboot: $(FTP_EBOOT)
 
 $(BOOTSTRAP_EBOOT): bootstrap_eboot/Makefile bootstrap_eboot/main.c
 	$(MAKE) -C bootstrap_eboot CELL_SDK=$(CELL_SDK)
+
+$(FTP_EBOOT): ftp_eboot/Makefile ftp_eboot/main.c ftp_eboot/ftp_server.c ftp_eboot/ftp_server.h ftp_eboot/debug.c ftp_eboot/debug.h ftp_eboot/rsx_init.c ftp_eboot/rsx_init.h ftp_eboot/menu_draw.c ftp_eboot/menu_draw.h ftp_eboot/menu_font.h ftp_eboot/menu_font_20.h ftp_eboot/menu_font_28.h
+	$(MAKE) -C ftp_eboot CELL_SDK=$(CELL_SDK)
 
 $(BIN_DIR):
 	mkdir -p $@
@@ -246,5 +251,6 @@ install: $(SPRX)
 clean:
 	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 	$(MAKE) -C bootstrap_eboot clean
+	$(MAKE) -C ftp_eboot clean
 
-.PHONY: all bootstrap clean install
+.PHONY: all bootstrap ftp-eboot clean install

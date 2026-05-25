@@ -517,33 +517,51 @@ static int try_load(void) {
     if (!usrdir_resolve_path(TAIKO_CONFIG_NAME, path, sizeof path))
         return 0;
 
+    /* Never write defaults to a path resolved via the speculative
+     * fallbacks (self-module scan / PRX list scan) — with the SPRX
+     * shared at /dev_hdd0/plugins/, those can pick the wrong game
+     * folder and pollute it. Require an authoritative seed first. */
+    int authoritative = usrdir_path_authoritative();
+
     static char buf[8192];
     uint64_t got = 0;
     int read_ok = cfg_file_read(path, buf, sizeof buf - 1, &got);
 
     if (!read_ok || got == 0) {
+        if (!authoritative) {
+            dbg_print("[cfg] usrdir unauthoritative; defer default write\n");
+            return 0;
+        }
         dbg_print("[cfg] absent, writing defaults\n");
         write_cfg_file(path);
         g_loaded_from_file = 1;
         return 1;
+    }
+    if (!authoritative) {
+        /* Read succeeded from a guessed folder. Use the values
+         * in-memory but do not latch g_loaded_from_file so the
+         * late-load path can retry once the permit hook fires. */
+        dbg_print("[cfg] read from non-authoritative path; deferring latch\n");
     }
 
     buf[got] = 0;
     g_loaded_version = -1;
     cfg_file_parse(buf, (size_t)got,
                    SECTIONS, sizeof SECTIONS / sizeof SECTIONS[0]);
-    g_loaded_from_file = 1;
+    if (authoritative)
+        g_loaded_from_file = 1;
 
     /* No dongle_serial key seen at all (parser never fired for it). */
     if (!g_cfg.dongle_serial[0])
         coerce_dongle_serial_to_default("missing");
 
-    if (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset) {
+    if (authoritative &&
+        (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset)) {
         dbg_print_hex32("[cfg] rewriting; loaded version",
                         (uint32_t)g_loaded_version);
         write_cfg_file(path);
     }
-    return 1;
+    return authoritative;
 }
 
 void taiko_cfg_init(void) {

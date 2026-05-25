@@ -43,6 +43,13 @@ static uintptr_t fpt_size_for_slots(uint32_t slots) {
     return 16u + (uintptr_t)slots * sizeof(uint32_t) * 2u;
 }
 
+static uintptr_t fpt_total_size(uint32_t version, uint32_t slots) {
+    uintptr_t s = fpt_size_for_slots(slots);
+    if (version >= 2u)
+        s += TAIKO_FPT_USRDIR_MAX;
+    return s;
+}
+
 static taiko_fpt_t *find_fpt(void) {
     const fpt_elf64_ehdr_t *eh = (const fpt_elf64_ehdr_t *)(uintptr_t)ELF_BASE;
 
@@ -69,10 +76,10 @@ static taiko_fpt_t *find_fpt(void) {
              p + fpt_size_for_slots(TAIKO_FPT_V1_SLOT_COUNT) <= end; p += 0x10u) {
             volatile taiko_fpt_t *t = (volatile taiko_fpt_t *)p;
             if (t->magic == TAIKO_FPT_MAGIC &&
-                t->version == TAIKO_FPT_VERSION &&
+                t->version >= 1u && t->version <= TAIKO_FPT_VERSION &&
                 t->slot_count >= TAIKO_FPT_V1_SLOT_COUNT &&
                 t->slot_count <= TAIKO_FPT_SLOT_COUNT &&
-                p + fpt_size_for_slots(t->slot_count) <= end)
+                p + fpt_total_size(t->version, t->slot_count) <= end)
                 return (taiko_fpt_t *)p;
         }
     }
@@ -115,4 +122,15 @@ uintptr_t taiko_fpt_original_opd(uint32_t slot) {
         !t->got_slots[slot])
         return 0;
     return (uintptr_t)*(volatile uint32_t *)(uintptr_t)t->got_slots[slot];
+}
+
+const char *taiko_fpt_eboot_usrdir(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 2u)
+        return NULL;
+    if (!t->eboot_usrdir[0])
+        return NULL;
+    /* Guarantee NUL termination — patcher zeros the field but be defensive. */
+    t->eboot_usrdir[TAIKO_FPT_USRDIR_MAX - 1] = 0;
+    return t->eboot_usrdir;
 }
