@@ -491,10 +491,13 @@ static void cmd_dele(session_t *s, const char *arg) {
 static void cmd_mkd(session_t *s, const char *arg) {
     char p[MAX_PATH];
     resolve_path(s, arg, p, sizeof p);
-    if (cellFsMkdir(p, 0777) != CELL_FS_SUCCEEDED)
+    CellFsErrno rc = cellFsMkdir(p, CELL_FS_DEFAULT_CREATE_MODE_1);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print_hex32("[ftp] MKD cellFsMkdir rc", (uint32_t)rc);
         send_replyf(s, "550 Cannot create %s", p);
-    else
+    } else {
         send_replyf(s, "257 \"%s\" created", p);
+    }
 }
 
 static void cmd_rmd(session_t *s, const char *arg) {
