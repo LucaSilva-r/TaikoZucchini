@@ -88,6 +88,8 @@ typedef struct {
     uint32_t slot;
 } fpt_stub_patch_t;
 
+#define GREEN_HTTP_STUB_ANCHOR 0x00a1e8f0u
+
 static const fpt_stub_patch_t FPT_STUB_PATCHES[] = {
     { 0x00a1e8f0u, TAIKO_FPT_HTTP_BASE + 0 },
     { 0x00a1e910u, TAIKO_FPT_HTTP_BASE + 1 },
@@ -182,6 +184,71 @@ static uint32_t import_stub_got_slot_buf(const uint8_t *p) {
     return hi + (uint32_t)lo;
 }
 
+static int find_http_stub_anchor_buf(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                     uint16_t phnum, uint32_t *out_va) {
+    static const uint16_t http_stub_delta[] = {
+        0x0000u, 0x0020u, 0x0040u, 0x0060u, 0x0080u, 0x00A0u,
+        0x00C0u, 0x00E0u, 0x0100u, 0x0120u, 0x0140u, 0x0160u,
+        0x0180u, 0x01A0u, 0x01C0u, 0x01E0u, 0x0200u, 0x0220u,
+        0x0240u, 0x02C0u, 0x0260u, 0x0280u, 0x02A0u,
+    };
+    static const uint16_t http_got_delta[] = {
+        0x0000u, 0x0004u, 0x0008u, 0x000Cu, 0x0010u, 0x0014u,
+        0x0018u, 0x001Cu, 0x0020u, 0x0024u, 0x0028u, 0x002Cu,
+        0x0030u, 0x0034u, 0x0038u, 0x003Cu, 0x0040u, 0x0044u,
+        0x0048u, 0x004Cu, 0x01C8u, 0x01CCu, 0x01D0u,
+    };
+    uint32_t found = 0;
+    uint32_t count = 0;
+    int prefer_elf = use_elf_file_offsets(ctx);
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 0x300u)
+            continue;
+
+        for (uint64_t pos = 0; pos + 0x300u <= size; pos += 4u) {
+            uint32_t got_anchor = 0;
+            int ok = 1;
+
+            for (size_t j = 0; j < sizeof(http_stub_delta) / sizeof(http_stub_delta[0]); j++) {
+                const uint8_t *stub = ctx->buf + base + pos + http_stub_delta[j];
+                uint32_t got_slot;
+                if (!import_stub_matches_buf(stub)) {
+                    ok = 0;
+                    break;
+                }
+                got_slot = import_stub_got_slot_buf(stub);
+                if (j == 0)
+                    got_anchor = got_slot;
+                if (got_slot != got_anchor + http_got_delta[j]) {
+                    ok = 0;
+                    break;
+                }
+            }
+
+            if (!ok)
+                continue;
+            found = (uint32_t)(p->p_vaddr + pos);
+            count++;
+            if (count > 1)
+                break;
+        }
+        if (count > 1)
+            break;
+    }
+
+    if (count != 1)
+        return count == 0 ? -1 : -2;
+    *out_va = found;
+    return 0;
+}
+
 static void write_fpt_stub(uint8_t *dst, uint32_t slot_va) {
     uint32_t ha = (slot_va + 0x8000u) >> 16;
     uint32_t lo = slot_va & 0xffffu;
@@ -262,14 +329,25 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     store_be32(ctx->buf + fpt_off + 0x04, TAIKO_FPT_VERSION);
     store_be32(ctx->buf + fpt_off + 0x08, TAIKO_FPT_SLOT_COUNT);
 
+    uint32_t http_stub_anchor = 0;
+    int anchor_rc = find_http_stub_anchor_buf(ctx, phdrs, phnum, &http_stub_anchor);
+    if (anchor_rc != 0) {
+        dbg_print_hex32("[patch] FPT HTTP anchor scan failed", (uint32_t)anchor_rc);
+        return -20;
+    }
+    dbg_print_hex32("[patch] FPT HTTP anchor", http_stub_anchor);
+
     for (size_t i = 0; i < sizeof(FPT_STUB_PATCHES) / sizeof(FPT_STUB_PATCHES[0]); i++) {
         uint64_t stub_off = 0;
         const fpt_stub_patch_t *s = &FPT_STUB_PATCHES[i];
-        if (va_to_off(ctx, phdrs, phnum, s->stub_va, &stub_off) != 0 ||
+        int32_t delta = (int32_t)(s->stub_va - GREEN_HTTP_STUB_ANCHOR);
+        uint32_t stub_va = (uint32_t)((int64_t)http_stub_anchor + delta);
+        if (va_to_off(ctx, phdrs, phnum, stub_va, &stub_off) != 0 ||
             stub_off + 0x20u > ctx->buf_len)
             return -10;
         if (!import_stub_matches_buf(ctx->buf + stub_off)) {
-            dbg_print_hex32("[patch] FPT stub mismatch", s->stub_va);
+            dbg_print_hex32("[patch] FPT stub mismatch", stub_va);
+            dbg_print_hex32("[patch] FPT Green stub", s->stub_va);
             return -11;
         }
         store_be32(ctx->buf + fpt_off + offsetof(taiko_fpt_t, got_slots) +
