@@ -66,7 +66,7 @@ loader keys, or other proprietary key material.
    /dev_hdd0/plugins/taiko/keys/
    ```
 
-4. Copy your own TrueAncestor/scetool key files into the `keys` folder. The
+4. Copy your own signing key files into the `keys` folder. The
    patcher expects the files to be named `keys` and `ldr_curves`:
 
    ```text
@@ -198,8 +198,7 @@ workflow before installing it as `EBOOT.BIN`.
 ## Legal And Keys
 
 Bring your own legally obtained game files and key material. Taiko Zucchini
-does not distribute the Taiko game EBOOT, Sony SDK files, TrueAncestor/scetool
-keys, app loader keys, or other proprietary files.
+does not distribute the Taiko game EBOOT, Sony SDK files, app loader keys, or other proprietary files.
 
 Project code is released under the MIT license. Vendored dependencies and font
 assets keep their own licenses; see `THIRD_PARTY_NOTICES.md`.
