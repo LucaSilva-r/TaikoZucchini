@@ -100,6 +100,18 @@ After these steps, the important files should be arranged like this:
   EBOOT_ORIGINAL.BIN
 ```
 
+8. Copy the DATA00000.BIN file from the usb stick (usually found in /dev_usb000/VERSIONUP) into the USRDIR folder
+```text
+/dev_hdd0/plugins/taiko/
+  zucchini.sprx
+  keys/
+
+<Taiko Green USRDIR>/
+  EBOOT.BIN
+  EBOOT_ORIGINAL.BIN
+  DATA00000.BIN
+```
+
 ## First Boot
 
 The release `EBOOT.BIN` is only a bootstrap. Its job is to load:
