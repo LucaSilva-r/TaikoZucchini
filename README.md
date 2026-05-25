@@ -4,6 +4,22 @@ Taiko Zucchini is a PS3 SPRX mod for Taiko no Tatsujin Green on Namco
 System 357. It installs as a runtime plugin and uses a first-run bootstrap
 EBOOT to patch the game's original EBOOT on the console.
 
+## Features
+
+| Feature | What it does |
+|---------|--------------|
+| Dongle and VU patching | Lets the game pass the arcade USB dongle and VU storage checks without the original hardware. |
+| Chassisinfo redirect | Generates and redirects chassis information so the game can pass one of Taiko's more painful startup checks. |
+| EBOOT self-patching | Patches and re-signs the original EBOOT on first boot, then keeps the patched EBOOT up to date when the mod changes. |
+| Modern HTTPS support | Replaces parts of the game's old network path with an mbedTLS-backed client for modern TLS endpoints. |
+| Online redirect hooks | Provides HTTP, DNS, and socket hooks for private server routing and diagnostics. |
+| DualShock support | Maps controller input into the game's USIO-style input path. |
+| Keyboard support | Adds keyboard input for gameplay and operator actions. |
+| QR and camera support | Adds camera hooks and QR scanning support for Banapass-style card workflows. |
+| Mod menu | Provides an in-game configuration menu for common runtime options. |
+| FTP server | Starts an operator FTP server from the mod menu for easier file access. |
+| Overlay notifications | Shows runtime overlay messages, including update prompts, without relying on CFW-only notification APIs. |
+
 ## Compatibility
 
 **Big disclaimer:** Taiko Zucchini currently works only with **Taiko no
@@ -12,6 +28,13 @@ Tatsujin Green v11r01**.
 Do not install this release on another Taiko version unless support for that
 version is explicitly documented. The patcher depends on version-specific
 EBOOT layout and patch offsets.
+
+## Platform Requirements
+
+On retail PS3 consoles, Taiko Zucchini requires custom firmware.
+
+On original Namco System 357 hardware, the system needs the DEX firmware
+modules installed so the bootstrap and SPRX loading flow can run.
 
 ## Release Contents
 
@@ -95,6 +118,15 @@ needed for normal startup.
 
 Keep `EBOOT_ORIGINAL.BIN` in place. Future Taiko Zucchini updates may use it
 to regenerate the patched EBOOT when the patcher changes.
+
+## Preboot Mod Menu
+
+The mod menu opens during the early preboot window.
+
+- On a DualShock controller, hold **L3 + R3** for about 3 seconds while the
+  game is starting.
+- On a keyboard, repeatedly tap **F2** until the mod menu opens. Holding F2
+  before the keyboard is initialized may not register, so tap it a few times.
 
 ## Updating
 
