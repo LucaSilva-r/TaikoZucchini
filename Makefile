@@ -89,6 +89,7 @@ SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_i
            storage/data00000_redirect.c \
            storage/usio_backup.c \
            storage/usrdir_path.c \
+           storage/param_sfo_fix.c \
            hooks/camera_diag.c hooks/bpreader_hook.c \
            hooks/chassisinfo_hook.c storage/chassisinfo_synth.c \
            storage/chassisinfo_schema.c \

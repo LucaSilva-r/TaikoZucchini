@@ -27,6 +27,7 @@
 #include "kb_input.h"
 #include "taiko_frame.h"
 #include "usrdir_path.h"
+#include "param_sfo_fix.h"
 #include "eboot_flow.h"
 #include "patch_ui.h"
 #include "overlay.h"
@@ -471,6 +472,7 @@ int taiko_start(unsigned int args, void *argp) {
     }
 
     usrdir_install_hook();
+    param_sfo_fix_title_id();
 
     /* Load config first so feature gates below see runtime values. Falls
      * back to compile-time defaults if USRDIR isn't resolvable yet. */
