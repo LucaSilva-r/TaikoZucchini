@@ -1049,15 +1049,17 @@ void bpreader_hook_install(void) {
     g_usb_hooks[USB_HOOK_SCAN_STATIC].handler   = (const void *)hk_cellUsbdScanStaticDescriptor;
     g_usb_hooks[USB_HOOK_CTRL_TRANSFER].handler = (const void *)hk_cellUsbdControlTransfer;
 
+    int usio_enabled = g_cfg.usio_emulation;
+
     if (taiko_fpt_available()) {
         for (size_t i = 0; i < USB_STUB_COUNT; i++) {
             g_usb_hooks[i].original_opd =
                 taiko_fpt_original_opd(TAIKO_FPT_USB_BASE + (uint32_t)i);
             if (g_usb_hooks[i].original_opd)
-                taiko_fpt_publish(TAIKO_FPT_USB_BASE + (uint32_t)i,
-                                  (const void *)g_usb_hooks[i].original_opd);
+                taiko_fpt_publish_slot_only(TAIKO_FPT_USB_BASE + (uint32_t)i,
+                                            (const void *)g_usb_hooks[i].original_opd);
         }
-        if (!g_cfg.usio_emulation) {
+        if (!usio_enabled) {
             dbg_print("[bp] USIO FPT pass-through slots published\n");
             return;
         }
@@ -1072,14 +1074,14 @@ void bpreader_hook_install(void) {
         }
         for (size_t i = 0; i < USB_STUB_COUNT; i++) {
             if (g_usb_hooks[i].handler)
-                taiko_fpt_publish(TAIKO_FPT_USB_BASE + (uint32_t)i,
-                                  g_usb_hooks[i].handler);
+                taiko_fpt_publish_slot_only(TAIKO_FPT_USB_BASE + (uint32_t)i,
+                                            g_usb_hooks[i].handler);
         }
         dbg_print("[bp] USIO FPT slots published\n");
         return;
     }
 
-    if (!g_cfg.usio_emulation)
+    if (!usio_enabled)
         return;
 
     if (!resolve_hooks()) {

@@ -70,11 +70,11 @@ static const uint8_t order_st5100_7[] = {
 static const uint8_t order_st7100_1[] = {
     CI_F_IS_PROMOTION, CI_F_FORCE_OFFLINE, CI_F_FORCE_FREEPLAY,
     CI_F_FORCE_AUTOPLAY, CI_F_FORCE_SERIOUS,
-    CI_F_FORCE_MUSICINFO_ALLRELEASE, CI_F_FORCE_BURST_MODE,
+    CI_F_FORCE_MUSICINFO_ALLRELEASE,
     CI_F_IGNORE_NETWORK_AUTHENTICATION, CI_F_IGNORE_NETWORK_CONNECTION,
     CI_F_IGNORE_CLOSETIME, CI_F_IGNORE_NBLINEPOINT,
     CI_F_IGNORE_MUCHA_INVALID_ENFORCED,
-    CI_F_DISABLE_COUNTDOWNTIMER, CI_F_ANYTIME_TOKKUN,
+    CI_F_DISABLE_COUNTDOWNTIMER,
 };
 
 static const uint8_t order_st8100_1[] = {
@@ -123,11 +123,11 @@ static const chassisinfo_schema_t g_schemas[] = {
     { "ST5100-1", 0x20140107, order_st5100_1, COUNT_OF(order_st5100_1), "disable_songselect_countdown" },
     { "ST5100-7", 0x20140714, order_st5100_7, COUNT_OF(order_st5100_7), "disable_songselect_countdown" },
     { "ST6100-1", 0x20140107, order_st6100_1, COUNT_OF(order_st6100_1), "disable_songselect_countdown" },
-    { "ST7100-1", 0x20160407, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
+    { "ST7100-1", 0x20150212, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
     { "ST8100-1", 0x20160809, order_st8100_1, COUNT_OF(order_st8100_1), "disable_countdowntimer" },
     /* ST8100-7 (Red, title-code ST87) ships the same chassisinfo
      * schema as ST7100-1, despite the ST8100 directory name. */
-    { "ST8100-7", 0x20160407, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
+    { "ST8100-7", 0x20150212, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
     { "ST9100-1", 0x20160809, order_st9100_1, COUNT_OF(order_st9100_1), "disable_countdowntimer" },
     { "S10100-1", 0x20180914, order_s10100_1, COUNT_OF(order_s10100_1), "disable_countdowntimer" },
     { "S11100-1", 0x20190415, order_s11100_1, COUNT_OF(order_s11100_1), "disable_countdowntimer" },

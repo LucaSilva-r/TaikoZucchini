@@ -40,6 +40,7 @@ typedef struct {
     uintptr_t dongle_auth_stat_success;
     uintptr_t fcntl_dispatch;
     uintptr_t fcntl_dongle_threshold;
+    int fcntl_dongle_below_threshold;
     uintptr_t usio_endpoint_filter;
     uintptr_t ps3a_usj_exact_pid;
 } usb_patch_sites_t;
@@ -66,7 +67,7 @@ static const usb_patch_sites_t GREEN_USB_SITES = {
     0x009288F8u, 0x00928910u, 0x00928870u, 0x00928948u,
     0x00928A94u, 0x00928A10u, 0x00928AE4u,
     0x00927080u, 0x009270D0u, 0x00927804u, 0x00927890u,
-    0x00939454u, 0x00927748u,
+    0x00939454u, 0x00927748u, 0,
     0x004184C4u, 0x004190BCu,
 };
 
@@ -192,6 +193,73 @@ static int import_stub_matches(uintptr_t addr, uintptr_t *got_slot) {
     return 1;
 }
 
+static int import_stub_for_got(uintptr_t got_slot, uintptr_t *out_stub) {
+    uintptr_t found = 0;
+    uint32_t count = 0;
+
+    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 32u <= CFG_SCAN_TEXT_END; p += 4u) {
+        uintptr_t cur_got = 0;
+        if (!import_stub_matches(p, &cur_got) || cur_got != got_slot)
+            continue;
+        found = p;
+        count++;
+        if (count > 1)
+            break;
+    }
+
+    if (count == 1) {
+        *out_stub = found;
+        return 1;
+    }
+    return 0;
+}
+
+static int find_import_stub_by_fnid(uint32_t fnid, uintptr_t *out_stub) {
+    enum { DESCRIPTOR_SCAN_END = 0x00E00000u };
+    uintptr_t found = 0;
+    uint32_t count = 0;
+
+    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x2Cu <= DESCRIPTOR_SCAN_END; p += 4u) {
+        uint32_t h0 = pt_read32(T, p + 0x00u);
+        if (h0 != 0x2C000001u)
+            continue;
+
+        uint32_t h1 = pt_read32(T, p + 0x04u);
+        uint32_t num_func = h1 & 0xFFFFu;
+        if (num_func == 0 || num_func > 512)
+            continue;
+
+        uint32_t libname_va = pt_read32(T, p + 0x10u);
+        uint32_t fnids_va   = pt_read32(T, p + 0x14u);
+        uint32_t stubs_va   = pt_read32(T, p + 0x18u);
+        if (libname_va < CFG_SCAN_TEXT_START || fnids_va < CFG_SCAN_TEXT_START ||
+            stubs_va < CFG_SCAN_TEXT_START)
+            continue;
+
+        for (uint32_t i = 0; i < num_func; i++) {
+            if (pt_read32(T, fnids_va + i * 4u) != fnid)
+                continue;
+
+            uintptr_t stub = 0;
+            uintptr_t got_slot = stubs_va + i * 4u;
+            if (!import_stub_for_got(got_slot, &stub))
+                continue;
+            found = stub;
+            count++;
+            if (count > 1)
+                break;
+        }
+        if (count > 1)
+            break;
+    }
+
+    if (count == 1) {
+        *out_stub = found;
+        return 1;
+    }
+    return 0;
+}
+
 static int find_http_stub_anchor(uintptr_t *out) {
     static const uint16_t http_stub_delta[] = {
         0x0000u, 0x0020u, 0x0040u, 0x0060u, 0x0080u, 0x00A0u,
@@ -286,6 +354,10 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         0x3B6100CCu, 0x78630020u, 0x7F64DB78u, 0x48000001u,
         0xE8410028u, 0x2F830000u, 0x419E0050u,
     };
+    static const uint32_t vu_auth_stat_white_orig[] = {
+        0x3B2100CCu, 0x78630020u, 0x7F24CB78u, 0x48000001u,
+        0xE8410028u, 0x2F830000u, 0x419E0050u,
+    };
     static const uint32_t vu_auth_stat_mask[] = {
         0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFC000003u,
         0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
@@ -339,8 +411,13 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
                                   vu_auth_stat_mask,
                                   sizeof(vu_auth_stat_orig) / 4,
                                   &s->vu_auth_stat_branch)) {
-        dbg_print("[patch] USB scan failed: VU auth stat signature\n");
-        return 0;
+        if (!find_unique_masked_words(start, end, vu_auth_stat_white_orig,
+                                      vu_auth_stat_mask,
+                                      sizeof(vu_auth_stat_white_orig) / 4,
+                                      &s->vu_auth_stat_branch)) {
+            dbg_print("[patch] USB scan failed: VU auth stat signature\n");
+            return 0;
+        }
     }
     if (!find_unique_masked_words(start, end, dongle_auth_stat_orig,
                                   dongle_auth_stat_mask,
@@ -372,7 +449,17 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
     s->vu_auth_stat_success = s->vu_auth_stat_branch + 0x50u;
     s->dongle_auth_stat_branch += 0x18u;
     s->dongle_auth_stat_success = s->dongle_auth_stat_branch + 0x8Cu;
-    s->fcntl_dongle_threshold = s->dongle_probe - 0x11C8u;
+    if (s->dongle_auth_stat_branch < s->vu_auth_stat_branch) {
+        s->fcntl_dongle_below_threshold = 1;
+        s->fcntl_dongle_threshold =
+            s->dongle_auth_stat_branch +
+            ((s->vu_auth_stat_branch - s->dongle_auth_stat_branch) / 2u);
+    } else {
+        s->fcntl_dongle_below_threshold = 0;
+        s->fcntl_dongle_threshold =
+            s->vu_auth_stat_branch +
+            ((s->dongle_auth_stat_branch - s->vu_auth_stat_branch) / 2u);
+    }
 
     dbg_print("[patch] USB runtime scan resolved sites\n");
     dbg_print_hex32("[patch] dongle_hard_probe", (uint32_t)s->dongle_hard_probe);
@@ -414,6 +501,30 @@ static uint32_t branch_bne_cr7(uintptr_t src, uintptr_t dst) {
 
 static uint32_t cmpwi_cr7(uint32_t ra, int32_t imm) {
     return (11u << 26) | (7u << 23) | (ra << 16) | ((uint32_t)imm & 0xFFFFu);
+}
+
+static int32_t sx16(uint32_t v) {
+    return (int32_t)(int16_t)(v & 0xFFFFu);
+}
+
+static int32_t sx26(uint32_t v) {
+    v &= 0x03FFFFFCu;
+    if (v & 0x02000000u)
+        v |= 0xFC000000u;
+    return (int32_t)v;
+}
+
+static uintptr_t branch_target(uintptr_t src, uint32_t w) {
+    uint32_t op = w >> 26;
+    if (op == 18u) {
+        uintptr_t base = (w & 2u) ? 0u : src;
+        return base + (uintptr_t)sx26(w);
+    }
+    if (op == 16u) {
+        uintptr_t base = (w & 2u) ? 0u : src;
+        return base + (uintptr_t)sx16(w);
+    }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -459,13 +570,16 @@ static void apply_auth_stat_bypass(void) {
 /*    Replaces 184 bytes with a caller-aware mock.                    */
 /* ------------------------------------------------------------------ */
 
-static void encode_fcntl_prefix(uint32_t *out, uintptr_t threshold) {
+static void encode_fcntl_prefix(uint32_t *out, uintptr_t threshold,
+                                int dongle_below_threshold) {
     *out++ = 0x7C0802A6u;                         /* mflr  r0 */
     *out++ = 0x3CA00000u | ((threshold >> 16) & 0xFFFFu);
                                                     /* lis r5,threshold@h */
     *out++ = 0x60A50000u | (threshold & 0xFFFFu);  /* ori r5,r5,threshold@l */
     *out++ = 0x7C002840u;                         /* cmplw cr0,r0,r5 */
-    *out++ = 0x40800040u;                         /* bge cr0,+0x40 -> dongle */
+    *out++ = dongle_below_threshold
+        ? 0x41800040u                             /* blt cr0,+0x40 -> dongle */
+        : 0x40800040u;                            /* bge cr0,+0x40 -> dongle */
 
     *out++ = 0x380013FEu; /* VU: idVendor */
     *out++ = 0xB0040000u;
@@ -523,7 +637,9 @@ static void apply_fcntl_dispatch(void) {
     uint32_t payload[TOTAL_W];
     uint32_t *p = payload;
 
-    encode_fcntl_prefix(p, g_usb_sites.fcntl_dongle_threshold); p += PREFIX_W;
+    encode_fcntl_prefix(p, g_usb_sites.fcntl_dongle_threshold,
+                        g_usb_sites.fcntl_dongle_below_threshold);
+    p += PREFIX_W;
     encode_serial_writes(p, serial);                 p += SERIAL_W;
     memcpy(p, fcntl_suffix, sizeof(fcntl_suffix));
 
@@ -630,8 +746,46 @@ static int resolve_xmb_exit_sites(xmb_exit_sites_t *s) {
     if (!find_unique_masked_words(CFG_SCAN_TEXT_START, 0x00300000u,
                                   xmb_orig, xmb_mask,
                                   sizeof(xmb_orig) / 4, &xmb_sig)) {
-        dbg_print("[patch] XMB scan failed: exit caller signature\n");
-        return 0;
+        uintptr_t found = 0;
+        uint32_t count = 0;
+
+        for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x40u <= CFG_SCAN_TEXT_END; p += 4u) {
+            uint32_t cmp = pt_read32(T, p);
+            uint32_t bc  = pt_read32(T, p + 4u);
+            uintptr_t target = 0;
+            uintptr_t candidate = 0;
+
+            if ((cmp & 0xFFE00000u) != 0x2FA00000u || (cmp & 0xFFFFu) != 0x0101u)
+                continue;
+            if ((bc >> 26) != 16u)
+                continue;
+
+            target = branch_target(p + 4u, bc);
+            if ((pt_read32(T, target) >> 26) == 18u &&
+                pt_read32(T, target + 0x0Cu) == 0x68630001u &&
+                pt_read32(T, target + 0x10u) == 0x7C60FE70u) {
+                candidate = target;
+            } else if ((pt_read32(T, p + 8u) >> 26) == 18u &&
+                       pt_read32(T, p + 0x14u) == 0x68630001u &&
+                       pt_read32(T, p + 0x18u) == 0x7C60FE70u) {
+                candidate = p + 8u;
+            }
+
+            if (!candidate)
+                continue;
+            found = candidate;
+            count++;
+            if (count > 1)
+                break;
+        }
+
+        if (count != 1) {
+            dbg_print("[patch] XMB scan failed: exit caller signature\n");
+            return 0;
+        }
+        s->patch_site = found;
+    } else {
+        s->patch_site = xmb_sig + 0x20u;
     }
     if (!find_unique_masked_words(CFG_SCAN_TEXT_START, 0x00300000u,
                                   process_exit_orig, process_exit_mask,
@@ -641,7 +795,6 @@ static int resolve_xmb_exit_sites(xmb_exit_sites_t *s) {
         return 0;
     }
 
-    s->patch_site = xmb_sig + 0x20u;
     dbg_print("[patch] XMB runtime scan resolved sites\n");
     dbg_print_hex32("[patch] xmb_exit_site", (uint32_t)s->patch_site);
     dbg_print_hex32("[patch] process_exit", (uint32_t)s->process_exit);
@@ -684,6 +837,11 @@ static void apply_xmb_exit_patch(void) {
 static int resolve_watchdog_sites(watchdog_sites_t *s) {
 #if CFG_RUNTIME_SCAN_WATCHDOG_PATCHES
     uintptr_t http_anchor = 0;
+    static const uint32_t watchdog_fnids[] = {
+        0x6E05231Du, /* sys_game_watchdog_stop */
+        0x9E0623B5u, /* sys_game_watchdog_start */
+        0xACAD8FB6u, /* sys_game_watchdog_clear */
+    };
     static const uint16_t watchdog_delta_green[] = {
         0x0D30u, 0x0DD0u, 0x0E70u,
     };
@@ -693,8 +851,17 @@ static int resolve_watchdog_sites(watchdog_sites_t *s) {
     const uint16_t *watchdog_delta = watchdog_delta_green;
 
     if (!find_http_stub_anchor(&http_anchor)) {
-        dbg_print("[patch] watchdog scan failed: HTTP stub anchor\n");
-        return 0;
+        for (size_t i = 0; i < 3; i++) {
+            if (!find_import_stub_by_fnid(watchdog_fnids[i], &s->tails[i])) {
+                dbg_print("[patch] watchdog scan failed: HTTP stub anchor/FNID fallback\n");
+                return 0;
+            }
+        }
+        dbg_print("[patch] watchdog runtime scan resolved sites\n");
+        dbg_print_hex32("[patch] watchdog_0", (uint32_t)s->tails[0]);
+        dbg_print_hex32("[patch] watchdog_1", (uint32_t)s->tails[1]);
+        dbg_print_hex32("[patch] watchdog_2", (uint32_t)s->tails[2]);
+        return 1;
     }
 
     for (size_t i = 0; i < 3; i++) {

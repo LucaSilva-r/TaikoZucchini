@@ -63,6 +63,8 @@ typedef struct {
 } taiko_fpt_t;
 
 int taiko_fpt_publish(uint32_t slot, const void *opd);
+/* Update only the FPT dispatch slot. Direct GOT callers keep the original OPD. */
+int taiko_fpt_publish_slot_only(uint32_t slot, const void *opd);
 uintptr_t taiko_fpt_original_opd(uint32_t slot);
 int taiko_fpt_available(void);
 

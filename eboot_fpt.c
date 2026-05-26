@@ -114,6 +114,15 @@ int taiko_fpt_publish(uint32_t slot, const void *opd) {
     return 1;
 }
 
+int taiko_fpt_publish_slot_only(uint32_t slot, const void *opd) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || slot >= t->slot_count || slot >= TAIKO_FPT_SLOT_COUNT)
+        return 0;
+
+    t->slots[slot] = (uint32_t)(uintptr_t)opd;
+    return 1;
+}
+
 uintptr_t taiko_fpt_original_opd(uint32_t slot) {
     taiko_fpt_t *t = get_fpt();
     if (!t || slot >= t->slot_count || slot >= TAIKO_FPT_SLOT_COUNT ||

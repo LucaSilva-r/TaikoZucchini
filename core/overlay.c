@@ -338,11 +338,11 @@ void taiko_overlay_hooks_install(void) {
 
     int ok = 1;
     if (g_orig_flip_command)
-        ok &= taiko_fpt_publish(TAIKO_FPT_GCM_FLIP_COMMAND,
-                                (const void *)hk_flip_command);
+        ok &= taiko_fpt_publish_slot_only(TAIKO_FPT_GCM_FLIP_COMMAND,
+                                          (const void *)hk_flip_command);
     if (g_orig_set_display_buffer)
-        ok &= taiko_fpt_publish(TAIKO_FPT_GCM_SET_DISPLAY_BUFFER,
-                                (const void *)hk_set_display_buffer);
+        ok &= taiko_fpt_publish_slot_only(TAIKO_FPT_GCM_SET_DISPLAY_BUFFER,
+                                          (const void *)hk_set_display_buffer);
 
     if (ok && g_orig_flip_command && g_orig_set_display_buffer)
         dbg_print("[overlay] GCM hooks installed\n");
