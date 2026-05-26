@@ -125,8 +125,9 @@ static const chassisinfo_schema_t g_schemas[] = {
     { "ST6100-1", 0x20140107, order_st6100_1, COUNT_OF(order_st6100_1), "disable_songselect_countdown" },
     { "ST7100-1", 0x20160407, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
     { "ST8100-1", 0x20160809, order_st8100_1, COUNT_OF(order_st8100_1), "disable_countdowntimer" },
-    /* ST8100-7 (Red, title-code ST87) reuses ST8100-1's field set. */
-    { "ST8100-7", 0x20160809, order_st8100_1, COUNT_OF(order_st8100_1), "disable_countdowntimer" },
+    /* ST8100-7 (Red, title-code ST87) ships the same chassisinfo
+     * schema as ST7100-1, despite the ST8100 directory name. */
+    { "ST8100-7", 0x20160407, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
     { "ST9100-1", 0x20160809, order_st9100_1, COUNT_OF(order_st9100_1), "disable_countdowntimer" },
     { "S10100-1", 0x20180914, order_s10100_1, COUNT_OF(order_s10100_1), "disable_countdowntimer" },
     { "S11100-1", 0x20190415, order_s11100_1, COUNT_OF(order_s11100_1), "disable_countdowntimer" },
