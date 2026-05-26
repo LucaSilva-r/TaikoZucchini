@@ -1,7 +1,7 @@
 #ifndef TAIKO_CONFIG_VERSION_H
 #define TAIKO_CONFIG_VERSION_H
 
-#define TAIKO_MOD_VERSION "0.3.0"
+#define TAIKO_MOD_VERSION "0.4.0"
 #define TAIKO_UPDATE_RELEASE_URL \
     "https://api.github.com/repos/LucaSilva-r/TaikoZucchini/releases/latest"
 
