@@ -6,7 +6,6 @@
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
 #define TAIKO_FPT_VERSION 2u
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
-#define TAIKO_FPT_USRDIR_MAX 256u
 
 enum {
     TAIKO_FPT_HTTP_BASE = 0,
@@ -61,15 +60,10 @@ typedef struct {
     uint32_t reserved;
     uint32_t got_slots[TAIKO_FPT_SLOT_COUNT];
     uint32_t slots[TAIKO_FPT_SLOT_COUNT];
-    /* v2+ only. Patcher writes the EBOOT's USRDIR (no trailing slash).
-     * Empty when the FPT in memory is v1 (older patched EBOOT). */
-    char     eboot_usrdir[TAIKO_FPT_USRDIR_MAX];
 } taiko_fpt_t;
 
 int taiko_fpt_publish(uint32_t slot, const void *opd);
 uintptr_t taiko_fpt_original_opd(uint32_t slot);
 int taiko_fpt_available(void);
-/* Returns NULL when FPT absent, version < 2, or string empty. */
-const char *taiko_fpt_eboot_usrdir(void);
 
 #endif

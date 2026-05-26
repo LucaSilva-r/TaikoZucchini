@@ -41,6 +41,8 @@ SYS_MODULE_STOP(taiko_stop);
 
 #define TAIKO_BOOTSTRAP_ARG_MAGIC 0x544B4254u /* TKBT */
 #define TAIKO_BOOTSTRAP_ARG_VERSION 1u
+#define TAIKO_LOADER_ARG_MAGIC 0x544B4C52u /* TKLR */
+#define TAIKO_LOADER_ARG_VERSION 1u
 #define TAIKO_PRX_PATH "/dev_hdd0/plugins/taiko/zucchini.sprx"
 #define TAIKO_KEYS_DIR "/dev_hdd0/plugins/taiko/keys"
 
@@ -50,6 +52,13 @@ typedef struct {
     char eboot_path[256];
     char usrdir[256];
 } taiko_bootstrap_args_t;
+
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t eboot_path;
+    uint32_t reserved;
+} taiko_loader_args_t;
 
 static int file_exists(const char *path) {
     CellFsStat st;
@@ -67,6 +76,29 @@ static int append_path3(char *out, size_t out_size,
     memcpy(out + al, b, bl);
     memcpy(out + al + bl, c, cl);
     out[al + bl + cl] = 0;
+    return 1;
+}
+
+static int seed_usrdir_from_eboot_path(const char *path) {
+    if (!path)
+        return 0;
+
+    const char *hit = NULL;
+    for (const char *p = path; *p; p++) {
+        if (p[0] == '/' && p[1] == 'U' && p[2] == 'S' && p[3] == 'R' &&
+            p[4] == 'D' && p[5] == 'I' && p[6] == 'R' && p[7] == '/')
+            hit = p;
+    }
+    if (!hit)
+        return 0;
+
+    char usrdir[256];
+    size_t len = (size_t)((hit - path) + 7); /* through USRDIR */
+    if (len >= sizeof(usrdir))
+        return 0;
+    memcpy(usrdir, path, len);
+    usrdir[len] = 0;
+    usrdir_seed_path(usrdir);
     return 1;
 }
 
@@ -387,8 +419,21 @@ int taiko_start(unsigned int args, void *argp) {
 
     dbg_log_reset();
     dbg_print("Taiko Zucchini SPRX loaded.\n");
+    dbg_print_hex32("[eboot] raw args", args);
+    dbg_print_hex32("[eboot] raw argp", (uint32_t)(uintptr_t)argp);
+    if (argp && args >= 4u) {
+        const uint32_t *raw = (const uint32_t *)argp;
+        dbg_print_hex32("[eboot] argp[0]", raw[0]);
+        if (args >= 8u)
+            dbg_print_hex32("[eboot] argp[1]", raw[1]);
+        if (args >= 12u)
+            dbg_print_hex32("[eboot] argp[2]", raw[2]);
+        if (args >= 16u)
+            dbg_print_hex32("[eboot] argp[3]", raw[3]);
+    }
 
     const taiko_bootstrap_args_t *boot_args = NULL;
+    const char *loader_eboot_path = NULL;
     if (args >= sizeof(taiko_bootstrap_args_t) && argp) {
         const taiko_bootstrap_args_t *candidate =
             (const taiko_bootstrap_args_t *)argp;
@@ -396,6 +441,16 @@ int taiko_start(unsigned int args, void *argp) {
             candidate->version == TAIKO_BOOTSTRAP_ARG_VERSION) {
             boot_args = candidate;
             dbg_print("[eboot] bootstrap arg received\n");
+        }
+    }
+    if (!boot_args && args >= sizeof(taiko_loader_args_t) && argp) {
+        const taiko_loader_args_t *candidate =
+            (const taiko_loader_args_t *)argp;
+        if (candidate->magic == TAIKO_LOADER_ARG_MAGIC &&
+            candidate->version == TAIKO_LOADER_ARG_VERSION &&
+            candidate->eboot_path) {
+            loader_eboot_path = (const char *)(uintptr_t)candidate->eboot_path;
+            dbg_print("[eboot] loader argv arg received\n");
         }
     }
 
@@ -406,8 +461,13 @@ int taiko_start(unsigned int args, void *argp) {
             dbg_print(boot_args->eboot_path);
             dbg_print("\n");
         }
+    } else if (loader_eboot_path &&
+               seed_usrdir_from_eboot_path(loader_eboot_path)) {
+        dbg_print("[eboot] loader argv path: ");
+        dbg_print(loader_eboot_path);
+        dbg_print("\n");
     } else {
-        usrdir_seed_from_fpt();
+        dbg_print("[usrdir] argv/bootstrap seed unavailable\n");
     }
 
     usrdir_install_hook();
@@ -439,11 +499,8 @@ int taiko_start(unsigned int args, void *argp) {
         return SYS_PRX_RESIDENT;
 
     /* Boot B (loaded by the patched EBOOT via the sprx_loader trampoline).
-     * USRDIR is not yet resolvable at this stage so the config can't load
-     * reliably, which used to trip the auto-repatch path. The trampoline
-     * having fired is itself proof the EBOOT is already patched, so just
-     * stay resident — re-patching only happens via an explicit bootstrap
-     * run. */
+     * The trampoline passes the game's argv[0] when available, so USRDIR can
+     * be resolved before config and repatch checks. */
     dbg_print("[runtime] patched EBOOT loaded zucchini.sprx via sprx_loader trampoline\n");
     {
         char orig[256], boot[256];

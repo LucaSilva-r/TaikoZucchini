@@ -16,8 +16,10 @@
 #include "debug.h"
 #include "http_client.h"
 #include "overlay.h"
+#include "usrdir_path.h"
 
 #define TAIKO_UPDATE_PLUGIN_PATH "/dev_hdd0/plugins/taiko/zucchini.sprx"
+#define TAIKO_UPDATE_EBOOT_TMP_TAIL "EBOOT.BIN.update"
 #define TAIKO_UPDATE_WAIT_TICKS  400   /* 20s at 50ms per tick. */
 #define TAIKO_UPDATE_HOLD_TICKS   30   /* 1.5s hold confirmation. */
 #define TAIKO_UPDATE_REFRESH_TICKS 36  /* Keep the 120-frame toast visible. */
@@ -128,34 +130,42 @@ static int extract_json_string_after(const unsigned char *body, size_t len,
     return 0;
 }
 
-static int extract_asset_url(const unsigned char *body, size_t len,
-                             char *out, size_t cap) {
+static int looks_like_sprx_asset(const char *s) {
+    return str_has(s, ".sprx") || str_has(s, "zucchini");
+}
+
+static int looks_like_eboot_asset(const char *s) {
+    return str_has(s, "EBOOT.BIN") || str_has(s, "eboot.bin") ||
+           str_has(s, "EBOOT") || str_has(s, "eboot");
+}
+
+static int extract_asset_urls(const unsigned char *body, size_t len,
+                              char *sprx_out, size_t sprx_cap,
+                              char *eboot_out, size_t eboot_cap) {
     static const char key[] = "\"browser_download_url\"";
-    char first[1536];
     char cur[1536];
     size_t pos = 0;
-    int have_first = 0;
 
-    out[0] = 0;
+    if (!sprx_out || sprx_cap == 0 || !eboot_out || eboot_cap == 0)
+        return 0;
+    sprx_out[0] = 0;
+    eboot_out[0] = 0;
+
     while (extract_json_string_after(body, len, key, &pos, cur, sizeof cur)) {
-        if (!have_first) {
-            strncpy(first, cur, sizeof first);
-            first[sizeof first - 1] = 0;
-            have_first = 1;
+        if (!sprx_out[0] && looks_like_sprx_asset(cur)) {
+            strncpy(sprx_out, cur, sprx_cap);
+            sprx_out[sprx_cap - 1] = 0;
         }
-        if (str_has(cur, ".sprx") || str_has(cur, "zucchini")) {
-            strncpy(out, cur, cap);
-            out[cap - 1] = 0;
+        if (!eboot_out[0] && looks_like_eboot_asset(cur)) {
+            strncpy(eboot_out, cur, eboot_cap);
+            eboot_out[eboot_cap - 1] = 0;
+        }
+        if (sprx_out[0] && eboot_out[0])
             return 1;
-        }
         pos++;
     }
 
-    if (!have_first)
-        return 0;
-    strncpy(out, first, cap);
-    out[cap - 1] = 0;
-    return 1;
+    return 0;
 }
 
 static int copy_header_value(const http_response_t *resp, const char *name,
@@ -220,6 +230,42 @@ static int write_whole_file(const char *path, const unsigned char *buf,
     return (rc == CELL_FS_SUCCEEDED && wrote == len) ? 0 : -2;
 }
 
+static int replace_file_with_buffer(const char *path, const char *tmp_path,
+                                    const unsigned char *buf, size_t len) {
+    int rc;
+
+    if (!path || !tmp_path || !buf || len == 0)
+        return -1;
+    cellFsUnlink(tmp_path);
+    rc = write_whole_file(tmp_path, buf, len);
+    if (rc != 0) {
+        cellFsUnlink(tmp_path);
+        return -2;
+    }
+    cellFsUnlink(path);
+    if (cellFsRename(tmp_path, path) != CELL_FS_SUCCEEDED) {
+        cellFsUnlink(tmp_path);
+        return -3;
+    }
+    return 0;
+}
+
+static int download_asset(const char *url, http_response_t *asset,
+                          const char *fail_log) {
+    int rc;
+
+    memset(asset, 0, sizeof *asset);
+    rc = http_get_direct_follow(url, asset);
+    if (rc != 0 || asset->status < 200 || asset->status >= 300 ||
+        !asset->body || asset->body_len == 0) {
+        dbg_print(fail_log);
+        dbg_print("\n");
+        http_response_free(asset);
+        return -1;
+    }
+    return 0;
+}
+
 static int update_combo_held(void) {
     static uint16_t cache_d1[CELL_PAD_MAX_PORT_NUM];
     static uint8_t cache_valid[CELL_PAD_MAX_PORT_NUM];
@@ -272,27 +318,52 @@ static int wait_for_update_combo(const char *latest) {
     return 0;
 }
 
-static int download_and_install_update(const char *asset_url) {
-    http_response_t asset;
+static int download_and_install_update(const char *sprx_url,
+                                       const char *eboot_url) {
+    http_response_t sprx_asset;
+    http_response_t eboot_asset;
+    char eboot_path[256];
+    char eboot_tmp_path[256];
     int rc;
 
     taiko_overlay_show_message("Downloading update...");
-    memset(&asset, 0, sizeof asset);
-    rc = http_get_direct_follow(asset_url, &asset);
-    if (rc != 0 || asset.status < 200 || asset.status >= 300 ||
-        !asset.body || asset.body_len == 0) {
-        dbg_print("[version] update download failed\n");
-        http_response_free(&asset);
+    if (!usrdir_resolve_path("EBOOT.BIN", eboot_path, sizeof eboot_path) ||
+        !usrdir_resolve_path(TAIKO_UPDATE_EBOOT_TMP_TAIL,
+                             eboot_tmp_path, sizeof eboot_tmp_path)) {
+        dbg_print("[version] update EBOOT path unavailable\n");
         taiko_overlay_show_message("Update download failed");
         return -1;
     }
 
-    rc = write_whole_file(TAIKO_UPDATE_PLUGIN_PATH, asset.body, asset.body_len);
-    http_response_free(&asset);
-    if (rc != 0) {
-        dbg_print_hex32("[version] update write rc", (uint32_t)rc);
-        taiko_overlay_show_message("Update install failed");
+    if (download_asset(sprx_url, &sprx_asset,
+                       "[version] SPRX update download failed") != 0) {
+        taiko_overlay_show_message("Update download failed");
         return -2;
+    }
+    if (download_asset(eboot_url, &eboot_asset,
+                       "[version] EBOOT update download failed") != 0) {
+        http_response_free(&sprx_asset);
+        taiko_overlay_show_message("Update download failed");
+        return -3;
+    }
+
+    rc = write_whole_file(TAIKO_UPDATE_PLUGIN_PATH,
+                          sprx_asset.body, sprx_asset.body_len);
+    http_response_free(&sprx_asset);
+    if (rc != 0) {
+        http_response_free(&eboot_asset);
+        dbg_print_hex32("[version] SPRX update write rc", (uint32_t)rc);
+        taiko_overlay_show_message("Update install failed");
+        return -4;
+    }
+
+    rc = replace_file_with_buffer(eboot_path, eboot_tmp_path,
+                                  eboot_asset.body, eboot_asset.body_len);
+    http_response_free(&eboot_asset);
+    if (rc != 0) {
+        dbg_print_hex32("[version] EBOOT update write rc", (uint32_t)rc);
+        taiko_overlay_show_message("Update install failed");
+        return -5;
     }
 
     taiko_overlay_show_message("Update installed. Restarting...");
@@ -342,6 +413,7 @@ static int copy_file_replace(const char *src, const char *dst) {
 
 static int install_update_from_local_file(const char *path) {
     int rc;
+    char eboot_path[256];
 
     taiko_overlay_show_message("Installing local update...");
     rc = copy_file_replace(path, TAIKO_UPDATE_PLUGIN_PATH);
@@ -349,6 +421,19 @@ static int install_update_from_local_file(const char *path) {
         dbg_print_hex32("[version] local update copy rc", (uint32_t)rc);
         taiko_overlay_show_message("Local update failed");
         return rc;
+    }
+
+    if (usrdir_resolve_path("EBOOT.BIN", eboot_path, sizeof eboot_path)) {
+        rc = copy_file_replace(TAIKO_UPDATE_LOCAL_EBOOT_PATH, eboot_path);
+        if (rc != 0) {
+            dbg_print_hex32("[version] local EBOOT copy rc", (uint32_t)rc);
+            taiko_overlay_show_message("Local update failed");
+            return rc;
+        }
+    } else {
+        dbg_print("[version] local update EBOOT path unavailable\n");
+        taiko_overlay_show_message("Local update failed");
+        return -10;
     }
 
     taiko_overlay_show_message("Update installed. Restarting...");
@@ -378,16 +463,20 @@ static void version_check_thread(uint64_t arg) {
     }
 
     char latest[32];
-    char asset_url[1536];
+    char sprx_url[1536];
+    char eboot_url[1536];
     if (extract_tag_name(resp.body, resp.body_len, latest, sizeof(latest)) &&
         version_newer(latest, TAIKO_MOD_VERSION)) {
         dbg_print("[version] newer release available: ");
         dbg_print(latest);
         dbg_print("\n");
-        if (extract_asset_url(resp.body, resp.body_len,
-                              asset_url, sizeof asset_url) &&
+        if (extract_asset_urls(resp.body, resp.body_len,
+                               sprx_url, sizeof sprx_url,
+                               eboot_url, sizeof eboot_url) &&
             wait_for_update_combo(latest)) {
-            download_and_install_update(asset_url);
+            download_and_install_update(sprx_url, eboot_url);
+        } else if (!sprx_url[0] || !eboot_url[0]) {
+            dbg_print("[version] release missing SPRX or EBOOT asset\n");
         }
     }
 

@@ -204,26 +204,6 @@ static int write_and_swap(eboot_flow_args_t *args, const uint8_t *buf,
     return 0;
 }
 
-/* Derive USRDIR (no trailing slash) from an EBOOT.BIN path.
- * "/dev_hdd0/game/X/USRDIR/EBOOT.BIN" -> "/dev_hdd0/game/X/USRDIR".
- * Returns 0 on success, -1 if no /USRDIR/ marker. */
-static int derive_eboot_usrdir(const char *eboot_path, char *out, size_t out_size) {
-    if (!eboot_path || !out || out_size == 0)
-        return -1;
-    const char *hit = NULL;
-    for (const char *p = eboot_path; *p; p++) {
-        if (p[0] == '/' && p[1] == 'U' && p[2] == 'S' && p[3] == 'R' &&
-            p[4] == 'D' && p[5] == 'I' && p[6] == 'R' && p[7] == '/')
-            hit = p;
-    }
-    if (!hit) return -1;
-    size_t len = (size_t)((hit - eboot_path) + 7); /* include "USRDIR" */
-    if (len >= out_size) return -1;
-    memcpy(out, eboot_path, len);
-    out[len] = 0;
-    return 0;
-}
-
 int eboot_flow_run(eboot_flow_args_t *args) {
     int rc;
     uint8_t  *buf = NULL;
@@ -233,10 +213,6 @@ int eboot_flow_run(eboot_flow_args_t *args) {
     self_keyset_t ks;
     self_ctx_t ctx;
     int ok = -1;
-    char eboot_usrdir[256];
-    if (derive_eboot_usrdir(args ? args->eboot_path : NULL,
-                            eboot_usrdir, sizeof(eboot_usrdir)) != 0)
-        eboot_usrdir[0] = 0;
     uint32_t data00000_series = 0;
     uint32_t data00000_product = 0;
     int have_data00000 = 0;
@@ -275,8 +251,7 @@ int eboot_flow_run(eboot_flow_args_t *args) {
         if ((rc = patches_apply_all_to_buffer(buf, buf_len, segs, nsegs)) != 0) {
             ok = -510 + rc; goto done;
         }
-        if ((rc = sprx_loader_patch_apply(&ctx, TAIKO_PRX_PATH,
-                                          eboot_usrdir)) != 0) {
+        if ((rc = sprx_loader_patch_apply(&ctx, TAIKO_PRX_PATH)) != 0) {
             ok = -520 + rc; goto done;
         }
         REPORT(args, EBOOT_PHASE_WRITING, 0);
@@ -300,8 +275,7 @@ int eboot_flow_run(eboot_flow_args_t *args) {
     if ((rc = patches_apply_all_to_buffer(buf, buf_len, segs, nsegs)) != 0) {
         ok = -510 + rc; goto done;
     }
-    if ((rc = sprx_loader_patch_apply(&ctx, TAIKO_PRX_PATH,
-                                      eboot_usrdir)) != 0) {
+    if ((rc = sprx_loader_patch_apply(&ctx, TAIKO_PRX_PATH)) != 0) {
         ok = -520 + rc; goto done;
     }
 

@@ -12,8 +12,8 @@
  * and return that data blob. Everything is little-endian on PS3 SFO.
  *
  * The PARAM.SFO lives one directory above USRDIR. We get USRDIR from
- * the cached cellGameContentPermit hook, strip the trailing component,
- * and append PARAM.SFO. */
+ * the bootstrap args or patched-EBOOT argv[0], strip the trailing
+ * component, and append PARAM.SFO. */
 
 #include "game_version.h"
 
@@ -151,13 +151,14 @@ static void extract_code(const char *s, size_t len) {
 }
 
 static void scan_once(void) {
-    if (g_scanned) return;
-    g_scanned = 1;
-
+    if (g_scanned && g_version_code[0]) return;
+    /* Don't latch on failure paths — the bootstrap/argv seed may not have
+     * arrived yet when an early caller asks for the game version. Sticky
+     * failure here would permanently block chassisinfo synth and any flags
+     * the game gates on it (force_offline, etc.). */
     char usrdir[300];
     if (!usrdir_resolve_path("", usrdir, sizeof usrdir)) {
         dbg_print("[gamever] USRDIR not yet resolvable\n");
-        g_scanned = 0;  /* allow retry on later call */
         return;
     }
     char sfo_path[320];
@@ -196,6 +197,7 @@ static void scan_once(void) {
         return;
     }
     compute_dir();
+    g_scanned = 1;
     dbg_print("[gamever] title-code=");
     dbg_print(g_version_code);
     dbg_print(" dir=");

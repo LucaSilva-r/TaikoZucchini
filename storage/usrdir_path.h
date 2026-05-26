@@ -3,36 +3,23 @@
 
 #include <stddef.h>
 
-/* Install a passive hook on cellGameContentPermit so we can cache the
- * game's USRDIR the moment the game itself calls it. Must run before the
- * game's GameContent::GameContent() constructor. Safe to call once at
- * taiko_start. No-op if the stub can't be located. */
+/* Publish a pass-through target for cellGameContentPermit when the EBOOT's
+ * import stub was rewritten through the FPT. This does not derive or cache
+ * USRDIR; it only prevents rewritten imports from pointing at an empty slot. */
 void usrdir_install_hook(void);
 
 /* Seed the resolver with a known USRDIR. Used by the bootstrap EBOOT,
- * which knows where it was launched from before the full game EBOOT is
- * mapped. path may include or omit the trailing slash. */
+ * and by the patched EBOOT's main-argv loader. path may include or omit the
+ * trailing slash. */
 void usrdir_seed_path(const char *path);
 
-/* Try to seed from the EBOOT-baked USRDIR string in the FPT. Patcher
- * writes this when stamping the SPRX loader trampoline, so it is
- * available from the first instruction of taiko_start (long before
- * cellGameContentPermit). Returns 1 on seed, 0 if FPT absent or v1. */
-int usrdir_seed_from_fpt(void);
-
-/* Returns 1 once usrdir has been seeded authoritatively (bootstrap arg,
- * FPT, or cellGameContentPermit hook). 0 means usrdir_resolve_path's
- * answer is a best-guess fallback that callers should not overwrite. */
+/* Returns 1 once usrdir has been seeded from bootstrap args or argv[0]. */
 int usrdir_path_authoritative(void);
 
 /* Resolve /dev_hdd0/game/<DIR>/USRDIR/<tail> for the running title.
  *
- * Strategy:
- *   1. Cached usrdir from the cellGameContentPermit hook (covers every
- *      install path including rpcs3 plugin in /dev_hdd0/plugins/).
- *   2. Our own zucchini.sprx load path if it lives under /dev_hdd0/game/.
- *   3. PRX module list scan for any module under .../USRDIR/...
- *
+ * Only the cached bootstrap/argv seed is used. No FPT string,
+ * cellGameContentPermit result, self-module path, or module-list scan is used.
  * Returns 1 on success and writes a NUL-terminated absolute path into out.
  * Returns 0 on failure (caller should retry later). */
 int usrdir_resolve_path(const char *tail, char *out, size_t out_size);
