@@ -39,7 +39,7 @@ int menu_action_save_config(void) {
 }
 
 int menu_action_reboot_game(void) {
-    char path[256];
+    static char path[256];
     if (!usrdir_resolve_path("EBOOT.BIN", path, sizeof(path))) {
         dbg_print("[menu_act] reboot: usrdir unresolved\n");
         return -1;
@@ -47,8 +47,22 @@ int menu_action_reboot_game(void) {
     dbg_print("[menu_act] relaunching EBOOT via exitspawn2: ");
     dbg_print(path);
     dbg_print("\n");
-    /* Does not return on success. */
-    sys_game_process_exitspawn2(path, NULL, NULL, 0, 0, 1001, 0);
+
+    /* PS3 firmware verifies the stack-size flag against the new EBOOT's
+     * SYS_PROCESS_PARAM header. Passing flags=0 causes the relaunch to
+     * fail silently on real hardware (control returns to XMB instead of
+     * the new process) while RPCS3 happily ignores it. Both the
+     * bootstrap EBOOT and the patched game EBOOT declare 64 KB primary
+     * stacks, so we always pass STACK_SIZE_64K.
+     *
+     * argv must contain at least argv[0]; some firmware drops the
+     * relaunch when argv is NULL. envp/data stay NULL — the new
+     * process does not need them. */
+    static const char *argv[2];
+    argv[0] = path;
+    argv[1] = NULL;
+    sys_game_process_exitspawn2(path, argv, NULL, 0, 0, 1001,
+                                SYS_PROCESS_PRIMARY_STACK_SIZE_64K);
     /* Fallback if exitspawn2 returned (it shouldn't). */
     sys_process_exit(0);
     return 0;

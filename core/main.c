@@ -1,6 +1,7 @@
 #include <sys/moduleexport.h>
 #include <sys/process.h>
 #include <sys/prx.h>
+#include <sys/timer.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
@@ -472,7 +473,33 @@ int taiko_start(unsigned int args, void *argp) {
     }
 
     usrdir_install_hook();
-    param_sfo_fix_title_id();
+    if (param_sfo_fix_title_id()) {
+        /* RESOLUTION bitmask was just expanded. The current launch is
+         * still on the old video mode (PS3 OS negotiates the mode once
+         * at title-launch from XMB; nothing inside the running process
+         * can renegotiate it), and on monitors that won't accept 720p
+         * the user is already staring at a black screen.
+         *
+         * The only way to apply the new mask is to terminate the title
+         * so XMB re-reads PARAM.SFO at next launch. sys_process_exit ->
+         * XMB is the documented behaviour; sys_game_process_exitspawn2
+         * back to the same EBOOT is firmware-dependent and was reported
+         * to also drop to XMB on at least one tested setup. We attempt
+         * exitspawn2 first (warm relaunch where supported), fall back
+         * to a clean process exit otherwise.
+         *
+         * A marker file is dropped so an operator inspecting via FTP
+         * after a black-screen install can see what happened. */
+        dbg_print("[sfo] resolution mask changed; exiting so XMB picks up new mode\n");
+        write_marker("/dev_hdd0/tmp/taiko_sfo_relaunch.txt",
+                     "PARAM.SFO RESOLUTION bitmask expanded to include 1080p "
+                     "and other modes. The current launch was terminated so "
+                     "XMB can re-read PARAM.SFO. Relaunch the game from XMB.\n");
+        sys_timer_sleep(2);
+        menu_action_reboot_game();   /* best-effort warm relaunch */
+        sys_process_exit(0);         /* always reached unless warm reboot worked */
+        return SYS_PRX_RESIDENT;
+    }
 
     /* Load config first so feature gates below see runtime values. Falls
      * back to compile-time defaults if USRDIR isn't resolvable yet. */
