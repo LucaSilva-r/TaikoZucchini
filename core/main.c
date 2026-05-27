@@ -17,6 +17,7 @@
 #include "http_hook.h"
 #include "dns_hook.h"
 #include "socket_hook.h"
+#include "video_out_hook.h"
 #include "online_diag.h"
 #include "data00000_redirect.h"
 #include "camera_diag.h"
@@ -556,6 +557,12 @@ int taiko_start(unsigned int args, void *argp) {
     dns_hook_install();
     socket_hook_install();
     taiko_overlay_hooks_install();
+    /* Must run before the game's main reaches its video init (game's
+     * cellVideoOutGetState call). Patching the EBOOT stubs here means
+     * every code path that queries the system mode sees our lie, and
+     * the cellGcmGetConfiguration hook is active before the game's
+     * gcm allocator runs. */
+    taiko_video_upscale_install();
     taiko_version_check_start();
     camera_diag_hooks_install();
     if (g_cfg.qr_card_reader)

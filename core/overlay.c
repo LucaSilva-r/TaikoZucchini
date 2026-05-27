@@ -11,6 +11,7 @@
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "menu_font_20.h"
+#include "video_out_hook.h"
 
 #define OVERLAY_BOOT_WINDOW_US (60ULL * 1000ULL * 1000ULL)
 #define OVERLAY_TOAST_FRAMES   120
@@ -271,8 +272,13 @@ static int hk_flip_command(void *ctx, uint8_t id) {
         cellGcmGetConfiguration(&cfg);
         g_local_base = cfg.localAddress;
     }
+    /* Toast must draw into the game's 720p source BEFORE the scale
+     * blit so the upscaled dest picks it up. Otherwise the toast is
+     * stamped into a buffer the RSX no longer scans out. */
     if (g_toast_frames > 0)
         maybe_draw_toast(ctx, id);
+    if (taiko_video_upscale_active())
+        (void)taiko_video_upscale_inject_blit(ctx, id);
 
     gcm_flip_command_fn orig = (gcm_flip_command_fn)g_orig_flip_command;
     return orig ? orig(ctx, id) : 0;
@@ -280,6 +286,11 @@ static int hk_flip_command(void *ctx, uint8_t id) {
 
 static int hk_set_display_buffer(uint8_t id, uint32_t offset, uint32_t pitch,
                                  uint32_t width, uint32_t height) {
+    uint32_t real_offset = offset;
+    uint32_t real_pitch  = pitch;
+    uint32_t real_w      = width;
+    uint32_t real_h      = height;
+
     if (id < 8) {
         if (!g_local_base) {
             CellGcmConfig cfg;
@@ -292,11 +303,29 @@ static int hk_set_display_buffer(uint8_t id, uint32_t offset, uint32_t pitch,
         g_buffers[id].width = width;
         g_buffers[id].height = height;
         g_buffers[id].valid = 1;
+
+        /* Upscale mode: register the game's source dims with the
+         * upscale module and rewrite the args we hand to the real
+         * cellGcmSetDisplayBuffer so PS3 scanout reads our 1080p
+         * destination instead. The game keeps rendering into its own
+         * 720p surface at `offset`; the per-flip scale blit copies
+         * that into our dest before flip. */
+        if (taiko_video_upscale_active()) {
+            uint32_t dst_off, dst_pitch, dst_w, dst_h;
+            if (taiko_video_upscale_remap(id, offset, pitch, width, height,
+                                          &dst_off, &dst_pitch,
+                                          &dst_w,   &dst_h)) {
+                real_offset = dst_off;
+                real_pitch  = dst_pitch;
+                real_w      = dst_w;
+                real_h      = dst_h;
+            }
+        }
     }
 
     gcm_set_display_buffer_fn orig =
         (gcm_set_display_buffer_fn)g_orig_set_display_buffer;
-    return orig ? orig(id, offset, pitch, width, height) : 0;
+    return orig ? orig(id, real_offset, real_pitch, real_w, real_h) : 0;
 }
 
 void taiko_overlay_show_message(const char *message) {

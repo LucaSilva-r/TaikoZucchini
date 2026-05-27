@@ -101,6 +101,7 @@ SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_i
            network/online_diag.c \
            hooks/http_hook.c hooks/cell_http_shim.c \
            hooks/dns_hook.c hooks/socket_hook.c \
+           hooks/video_out_hook.c \
            network/uri.c network/http_client.c network/version_check.c
 OBJS    := $(SRCS:.c=.o)
 

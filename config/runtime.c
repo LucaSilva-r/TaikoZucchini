@@ -12,7 +12,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 8
+#define TAIKO_CFG_VERSION 10
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
@@ -36,6 +36,8 @@ taiko_runtime_cfg_t g_cfg = {
     .net_cleanup_guard    = TAIKO_PATCH_NET_CLEANUP_GUARD,
     .clearlocks_stub      = TAIKO_PATCH_CLEARLOCKS_STUB,
     .allow_screen_tearing = TAIKO_PATCH_ALLOW_SCREEN_TEARING,
+    .upscale_to_native    = 1,
+    .upscale_blit         = 1,
 
     .online_redirect_enable = 0,
     .online_redirect_host   = {0},
@@ -86,6 +88,8 @@ static void handle_patches(const char *key, const char *value, void *u) {
     SET_BIT("net_cleanup_guard",    net_cleanup_guard);
     SET_BIT("clearlocks_stub",      clearlocks_stub);
     SET_BIT("allow_screen_tearing", allow_screen_tearing);
+    SET_BIT("upscale_to_native",    upscale_to_native);
+    SET_BIT("upscale_blit",         upscale_blit);
 }
 
 static void handle_meta(const char *key, const char *value, void *u) {
@@ -454,6 +458,19 @@ static void write_cfg_file(const char *path) {
         "Set game flip mode to CELL_GCM_DISPLAY_HSYNC instead of VSYNC. "
         "This can tear, but avoids visible rhythm-lane jumps when a frame misses vblank.",
         "allow_screen_tearing", g_cfg.allow_screen_tearing);
+    emit_kv_bool(fd,
+        "Force the game to render at 720p and RSX-scale the output up "
+        "to the system's native HDMI mode (1080p). Required on monitors "
+        "that refuse 720p input; the PS3 firmware does not auto-upscale "
+        "framebuffers, so without this the game letterboxes 720p inside "
+        "a 1080p canvas.",
+        "upscale_to_native", g_cfg.upscale_to_native);
+    emit_kv_bool(fd,
+        "Diagnostic toggle. With upscale_to_native on, set this 0 to "
+        "redirect scanout to our 1080p destination buffers WITHOUT the "
+        "per-flip scale blit. Useful for isolating whether the scale "
+        "command itself causes flicker / lockups vs the redirect.",
+        "upscale_blit", g_cfg.upscale_blit);
     cfg_file_write_str(fd, "\n");
 
     cfg_file_write_str(fd, "[network]\n");

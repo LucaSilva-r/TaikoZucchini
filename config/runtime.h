@@ -35,6 +35,22 @@ typedef struct {
     unsigned clearlocks_stub      : 1;
     unsigned allow_screen_tearing : 1;
 
+    /* Force the game to render at its native 720p surface even when the
+     * system video mode is 1080p, then RSX-scale the source up to 1080p
+     * for HDMI scanout. PS3 firmware does not auto-upscale framebuffers
+     * (it switches monitor mode instead), so without this hook a 1080p
+     * monitor that refuses 720p signals leaves the user on a black
+     * screen even after PARAM.SFO advertises 1080p support. */
+    unsigned upscale_to_native : 1;
+
+    /* Diagnostic: when upscale is on, gate the per-flip scale blit on
+     * its own flag so the destination-buffer redirect can be exercised
+     * without the blit. Turning this off keeps PS3 scanning out our
+     * 1080p dest surfaces but never writes to them — the screen will
+     * be blank-or-stale, but if a lockup goes away it means the blit
+     * commands are the source. */
+    unsigned upscale_blit : 1;
+
     /* Online-redirect: when enabled, every hostname the SPRX HTTP client
      * is asked to reach is replaced with online_redirect_host:port
      * before DNS. Path/method/body untouched; Host: header + TLS SNI
