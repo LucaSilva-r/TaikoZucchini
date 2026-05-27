@@ -337,6 +337,16 @@ static void poll_and_accumulate_locked(void) {
     memcpy(g_kb_prev_pressed, cur, sizeof cur);
 }
 
+int kb_input_keycode_held(unsigned char code) {
+    if (!g_initialized) return 0;
+    sys_lwmutex_lock(&g_kb_lock, 0);
+    uint32_t cur[8];
+    build_pressed(cur);
+    int held = get_bit(cur, code);
+    sys_lwmutex_unlock(&g_kb_lock);
+    return held;
+}
+
 void kb_input_poll_tick(void) {
     if (!g_initialized) return;
     sys_lwmutex_lock(&g_kb_lock, 0);

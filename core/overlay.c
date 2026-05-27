@@ -315,7 +315,7 @@ void taiko_overlay_show_update_available(const char *latest_version) {
 
     char msg[96];
     const char *prefix = "Update ";
-    const char *suffix = " - hold L3+R3";
+    const char *suffix = " - hold L3+R3 or F2";
     size_t n = 0;
     while (prefix[n] && n + 1 < sizeof(msg)) { msg[n] = prefix[n]; n++; }
     for (const char *p = latest_version; *p && n + 1 < sizeof(msg); p++)

@@ -16,7 +16,9 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <sys/time.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <sys/sys_time.h>
 #include <sys/ppu_thread.h>
 #include <sys/timer.h>
@@ -24,6 +26,8 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netex/net.h>
+#include <netex/errno.h>
+#include <netex/libnetctl.h>
 #include <netdb.h>
 
 #include "mbedtls/ssl.h"
@@ -52,6 +56,64 @@ static void net_log_hex32(const char *label, uint32_t v) {
 
 static void tls_retry_sleep(void) {
     sys_timer_usleep(1000);
+}
+
+/* Hard caps so an unreachable peer (cable up, no internet) can never
+ * stall the calling thread. mbedTLS read/write loops poll until either
+ * the deadline elapses or the socket reports a real error. */
+#define HTTP_CONNECT_TIMEOUT_MS    5000
+#define HTTP_HANDSHAKE_TIMEOUT_MS  10000
+#define HTTP_IO_TIMEOUT_MS         15000
+#define HTTP_WORKER_TIMEOUT_US     (35ULL * 1000 * 1000)
+
+static int64_t now_ms(void) {
+    return (int64_t)(sys_time_get_system_time() / 1000);
+}
+
+static int set_nbio(int fd, int on) {
+    int v = on ? 1 : 0;
+    return setsockopt(fd, SOL_SOCKET, SO_NBIO, &v, sizeof v);
+}
+
+static int set_io_timeouts(int fd, int ms) {
+    struct timeval tv;
+    tv.tv_sec  = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    int rs = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    int ws = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    return (rs == 0 && ws == 0) ? 0 : -1;
+}
+
+static int connect_with_timeout(int fd, const struct sockaddr *sa,
+                                socklen_t sl, int timeout_ms) {
+    if (set_nbio(fd, 1) != 0)
+        return -1;
+    int rc = connect(fd, sa, sl);
+    if (rc == 0) {
+        (void)set_nbio(fd, 0);
+        return 0;
+    }
+    int err = sys_net_errno;
+    if (err != SYS_NET_EINPROGRESS && err != SYS_NET_EWOULDBLOCK)
+        return -1;
+
+    fd_set wfds;
+    FD_ZERO(&wfds);
+    FD_SET(fd, &wfds);
+    struct timeval tv;
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int sr = socketselect(fd + 1, NULL, &wfds, NULL, &tv);
+    if (sr <= 0)
+        return -1;
+
+    int so_err = 0;
+    socklen_t el = sizeof so_err;
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &el) != 0 || so_err != 0)
+        return -1;
+
+    (void)set_nbio(fd, 0);
+    return 0;
 }
 
 /* Case-insensitive scan for an HTTP header name at the start of any
@@ -202,6 +264,17 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len) {
 /* DNS                                                                 */
 /* ------------------------------------------------------------------ */
 
+static int net_link_ready(void) {
+    /* Treat any failure as "not ready" — gethostbyname() on this SDK
+     * has no timeout, so we must refuse it unless the stack reports an
+     * IP-Obtained state. Avoids the 60s DNS stall when the cable is
+     * plugged but DHCP/internet is gone. */
+    int state = 0;
+    if (cellNetCtlGetState(&state) != 0)
+        return 0;
+    return state == CELL_NET_CTL_STATE_IPObtained;
+}
+
 static int resolve_host(const char *host, struct in_addr *out) {
     /* Numeric literal fast path. inet_addr returns INADDR_NONE on
      * failure, which collides with the valid 255.255.255.255 broadcast
@@ -210,6 +283,10 @@ static int resolve_host(const char *host, struct in_addr *out) {
     if (numeric != 0xFFFFFFFFu) {
         out->s_addr = numeric;
         return 0;
+    }
+    if (!net_link_ready()) {
+        net_log("[http] link not ready; skipping DNS\n");
+        return -1;
     }
     struct hostent *he = gethostbyname(host);
     if (!he || !he->h_addr_list || !he->h_addr_list[0]) return -1;
@@ -361,26 +438,31 @@ static long dechunk(unsigned char *src, size_t len) {
 
 static int ssl_write_all(mbedtls_ssl_context *ssl,
                          const unsigned char *buf, size_t len) {
+    int64_t deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
     while (len > 0) {
         int rc = mbedtls_ssl_write(ssl, buf, len);
         if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
             rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (now_ms() > deadline) return -1;
             tls_retry_sleep();
             continue;
         }
         if (rc < 0) return rc;
         buf += rc;
         len -= (size_t)rc;
+        deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
     }
     return 0;
 }
 
 static int drain_response(mbedtls_ssl_context *ssl, bytebuf_t *buf) {
     unsigned char tmp[2048];
+    int64_t deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
     for (;;) {
         int rc = mbedtls_ssl_read(ssl, tmp, sizeof tmp);
         if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
             rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (now_ms() > deadline) return -1;
             tls_retry_sleep();
             continue;
         }
@@ -390,6 +472,7 @@ static int drain_response(mbedtls_ssl_context *ssl, bytebuf_t *buf) {
         if (buf->len + (size_t)rc > HTTP_CLIENT_BODY_MAX + 64 * 1024)
             return -1;
         if (bb_append(buf, tmp, (size_t)rc) != 0) return -1;
+        deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
     }
 }
 
@@ -483,23 +566,35 @@ static int http_request_inner(const char *method,
     sa.sin_family = AF_INET;
     sa.sin_port   = htons((uint16_t)port);
     sa.sin_addr   = ip;
-    rc = connect(fd, (struct sockaddr *)&sa, sizeof sa);
-    if (rc < 0) { net_log_hex32("[http] connect", (uint32_t)rc); goto out_fail; }
+    rc = connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof sa,
+                              HTTP_CONNECT_TIMEOUT_MS);
+    if (rc < 0) { net_log("[http] connect timeout/fail\n"); goto out_fail; }
     net_log("[http] connect ok\n");
+
+    /* Bound recv/send so a half-open peer can't wedge mbedTLS forever. */
+    (void)set_io_timeouts(fd, HTTP_IO_TIMEOUT_MS);
 
     mbedtls_ssl_set_bio(ssl, (void *)(intptr_t)fd, bio_send, bio_recv, NULL);
     net_log("[http] handshake enter\n");
 
-    for (;;) {
-        rc = mbedtls_ssl_handshake(ssl);
-        if (rc == 0) break;
-        if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
-            rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            tls_retry_sleep();
-            continue;
+    {
+        int64_t hs_deadline = now_ms() + HTTP_HANDSHAKE_TIMEOUT_MS;
+        for (;;) {
+            rc = mbedtls_ssl_handshake(ssl);
+            if (rc == 0) break;
+            if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
+                rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if (now_ms() > hs_deadline) {
+                    net_log("[http] handshake deadline\n");
+                    rc = -1;
+                    goto out_fail;
+                }
+                tls_retry_sleep();
+                continue;
+            }
+            net_log_hex32("[http] handshake", (uint32_t)rc);
+            goto out_fail;
         }
-        net_log_hex32("[http] handshake", (uint32_t)rc);
-        goto out_fail;
     }
     net_log("[http] handshake ok\n");
 

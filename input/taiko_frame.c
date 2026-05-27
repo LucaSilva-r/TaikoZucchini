@@ -5,7 +5,7 @@
 #include <string.h>
 
 #define USIO_HIT_PEAK   0xFFFFu
-#define HIT_PEAK_FRAMES 2     /* Hold PEAK for N consecutive game frames so
+#define HIT_PEAK_FRAMES 1     /* Hold PEAK for N consecutive game frames so
                                  the game's drum threshold detector reliably
                                  latches the hit even if its sample window
                                  lands mid-pulse. */

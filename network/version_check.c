@@ -6,8 +6,10 @@
 
 #include <cell/fs/cell_fs_file_api.h>
 #include <cell/fs/cell_fs_errno.h>
+#include <cell/keyboard.h>
 #include <cell/pad.h>
 #include <cell/sysmodule.h>
+#include <netex/libnetctl.h>
 #include <sys/ppu_thread.h>
 #include <sys/process.h>
 #include <sys/timer.h>
@@ -15,6 +17,7 @@
 #include "config/version.h"
 #include "debug.h"
 #include "http_client.h"
+#include "kb_input.h"
 #include "overlay.h"
 #include "usrdir_path.h"
 
@@ -271,6 +274,18 @@ static int update_combo_held(void) {
     static uint8_t cache_valid[CELL_PAD_MAX_PORT_NUM];
     static int pad_inited;
 
+    /* Keyboard F2 hold counts as confirm too. kb_input_init is
+     * idempotent, so we lazy-init here for the usio_emulation-off case
+     * where main.c never ran it. Same one-shot pattern as the pad init
+     * below. */
+    static int kb_inited;
+    if (!kb_inited) {
+        kb_input_init();
+        kb_inited = 1;
+    }
+    if (kb_input_keycode_held(CELL_KEYC_F2))
+        return 1;
+
     if (!pad_inited) {
         cellSysmoduleLoadModule(CELL_SYSMODULE_IO);
         int irc = cellPadInit(7);
@@ -443,6 +458,21 @@ static int install_update_from_local_file(const char *path) {
 }
 #endif
 
+static int wait_for_net_link(int max_seconds) {
+    /* cellNetCtlInit is harmless if libnet hasn't loaded; the stub itself
+     * just NOOPs and the state poll returns failure, which we treat as
+     * "not ready". We poll once a second up to the cap so a slow DHCP
+     * lease doesn't permanently skip the check. */
+    for (int i = 0; i < max_seconds; i++) {
+        int state = 0;
+        if (cellNetCtlGetState(&state) == 0 &&
+            state == CELL_NET_CTL_STATE_IPObtained)
+            return 1;
+        sys_timer_sleep(1);
+    }
+    return 0;
+}
+
 static void version_check_thread(uint64_t arg) {
     (void)arg;
     sys_timer_sleep(8);
@@ -453,6 +483,13 @@ static void version_check_thread(uint64_t arg) {
         install_update_from_local_file(TAIKO_UPDATE_LOCAL_PATH);
     sys_ppu_thread_exit(0);
 #endif
+
+    if (!wait_for_net_link(20)) {
+        dbg_print("[version] no IP after 20s; skipping update check\n");
+        sys_ppu_thread_exit(0);
+    }
+
+    taiko_overlay_show_message("Checking for updates...");
 
     http_response_t resp;
     int rc = http_get_direct(TAIKO_UPDATE_RELEASE_URL, &resp);

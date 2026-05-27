@@ -19,6 +19,13 @@ void kb_input_poll_tick(void);
  * Safe no-op until kb_input_init has run. */
 void kb_input_merge(pad_snapshot_t *out);
 
+/* Returns 1 if the given raw HID keycode is currently held on any
+ * connected keyboard port. Safe before kb_input_init has run (returns
+ * 0). Used by feature toggles (update confirm, etc) that want a global
+ * "is key X held" probe without going through the per-player binding
+ * table. */
+int kb_input_keycode_held(unsigned char code);
+
 void kb_input_seed_defaults(void);
 void kb_input_cfg_kv(int player, const char *key, const char *value);
 void kb_input_cfg_emit(int fd);
