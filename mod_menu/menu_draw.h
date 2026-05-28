@@ -17,13 +17,15 @@ void menu_draw_end(void);
 /* Fill entire back buffer with solid color (X8R8G8B8). */
 void menu_draw_clear(uint32_t color);
 
-/* Filled rectangle, clipped to back buffer. */
+/* Filled rectangle in 1280x720 virtual menu coordinates, scaled and
+ * centered onto the current back buffer. */
 void menu_draw_rect(int x, int y, int w, int h, uint32_t color);
 
-/* Rect outline (1px). */
+/* Rect outline (1 virtual px). */
 void menu_draw_rect_outline(int x, int y, int w, int h, uint32_t color);
 
-/* Render single text run, alpha-blended over current back buffer.
+/* Render single text run in 1280x720 virtual menu coordinates,
+ * alpha-blended over current back buffer.
  * x,y = top-left of text bounding box (NOT baseline). Returns
  * advanced pen-x for chaining. */
 int  menu_draw_text(const menu_font_t *font, int x, int y,

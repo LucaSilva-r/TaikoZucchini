@@ -2,8 +2,9 @@
 #define TAIKO_RSX_INIT_H
 
 /* Minimal RSX bring-up so libsysutil overlays (msgDialog, etc.) draw
- * during early SPRX boot before the game has touched video. Sized for
- * 720p X8R8G8B8 double-buffered. Idempotent — repeat calls no-op. */
+ * during early SPRX boot before the game has touched video. Configures
+ * X8R8G8B8 double-buffered output at the current system video mode.
+ * Idempotent — repeat calls no-op. */
 
 #include <stdint.h>
 
