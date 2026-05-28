@@ -185,6 +185,13 @@ static const fpt_stub_fnid_t FPT_STUB_FNIDS[] = {
 
     /* cellGame (1 specific function) */
     { 0x70acec67u, TAIKO_FPT_GAME_CONTENT_PERMIT }, /* cellGameContentPermit */
+
+    /* sysutil_sysparam (2 specific functions) — required by upscale hook */
+    { 0x887572d5u, TAIKO_FPT_VIDEO_OUT_GET_STATE },  /* cellVideoOutGetState */
+    { 0x0bae8772u, TAIKO_FPT_VIDEO_OUT_CONFIGURE },  /* cellVideoOutConfigure */
+
+    /* cellGcmSys (1 specific function) — required by upscale hook */
+    { 0xe315a0b2u, TAIKO_FPT_GCM_GET_CONFIGURATION }, /* cellGcmGetConfiguration */
 };
 
 static int import_stub_matches_buf(const uint8_t *p) {

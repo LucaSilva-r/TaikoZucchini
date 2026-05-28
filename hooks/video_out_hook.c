@@ -10,16 +10,8 @@
 
 #include "config.h"
 #include "config/runtime.h"
-#include "icache.h"
 #include "debug.h"
-
-/* EBOOT import stubs + GOT slots (from ghidra) */
-#define STUB_GETSTATE       0x00a1dfd0u
-#define GOT_GETSTATE        0x00fa485cu
-#define STUB_CONFIGURE      0x00a1df10u
-#define GOT_CONFIGURE       0x00fa4844u
-#define STUB_GETCONFIG      0x00a1f370u
-#define GOT_GETCONFIG       0x00fa4640u
+#include "eboot_fpt.h"
 
 #define DEST_BUF_COUNT      8     /* match cellGcmSetDisplayBuffer id space */
 #define DEST_RESERVE_BYTES  (32u * 1024u * 1024u)
@@ -61,6 +53,12 @@ static int       g_scale_mapped;
 
 /* ------------------------------------------------------------------ */
 
+static void publish_original_fpt(uint32_t slot) {
+    uintptr_t opd = taiko_fpt_original_opd(slot);
+    if (opd)
+        (void)taiko_fpt_publish(slot, (const void *)opd);
+}
+
 static void flush_dcache(void *addr, size_t len) {
     uintptr_t p = (uintptr_t)addr & ~(uintptr_t)127;
     uintptr_t end = ((uintptr_t)addr + len + 127) & ~(uintptr_t)127;
@@ -96,26 +94,6 @@ static int ensure_scale_buf_mapped(void) {
     g_scale_mapped = 1;
     dbg_print_hex32("[vout] scale cmd io off", g_scale_cmd_io_off);
     return 1;
-}
-
-static void patch_got(uintptr_t got, const void *opd) {
-    uint32_t v = (uint32_t)(uintptr_t)opd;
-    mem_write_and_flush((void *)got, &v, sizeof v);
-}
-
-static void patch_stub(uintptr_t stub, const void *opd) {
-    uint32_t v = (uint32_t)(uintptr_t)opd;
-    uint32_t i[3] = {
-        0x3D800000u | ((v >> 16) & 0xFFFFu),
-        0x618C0000u |  (v        & 0xFFFFu),
-        0x60000000u,
-    };
-    mem_write_and_flush((void *)stub, i, sizeof i);
-}
-
-static void patch_one(uintptr_t stub, uintptr_t got, const void *opd) {
-    patch_got(got, opd);
-    patch_stub(stub, opd);
 }
 
 /* ------------------------------------------------------------------ */
@@ -374,19 +352,33 @@ int taiko_video_upscale_inject_blit(void *ctx, uint8_t id) {
 /* ------------------------------------------------------------------ */
 
 void taiko_video_upscale_install(void) {
-    if (!g_cfg.upscale_to_native)
+    if (!g_cfg.upscale_to_native) {
+        /* Always publish original OPDs so the FPT dispatcher keeps the
+         * stock behaviour for builds where upscale is off. */
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_CONFIGURE);
+        publish_original_fpt(TAIKO_FPT_GCM_GET_CONFIGURATION);
         return;
+    }
     if (g_active)
         return;
 
+    if (!taiko_fpt_available()) {
+        dbg_print("[vout] FPT unavailable; upscale requires a patched EBOOT\n");
+        return;
+    }
+
     /* Capture the real system mode + native dims via the SPRX-side
      * sysutil linkage (independent of the EBOOT import stubs we'll
-     * patch below). */
+     * redirect through the FPT below). */
     CellVideoOutState st;
     memset(&st, 0, sizeof st);
     if (cellVideoOutGetState(CELL_VIDEO_OUT_PRIMARY, 0, &st) != 0 ||
         st.displayMode.resolutionId == 0) {
         dbg_print("[vout] real state query failed; aborting upscale install\n");
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_CONFIGURE);
+        publish_original_fpt(TAIKO_FPT_GCM_GET_CONFIGURATION);
         return;
     }
     g_real_res_id = st.displayMode.resolutionId;
@@ -395,6 +387,9 @@ void taiko_video_upscale_install(void) {
      * mode matches HDMI mode, no scaling required. */
     if (g_real_res_id == CELL_VIDEO_OUT_RESOLUTION_720) {
         dbg_print("[vout] system already 720p; upscale not needed\n");
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_CONFIGURE);
+        publish_original_fpt(TAIKO_FPT_GCM_GET_CONFIGURATION);
         return;
     }
 
@@ -403,6 +398,9 @@ void taiko_video_upscale_install(void) {
     if (cellVideoOutGetResolution(g_real_res_id, &rr) != 0 ||
         rr.width == 0 || rr.height == 0) {
         dbg_print("[vout] real resolution query failed; aborting\n");
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_CONFIGURE);
+        publish_original_fpt(TAIKO_FPT_GCM_GET_CONFIGURATION);
         return;
     }
     g_native_w     = rr.width;
@@ -418,10 +416,23 @@ void taiko_video_upscale_install(void) {
     dbg_print_hex32("[vout] native h",        g_native_h);
     dbg_print_hex32("[vout] native pitch",    g_native_pitch);
 
-    /* Patch stubs last — after this point the hooks are live. */
-    patch_one(STUB_GETSTATE,  GOT_GETSTATE,  (const void *)hk_get_state);
-    patch_one(STUB_CONFIGURE, GOT_CONFIGURE, (const void *)hk_configure);
-    patch_one(STUB_GETCONFIG, GOT_GETCONFIG, (const void *)hk_get_config);
+    /* Publish hook OPDs through the FPT dispatcher. The patcher built
+     * the EBOOT stubs to read each slot from the FPT and jump there,
+     * so this just writes RAM — no syscall 905, works on DEX. */
+    int ok = 1;
+    ok &= taiko_fpt_publish(TAIKO_FPT_VIDEO_OUT_GET_STATE,
+                            (const void *)hk_get_state);
+    ok &= taiko_fpt_publish(TAIKO_FPT_VIDEO_OUT_CONFIGURE,
+                            (const void *)hk_configure);
+    ok &= taiko_fpt_publish(TAIKO_FPT_GCM_GET_CONFIGURATION,
+                            (const void *)hk_get_config);
+    if (!ok) {
+        dbg_print("[vout] FPT publish failed; older EBOOT lacks the new slots\n");
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
+        publish_original_fpt(TAIKO_FPT_VIDEO_OUT_CONFIGURE);
+        publish_original_fpt(TAIKO_FPT_GCM_GET_CONFIGURATION);
+        return;
+    }
 
     g_active = 1;
     dbg_print("[vout] upscale hooks installed\n");
