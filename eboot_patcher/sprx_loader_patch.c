@@ -192,6 +192,7 @@ static const fpt_stub_fnid_t FPT_STUB_FNIDS[] = {
 
     /* cellGcmSys (1 specific function) — required by upscale hook */
     { 0xe315a0b2u, TAIKO_FPT_GCM_GET_CONFIGURATION }, /* cellGcmGetConfiguration */
+    { 0x0e6b0daeu, TAIKO_FPT_GCM_GET_DISPLAY_INFO  }, /* cellGcmGetDisplayInfo */
 };
 
 static int import_stub_matches_buf(const uint8_t *p) {
