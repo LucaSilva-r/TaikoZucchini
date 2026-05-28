@@ -130,3 +130,10 @@ uintptr_t taiko_fpt_original_opd(uint32_t slot) {
         return 0;
     return (uintptr_t)*(volatile uint32_t *)(uintptr_t)t->got_slots[slot];
 }
+
+uintptr_t taiko_fpt_slot_value(uint32_t slot) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || slot >= t->slot_count || slot >= TAIKO_FPT_SLOT_COUNT)
+        return 0;
+    return (uintptr_t)t->slots[slot];
+}

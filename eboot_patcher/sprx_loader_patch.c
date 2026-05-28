@@ -232,6 +232,147 @@ static uint32_t branch_target(uint32_t insn, uint32_t insn_va) {
     return (uint32_t)(insn_va + disp);
 }
 
+static int va_in_load(elf64_phdr_t *phdrs, uint16_t phnum, uint32_t va,
+                      uint32_t len) {
+    uint64_t end = (uint64_t)va + len;
+    if (end < va)
+        return 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD)
+            continue;
+        uint64_t start = p->p_vaddr;
+        uint64_t stop = start + p->p_memsz;
+        if ((uint64_t)va >= start && end <= stop)
+            return 1;
+    }
+    return 0;
+}
+
+static int local_alloc_wrapper_matches(const uint8_t *b) {
+    return load_be32(b + 0x00) == 0xF821FF71u &&
+           load_be32(b + 0x04) == 0x7C0802A6u &&
+           load_be32(b + 0x08) == 0xFBA10078u &&
+           (load_be32(b + 0x0C) & 0xFFFF0000u) == 0x83A20000u &&
+           load_be32(b + 0x10) == 0x38A0001Eu &&
+           load_be32(b + 0x14) == 0xF80100A0u &&
+           load_be32(b + 0x18) == 0xFBC10080u &&
+           load_be32(b + 0x1C) == 0xFBE10088u &&
+           load_be32(b + 0x20) == 0x7C9E2378u &&
+           load_be32(b + 0x24) == 0x801D0000u &&
+           load_be32(b + 0x28) == 0x7C7F1B78u &&
+           load_be32(b + 0x2C) == 0x2F800000u &&
+           load_be32(b + 0x30) == 0x409E0024u &&
+           load_be32(b + 0x50) == 0x7FE00008u &&
+           load_be32(b + 0x54) == 0x7FA3EB78u &&
+           load_be32(b + 0x58) == 0x7BE40020u &&
+           load_be32(b + 0x5C) == 0x7BC50020u;
+}
+
+static int find_opd_for_entry(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                              uint16_t phnum, uint32_t entry,
+                              uint32_t *out_opd) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 8u)
+            continue;
+
+        for (uint64_t pos = 0; pos + 8u <= size; pos += 4u) {
+            const uint8_t *b = ctx->buf + base + pos;
+            if (load_be32(b) != entry)
+                continue;
+            uint32_t toc = load_be32(b + 4);
+            if (!toc || !va_in_load(phdrs, phnum, toc, 4))
+                continue;
+            *out_opd = (uint32_t)(p->p_vaddr + pos);
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static uint32_t count_direct_calls_to(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                      uint16_t phnum, uint32_t target) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+    uint32_t count = 0;
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 4u)
+            continue;
+
+        for (uint64_t pos = 0; pos + 4u <= size; pos += 4u) {
+            uint32_t insn = load_be32(ctx->buf + base + pos);
+            if (!is_relative_bl(insn))
+                continue;
+            uint32_t insn_va = (uint32_t)(p->p_vaddr + pos);
+            if (branch_target(insn, insn_va) == target)
+                count++;
+        }
+    }
+
+    return count;
+}
+
+static int find_game_local_alloc_opd(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                     uint16_t phnum, uint32_t *out_opd) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+    uint32_t found_entry = 0;
+    uint32_t found_opd = 0;
+    uint32_t found_calls = 0;
+    uint32_t count = 0;
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 0x60u)
+            continue;
+
+        for (uint64_t pos = 0; pos + 0x60u <= size; pos += 4u) {
+            const uint8_t *b = ctx->buf + base + pos;
+            if (!local_alloc_wrapper_matches(b))
+                continue;
+            uint32_t entry = (uint32_t)(p->p_vaddr + pos);
+            uint32_t opd = 0;
+            if (find_opd_for_entry(ctx, phdrs, phnum, entry, &opd) != 0)
+                continue;
+            uint32_t calls = count_direct_calls_to(ctx, phdrs, phnum, entry);
+            dbg_print_hex32("[patch] local alloc-like entry", entry);
+            dbg_print_hex32("[patch] local alloc-like opd", opd);
+            dbg_print_hex32("[patch] local alloc-like calls", calls);
+            if (calls > found_calls) {
+                found_entry = entry;
+                found_opd = opd;
+                found_calls = calls;
+            }
+            count++;
+        }
+    }
+
+    if (count == 0)
+        return -1;
+    dbg_print_hex32("[patch] game local alloc entry", found_entry);
+    dbg_print_hex32("[patch] game local alloc opd", found_opd);
+    dbg_print_hex32("[patch] game local alloc calls", found_calls);
+    dbg_print_hex32("[patch] game local alloc matches", count);
+    *out_opd = found_opd;
+    return 0;
+}
+
 static int main_entry_matches(const uint8_t *p) {
     uint32_t w0 = load_be32(p + 0);
     uint32_t w1 = load_be32(p + 4);
@@ -508,6 +649,18 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     store_be32(ctx->buf + fpt_off + 0x00, TAIKO_FPT_MAGIC);
     store_be32(ctx->buf + fpt_off + 0x04, TAIKO_FPT_VERSION);
     store_be32(ctx->buf + fpt_off + 0x08, TAIKO_FPT_SLOT_COUNT);
+
+    uint32_t game_local_alloc_opd = 0;
+    int alloc_rc = find_game_local_alloc_opd(ctx, phdrs, phnum,
+                                             &game_local_alloc_opd);
+    if (alloc_rc == 0) {
+        store_be32(ctx->buf + fpt_off + offsetof(taiko_fpt_t, slots) +
+                   TAIKO_FPT_GAME_LOCAL_ALLOC * sizeof(uint32_t),
+                   game_local_alloc_opd);
+    } else {
+        dbg_print_hex32("[patch] game local allocator rc", (uint32_t)alloc_rc);
+        dbg_print("[patch] game local allocator OPD not found\n");
+    }
 
     for (size_t i = 0; i < sizeof(FPT_STUB_FNIDS) / sizeof(FPT_STUB_FNIDS[0]); i++) {
         const fpt_stub_fnid_t *s = &FPT_STUB_FNIDS[i];

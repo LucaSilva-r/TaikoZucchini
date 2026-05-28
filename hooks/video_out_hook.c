@@ -15,8 +15,6 @@
 
 #define DEST_BUF_COUNT      8     /* match cellGcmSetDisplayBuffer id space */
 #define DEST_POOL_COUNT     2     /* native scanout surfaces allocated from game VRAM heap */
-#define ELF_BASE            0x00010000u
-#define PT_LOAD             1u
 
 /* Pre-built scale command sub-buffer. Mapped main memory we own. The
  * per-flip blit writes ~32 words of NV3089 + NV3062 method commands
@@ -35,7 +33,6 @@ static uint32_t g_native_h;
 static uint32_t g_native_pitch;
 static uint8_t  g_next_dest_pool;
 static int      g_dest_pool_ready;
-static uintptr_t g_game_local_alloc_opd;
 
 typedef struct {
     uint32_t offset;   /* RSX local offset (zero until allocated) */
@@ -46,34 +43,6 @@ static dest_slot_t g_dest[DEST_BUF_COUNT];
 static uint32_t g_dest_pool[DEST_POOL_COUNT];
 
 typedef uint32_t (*game_local_alloc_fn)(uint32_t size, uint32_t align);
-
-typedef struct {
-    uint8_t  e_ident[16];
-    uint16_t e_type;
-    uint16_t e_machine;
-    uint32_t e_version;
-    uint64_t e_entry;
-    uint64_t e_phoff;
-    uint64_t e_shoff;
-    uint32_t e_flags;
-    uint16_t e_ehsize;
-    uint16_t e_phentsize;
-    uint16_t e_phnum;
-    uint16_t e_shentsize;
-    uint16_t e_shnum;
-    uint16_t e_shstrndx;
-} __attribute__((packed)) eboot_elf64_ehdr_t;
-
-typedef struct {
-    uint32_t p_type;
-    uint32_t p_flags;
-    uint64_t p_offset;
-    uint64_t p_vaddr;
-    uint64_t p_paddr;
-    uint64_t p_filesz;
-    uint64_t p_memsz;
-    uint64_t p_align;
-} __attribute__((packed)) eboot_elf64_phdr_t;
 
 typedef struct {
     uint32_t offset;
@@ -139,66 +108,6 @@ static uint32_t dest_surface_size(void) {
     if (!g_native_h || !g_native_pitch)
         return 0;
     return (g_native_pitch * g_native_h + 0xFFu) & ~0xFFu;
-}
-
-static int eboot_va_mapped(uint32_t va, uint32_t len) {
-    const eboot_elf64_ehdr_t *eh =
-        (const eboot_elf64_ehdr_t *)(uintptr_t)ELF_BASE;
-    if (eh->e_ident[0] != 0x7f || eh->e_ident[1] != 'E' ||
-        eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F' ||
-        eh->e_phnum == 0 || eh->e_phnum > 32)
-        return 0;
-
-    const eboot_elf64_phdr_t *ph =
-        (const eboot_elf64_phdr_t *)(uintptr_t)(ELF_BASE + (uint32_t)eh->e_phoff);
-    uint64_t end = (uint64_t)va + len;
-    if (end < va)
-        return 0;
-    for (uint16_t i = 0; i < eh->e_phnum; i++) {
-        if (ph[i].p_type != PT_LOAD)
-            continue;
-        uint64_t start = ph[i].p_vaddr;
-        uint64_t stop = start + ph[i].p_memsz;
-        if ((uint64_t)va >= start && end <= stop)
-            return 1;
-    }
-    return 0;
-}
-
-static uintptr_t resolve_game_local_alloc_opd(void) {
-    if (g_game_local_alloc_opd)
-        return g_game_local_alloc_opd;
-
-    /* OPDs for the same local VRAM allocator wrapper across known
-     * builds. Each candidate is validated against the mapped EBOOT
-     * phdrs before it is read, so candidates from other builds are
-     * skipped instead of faulting. */
-    static const uint32_t candidates[] = {
-        0x01017d80u, /* current test EBOOT */
-        0x00e7ca58u, /* red */
-        0x00ee0df8u, /* yellow */
-        0x010dbfe0u, /* blue */
-        0x00d13d88u, /* white */
-    };
-
-    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
-        uint32_t opd = candidates[i];
-        if (!eboot_va_mapped(opd, 8))
-            continue;
-        volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)opd;
-        uint32_t entry = p[0];
-        uint32_t toc = p[1];
-        if (!entry || !toc || !eboot_va_mapped(entry, 4) ||
-            !eboot_va_mapped(toc, 4))
-            continue;
-        g_game_local_alloc_opd = (uintptr_t)opd;
-        dbg_print_hex32("[vout] game alloc opd", opd);
-        dbg_print_hex32("[vout] game alloc entry", entry);
-        return g_game_local_alloc_opd;
-    }
-
-    dbg_print("[vout] game local allocator OPD not found\n");
-    return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -289,7 +198,7 @@ static const CellGcmDisplayInfo *hk_get_display_info(void) {
 /* ------------------------------------------------------------------ */
 
 static uint32_t alloc_native_surface(uint32_t surf_size) {
-    uintptr_t opd = resolve_game_local_alloc_opd();
+    uintptr_t opd = taiko_fpt_slot_value(TAIKO_FPT_GAME_LOCAL_ALLOC);
     if (!opd)
         return 0;
     game_local_alloc_fn alloc = (game_local_alloc_fn)opd;
@@ -574,13 +483,16 @@ void taiko_video_upscale_install(void) {
     g_native_pitch = cellGcmGetTiledPitchSize(g_native_w * 4);
     /* Native destination placement happens lazily after the game has
      * initialized its local-memory allocator. */
-    if (!resolve_game_local_alloc_opd()) {
+    uintptr_t alloc_opd = taiko_fpt_slot_value(TAIKO_FPT_GAME_LOCAL_ALLOC);
+    if (!alloc_opd) {
+        dbg_print("[vout] game local allocator OPD unavailable\n");
         publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
         publish_original_fpt(TAIKO_FPT_VIDEO_OUT_CONFIGURE);
         publish_original_fpt(TAIKO_FPT_GCM_GET_CONFIGURATION);
         publish_original_fpt(TAIKO_FPT_GCM_GET_DISPLAY_INFO);
         return;
     }
+    dbg_print_hex32("[vout] game alloc opd", (uint32_t)alloc_opd);
 
     dbg_print_hex32("[vout] real resId",      g_real_res_id);
     dbg_print_hex32("[vout] native w",        g_native_w);

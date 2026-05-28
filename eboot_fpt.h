@@ -54,8 +54,9 @@ enum {
     TAIKO_FPT_VIDEO_OUT_CONFIGURE    = 82,
     TAIKO_FPT_GCM_GET_CONFIGURATION  = 83,
     TAIKO_FPT_GCM_GET_DISPLAY_INFO   = 84,
+    TAIKO_FPT_GAME_LOCAL_ALLOC        = 85,
 
-    TAIKO_FPT_SLOT_COUNT = 85,
+    TAIKO_FPT_SLOT_COUNT = 86,
 };
 
 typedef struct {
@@ -71,6 +72,7 @@ int taiko_fpt_publish(uint32_t slot, const void *opd);
 /* Update only the FPT dispatch slot. Direct GOT callers keep the original OPD. */
 int taiko_fpt_publish_slot_only(uint32_t slot, const void *opd);
 uintptr_t taiko_fpt_original_opd(uint32_t slot);
+uintptr_t taiko_fpt_slot_value(uint32_t slot);
 int taiko_fpt_available(void);
 
 #endif
