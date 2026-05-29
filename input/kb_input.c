@@ -310,10 +310,6 @@ static void poll_and_accumulate_locked(void) {
         CellKbData d;
         int limit = 32;
         while (limit-- > 0 && cellKbRead(port, &d) == 0) {
-            if (d.len <= 0 && d.mkey == 0) {
-                break;
-            }
-
             uint32_t cur[8];
             kb_data_to_bitmap(&d, cur);
 

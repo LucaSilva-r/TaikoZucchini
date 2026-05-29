@@ -116,10 +116,6 @@ static void kb_sample(uint32_t out[8]) {
         CellKbData d;
         int limit = 32;
         while (limit-- > 0 && cellKbRead(port, &d) == 0) {
-            if (d.len <= 0 && d.mkey == 0) {
-                break;
-            }
-
             uint32_t fresh[8];
             memset(fresh, 0, sizeof fresh);
             int n = d.len;
