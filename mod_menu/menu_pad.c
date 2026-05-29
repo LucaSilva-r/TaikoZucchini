@@ -114,8 +114,12 @@ static void kb_sample(uint32_t out[8]) {
      * the boot-time ESC entry reliable. */
     for (uint32_t port = 0; port < KB_SCAN_PORTS; port++) {
         CellKbData d;
-        memset(&d, 0, sizeof d);
-        if (cellKbRead(port, &d) == 0 && d.len > 0) {
+        int limit = 32;
+        while (limit-- > 0 && cellKbRead(port, &d) == 0) {
+            if (d.len <= 0 && d.mkey == 0) {
+                break;
+            }
+
             uint32_t fresh[8];
             memset(fresh, 0, sizeof fresh);
             int n = d.len;

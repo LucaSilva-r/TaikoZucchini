@@ -257,27 +257,10 @@ static void kb_data_to_bitmap(const CellKbData *d, uint32_t bm[8]) {
 
 static void build_pressed(uint32_t pressed[8]) {
     memset(pressed, 0, 32);
-    CellKbInfo info;
-    memset(&info, 0, sizeof info);
-    int have_info = (cellKbGetInfo(&info) == 0);
-    uint32_t cap = have_info && info.max_connect > 0 ? info.max_connect : KB_SCAN_PORTS;
-    if (cap > KB_SCAN_PORTS) cap = KB_SCAN_PORTS;
-    for (uint32_t port = 0; port < cap; port++) {
-        if (have_info && info.status[port] != CELL_KB_STATUS_CONNECTED) {
-            memset(g_kb_port_state[port], 0, sizeof g_kb_port_state[port]);
-            continue;
-        }
-
-        CellKbData d;
-        memset(&d, 0, sizeof d);
-        if (cellKbRead(port, &d) == 0 && (d.len > 0 || d.mkey != 0)) {
-            uint32_t fresh[8];
-            kb_data_to_bitmap(&d, fresh);
-            memcpy(g_kb_port_state[port], fresh, sizeof fresh);
-        }
-
-        for (int i = 0; i < 8; i++)
+    for (uint32_t port = 0; port < KB_SCAN_PORTS; port++) {
+        for (int i = 0; i < 8; i++) {
             pressed[i] |= g_kb_port_state[port][i];
+        }
     }
 }
 
@@ -311,30 +294,57 @@ static void poll_and_accumulate_locked(void) {
     static const int hit_acts[4] = {
         PAD_ACT_HIT_SL, PAD_ACT_HIT_CL, PAD_ACT_HIT_CR, PAD_ACT_HIT_SR
     };
-    uint32_t cur[8];
-    build_pressed(cur);
+
+    CellKbInfo info;
+    memset(&info, 0, sizeof info);
+    int have_info = (cellKbGetInfo(&info) == 0);
+    uint32_t cap = have_info && info.max_connect > 0 ? info.max_connect : KB_SCAN_PORTS;
+    if (cap > KB_SCAN_PORTS) cap = KB_SCAN_PORTS;
+
+    for (uint32_t port = 0; port < cap; port++) {
+        if (have_info && info.status[port] != CELL_KB_STATUS_CONNECTED) {
+            memset(g_kb_port_state[port], 0, sizeof g_kb_port_state[port]);
+            continue;
+        }
+
+        CellKbData d;
+        int limit = 32;
+        while (limit-- > 0 && cellKbRead(port, &d) == 0) {
+            if (d.len <= 0 && d.mkey == 0) {
+                break;
+            }
+
+            uint32_t cur[8];
+            kb_data_to_bitmap(&d, cur);
+
+            uint32_t prev[8];
+            memcpy(prev, g_kb_port_state[port], sizeof prev);
+            memcpy(g_kb_port_state[port], cur, sizeof cur);
+
+            for (int p = 0; p < KB_PORTS; p++) {
+                for (int i = 0; i < 4; i++) {
+                    if (any_rising(g_kb_keymap[p][hit_acts[i]], cur, prev))
+                        g_kb_hit_edges[p][i] = 1;
+                }
+                int ce = count_rising(g_kb_keymap[p][PAD_ACT_BTN_COIN], cur, prev);
+                while (ce-- > 0 && g_kb_coin_edges < 0xFFFFu) g_kb_coin_edges++;
+
+                int te = count_rising(g_kb_keymap[p][PAD_ACT_BTN_TEST], cur, prev);
+                while (te-- > 0 && g_kb_test_edges < 0xFFFFu) g_kb_test_edges++;
+            }
+        }
+    }
 
     for (int p = 0; p < KB_PORTS; p++) {
         uint32_t lvl = 0;
-        for (int act = 0; act < PAD_ACT_COUNT; act++) {
-            if (any_bound_pressed(g_kb_keymap[p][act], cur))
-                lvl |= PAD_ACT_BIT(act);
+        for (uint32_t port = 0; port < cap; port++) {
+            for (int act = 0; act < PAD_ACT_COUNT; act++) {
+                if (any_bound_pressed(g_kb_keymap[p][act], g_kb_port_state[port]))
+                    lvl |= PAD_ACT_BIT(act);
+            }
         }
         g_kb_level[p] = lvl;
-
-        for (int i = 0; i < 4; i++) {
-            if (any_rising(g_kb_keymap[p][hit_acts[i]], cur, g_kb_prev_pressed))
-                g_kb_hit_edges[p][i] = 1;
-        }
-        int ce = count_rising(g_kb_keymap[p][PAD_ACT_BTN_COIN],
-                              cur, g_kb_prev_pressed);
-        while (ce-- > 0 && g_kb_coin_edges < 0xFFFFu) g_kb_coin_edges++;
-        int te = count_rising(g_kb_keymap[p][PAD_ACT_BTN_TEST],
-                              cur, g_kb_prev_pressed);
-        while (te-- > 0 && g_kb_test_edges < 0xFFFFu) g_kb_test_edges++;
     }
-
-    memcpy(g_kb_prev_pressed, cur, sizeof cur);
 }
 
 int kb_input_keycode_held(unsigned char code) {
