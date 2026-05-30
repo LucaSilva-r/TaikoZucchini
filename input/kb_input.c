@@ -301,6 +301,14 @@ static void poll_and_accumulate_locked(void) {
     uint32_t cap = have_info && info.max_connect > 0 ? info.max_connect : KB_SCAN_PORTS;
     if (cap > KB_SCAN_PORTS) cap = KB_SCAN_PORTS;
 
+    /* Refresh each port's held-key snapshot from the FRESHEST packet this
+     * tick. cellKbRead in PACKET mode delivers a full snapshot of the keys
+     * currently held; we drain the queue and keep only the LAST real packet.
+     * Intermediate transient packets (USB rollover 0x01, momentary empties)
+     * are superseded, so they never reach edge detection. A read with no
+     * fresh data (len <= 0 && mkey == 0) is NOT an all-released snapshot:
+     * it must not overwrite the held set, so we stop and retain the last
+     * snapshot, keeping held keys alive across idle polls. */
     for (uint32_t port = 0; port < cap; port++) {
         if (have_info && info.status[port] != CELL_KB_STATUS_CONNECTED) {
             memset(g_kb_port_state[port], 0, sizeof g_kb_port_state[port]);
@@ -309,38 +317,48 @@ static void poll_and_accumulate_locked(void) {
 
         CellKbData d;
         int limit = 32;
+        uint32_t cur[8];
+        int got = 0;
         while (limit-- > 0 && cellKbRead(port, &d) == 0) {
-            uint32_t cur[8];
+            if (d.len <= 0 && d.mkey == 0)
+                break;
             kb_data_to_bitmap(&d, cur);
-
-            uint32_t prev[8];
-            memcpy(prev, g_kb_port_state[port], sizeof prev);
-            memcpy(g_kb_port_state[port], cur, sizeof cur);
-
-            for (int p = 0; p < KB_PORTS; p++) {
-                for (int i = 0; i < 4; i++) {
-                    if (any_rising(g_kb_keymap[p][hit_acts[i]], cur, prev))
-                        g_kb_hit_edges[p][i] = 1;
-                }
-                int ce = count_rising(g_kb_keymap[p][PAD_ACT_BTN_COIN], cur, prev);
-                while (ce-- > 0 && g_kb_coin_edges < 0xFFFFu) g_kb_coin_edges++;
-
-                int te = count_rising(g_kb_keymap[p][PAD_ACT_BTN_TEST], cur, prev);
-                while (te-- > 0 && g_kb_test_edges < 0xFFFFu) g_kb_test_edges++;
-            }
+            got = 1;
         }
+        if (got)
+            memcpy(g_kb_port_state[port], cur, sizeof cur);
     }
 
+    /* Merged pressed set across all physical keyboards. */
+    uint32_t pressed[8];
+    build_pressed(pressed);
+
+    /* ONE edge pass per tick, measured against the previous tick's pressed
+     * set. Edges are never computed per-packet: a key that is merely still
+     * held appears in both 'pressed' and 'g_kb_prev_pressed', so it can
+     * never look like a fresh press. Releasing a key produces a falling
+     * edge only -- it cannot create a hit. */
     for (int p = 0; p < KB_PORTS; p++) {
         uint32_t lvl = 0;
-        for (uint32_t port = 0; port < cap; port++) {
-            for (int act = 0; act < PAD_ACT_COUNT; act++) {
-                if (any_bound_pressed(g_kb_keymap[p][act], g_kb_port_state[port]))
-                    lvl |= PAD_ACT_BIT(act);
-            }
+        for (int act = 0; act < PAD_ACT_COUNT; act++) {
+            if (any_bound_pressed(g_kb_keymap[p][act], pressed))
+                lvl |= PAD_ACT_BIT(act);
         }
         g_kb_level[p] = lvl;
+
+        for (int i = 0; i < 4; i++) {
+            if (any_rising(g_kb_keymap[p][hit_acts[i]], pressed, g_kb_prev_pressed))
+                g_kb_hit_edges[p][i] = 1;
+        }
+        int ce = count_rising(g_kb_keymap[p][PAD_ACT_BTN_COIN],
+                              pressed, g_kb_prev_pressed);
+        while (ce-- > 0 && g_kb_coin_edges < 0xFFFFu) g_kb_coin_edges++;
+        int te = count_rising(g_kb_keymap[p][PAD_ACT_BTN_TEST],
+                              pressed, g_kb_prev_pressed);
+        while (te-- > 0 && g_kb_test_edges < 0xFFFFu) g_kb_test_edges++;
     }
+
+    memcpy(g_kb_prev_pressed, pressed, sizeof pressed);
 }
 
 int kb_input_keycode_held(unsigned char code) {
