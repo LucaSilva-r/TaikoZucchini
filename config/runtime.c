@@ -12,7 +12,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 10
+#define TAIKO_CFG_VERSION 11  /* v11: service buttons moved to [kb_service] */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
@@ -199,6 +199,10 @@ static void handle_kb_p2(const char *key, const char *value, void *u) {
     (void)u;
     kb_input_cfg_kv(1, key, value);
 }
+static void handle_kb_service(const char *key, const char *value, void *u) {
+    (void)u;
+    kb_input_cfg_service_kv(key, value);
+}
 
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -318,6 +322,7 @@ static const cfg_section_t SECTIONS[] = {
     {"p2",       handle_p2,       NULL},
     {"kb_p1",    handle_kb_p1,    NULL},
     {"kb_p2",    handle_kb_p2,    NULL},
+    {"kb_service", handle_kb_service, NULL},
 };
 
 /* --------------------------- Writeback ------------------------------- */

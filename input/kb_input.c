@@ -143,41 +143,56 @@ static void parse_binding_value(const char *value, uint8_t out[KB_MAX_BINDS]) {
     }
 }
 
+/* Drum hits (SL/CL/CR/SR) are per-player. Service/menu buttons
+ * (enter/service/test/coin/up/down) are GLOBAL: bound once and stored in
+ * the player-0 slot only. Player 1's service slots stay empty so a single
+ * key press is never counted twice (one credit per coin, one toggle per
+ * test). */
+#define KB_ACT_IS_DRUM(a) ((a) <= PAD_ACT_HIT_SR)
+
 void kb_input_seed_defaults(void) {
     memset(g_kb_keymap, 0, sizeof g_kb_keymap);
-    /* p1 defaults: DFJK drums. p2 defaults: ZXCV drums. Both share
-     * Enter/F1/F2/F3/arrows for menu/service buttons. */
+    /* p1 drums: DFJK. p2 drums: ZXCV. */
     g_kb_keymap[0][PAD_ACT_HIT_SL][0]      = CELL_KEYC_D;
     g_kb_keymap[0][PAD_ACT_HIT_CL][0]      = CELL_KEYC_F;
     g_kb_keymap[0][PAD_ACT_HIT_CR][0]      = CELL_KEYC_J;
     g_kb_keymap[0][PAD_ACT_HIT_SR][0]      = CELL_KEYC_K;
+
+    g_kb_keymap[1][PAD_ACT_HIT_SL][0]      = CELL_KEYC_Z;
+    g_kb_keymap[1][PAD_ACT_HIT_CL][0]      = CELL_KEYC_X;
+    g_kb_keymap[1][PAD_ACT_HIT_CR][0]      = CELL_KEYC_C;
+    g_kb_keymap[1][PAD_ACT_HIT_SR][0]      = CELL_KEYC_V;
+
+    /* Global service buttons (player-0 slot only). */
     g_kb_keymap[0][PAD_ACT_BTN_ENTER][0]   = CELL_KEYC_ENTER;
     g_kb_keymap[0][PAD_ACT_BTN_SERVICE][0] = CELL_KEYC_F2;
     g_kb_keymap[0][PAD_ACT_BTN_TEST][0]    = CELL_KEYC_F1;
     g_kb_keymap[0][PAD_ACT_BTN_COIN][0]    = CELL_KEYC_F3;
     g_kb_keymap[0][PAD_ACT_BTN_UP][0]      = CELL_KEYC_UP_ARROW;
     g_kb_keymap[0][PAD_ACT_BTN_DOWN][0]    = CELL_KEYC_DOWN_ARROW;
-
-    g_kb_keymap[1][PAD_ACT_HIT_SL][0]      = CELL_KEYC_Z;
-    g_kb_keymap[1][PAD_ACT_HIT_CL][0]      = CELL_KEYC_X;
-    g_kb_keymap[1][PAD_ACT_HIT_CR][0]      = CELL_KEYC_C;
-    g_kb_keymap[1][PAD_ACT_HIT_SR][0]      = CELL_KEYC_V;
-    g_kb_keymap[1][PAD_ACT_BTN_ENTER][0]   = CELL_KEYC_ENTER;
-    g_kb_keymap[1][PAD_ACT_BTN_SERVICE][0] = CELL_KEYC_F2;
-    g_kb_keymap[1][PAD_ACT_BTN_TEST][0]    = CELL_KEYC_F1;
-    g_kb_keymap[1][PAD_ACT_BTN_COIN][0]    = CELL_KEYC_F3;
-    g_kb_keymap[1][PAD_ACT_BTN_UP][0]      = CELL_KEYC_UP_ARROW;
-    g_kb_keymap[1][PAD_ACT_BTN_DOWN][0]    = CELL_KEYC_DOWN_ARROW;
 }
 
+/* Per-player drum bindings ([kb_p1]/[kb_p2]). Service actions are ignored
+ * here -- they are global and set via kb_input_cfg_service_kv. */
 void kb_input_cfg_kv(int player, const char *key, const char *value) {
     if (player < 0 || player >= KB_PORTS) return;
     int act = resolve_action(key);
-    if (act < 0) return;
+    if (act < 0 || !KB_ACT_IS_DRUM(act)) return;
     uint8_t parsed[KB_MAX_BINDS];
     parse_binding_value(value, parsed);
     if (g_initialized) sys_lwmutex_lock(&g_kb_lock, 0);
     memcpy(g_kb_keymap[player][act], parsed, KB_MAX_BINDS);
+    if (g_initialized) sys_lwmutex_unlock(&g_kb_lock);
+}
+
+/* Global service bindings ([kb_service]). Stored in the player-0 slot. */
+void kb_input_cfg_service_kv(const char *key, const char *value) {
+    int act = resolve_action(key);
+    if (act < 0 || KB_ACT_IS_DRUM(act)) return;
+    uint8_t parsed[KB_MAX_BINDS];
+    parse_binding_value(value, parsed);
+    if (g_initialized) sys_lwmutex_lock(&g_kb_lock, 0);
+    memcpy(g_kb_keymap[0][act], parsed, KB_MAX_BINDS);
     if (g_initialized) sys_lwmutex_unlock(&g_kb_lock);
 }
 
@@ -205,6 +220,9 @@ void kb_input_cfg_emit(int fd) {
         "# Keyboard -> USIO input mapping. Polls all connected keyboards;\n"
         "# both players draw from the same physical pool, distinguished\n"
         "# only by which keys each section binds.\n"
+        "# [kb_p1]/[kb_p2] hold per-player DRUM bindings only.\n"
+        "# [kb_service] holds the shared service/menu buttons (enter,\n"
+        "# service, test, coin, up, down) -- bound once for both players.\n"
         "# Names: A-Z 0-9 F1-F12 ENTER ESC BACKSPACE TAB SPACE MINUS EQUAL\n"
         "#        LBRACKET RBRACKET BACKSLASH SEMICOLON QUOTE COMMA PERIOD\n"
         "#        SLASH UP DOWN LEFT RIGHT HOME END PAGEUP PAGEDOWN INSERT\n"
@@ -215,6 +233,7 @@ void kb_input_cfg_emit(int fd) {
     for (int p = 0; p < KB_PORTS; p++) {
         cfg_file_write_str(fd, p == 0 ? "[kb_p1]\n" : "[kb_p2]\n");
         for (int i = 0; ACT_NAMES[i].name; i++) {
+            if (!KB_ACT_IS_DRUM(ACT_NAMES[i].action)) continue;
             cfg_file_write_str(fd, ACT_NAMES[i].name);
             cfg_file_write_str(fd, " = ");
             emit_binds(fd, g_kb_keymap[p][ACT_NAMES[i].action]);
@@ -222,6 +241,16 @@ void kb_input_cfg_emit(int fd) {
         }
         cfg_file_write_str(fd, "\n");
     }
+
+    cfg_file_write_str(fd, "[kb_service]\n");
+    for (int i = 0; ACT_NAMES[i].name; i++) {
+        if (KB_ACT_IS_DRUM(ACT_NAMES[i].action)) continue;
+        cfg_file_write_str(fd, ACT_NAMES[i].name);
+        cfg_file_write_str(fd, " = ");
+        emit_binds(fd, g_kb_keymap[0][ACT_NAMES[i].action]);
+        cfg_file_write_str(fd, "\n");
+    }
+    cfg_file_write_str(fd, "\n");
 }
 
 static inline void set_bit(uint32_t *bm, uint8_t code) {
@@ -280,12 +309,15 @@ static int any_rising(const uint8_t *binds,
     return 0;
 }
 
-static int count_rising(const uint8_t *binds,
-                        const uint32_t *cur, const uint32_t *prev) {
+/* Count keys in 'keys' that went up->down between prev and cur (each
+ * distinct physical key once). Used for global coin/test counters where
+ * the same key may be bound by multiple players. */
+static int count_set_rising(const uint32_t keys[8],
+                            const uint32_t *cur, const uint32_t *prev) {
     int n = 0;
-    for (int i = 0; i < KB_MAX_BINDS && binds[i]; i++) {
-        uint8_t c = binds[i];
-        if (get_bit(cur, c) && !get_bit(prev, c)) n++;
+    for (int w = 0; w < 8; w++) {
+        uint32_t rise = keys[w] & cur[w] & ~prev[w];
+        while (rise) { rise &= rise - 1u; n++; }
     }
     return n;
 }
@@ -350,13 +382,26 @@ static void poll_and_accumulate_locked(void) {
             if (any_rising(g_kb_keymap[p][hit_acts[i]], pressed, g_kb_prev_pressed))
                 g_kb_hit_edges[p][i] = 1;
         }
-        int ce = count_rising(g_kb_keymap[p][PAD_ACT_BTN_COIN],
-                              pressed, g_kb_prev_pressed);
-        while (ce-- > 0 && g_kb_coin_edges < 0xFFFFu) g_kb_coin_edges++;
-        int te = count_rising(g_kb_keymap[p][PAD_ACT_BTN_TEST],
-                              pressed, g_kb_prev_pressed);
-        while (te-- > 0 && g_kb_test_edges < 0xFFFFu) g_kb_test_edges++;
     }
+
+    /* Coin/test are GLOBAL counters, not per-player. Both player keymaps
+     * default the same physical key (coin=F3, test=F1) and share one
+     * keyboard pool, so counting per player would double-count one press.
+     * Union each action's binds into a keycode set and count each rising
+     * physical key once. */
+    uint32_t coin_keys[8], test_keys[8];
+    memset(coin_keys, 0, sizeof coin_keys);
+    memset(test_keys, 0, sizeof test_keys);
+    for (int p = 0; p < KB_PORTS; p++) {
+        const uint8_t *cb = g_kb_keymap[p][PAD_ACT_BTN_COIN];
+        for (int i = 0; i < KB_MAX_BINDS && cb[i]; i++) set_bit(coin_keys, cb[i]);
+        const uint8_t *tb = g_kb_keymap[p][PAD_ACT_BTN_TEST];
+        for (int i = 0; i < KB_MAX_BINDS && tb[i]; i++) set_bit(test_keys, tb[i]);
+    }
+    int ce = count_set_rising(coin_keys, pressed, g_kb_prev_pressed);
+    while (ce-- > 0 && g_kb_coin_edges < 0xFFFFu) g_kb_coin_edges++;
+    int te = count_set_rising(test_keys, pressed, g_kb_prev_pressed);
+    while (te-- > 0 && g_kb_test_edges < 0xFFFFu) g_kb_test_edges++;
 
     memcpy(g_kb_prev_pressed, pressed, sizeof pressed);
 }

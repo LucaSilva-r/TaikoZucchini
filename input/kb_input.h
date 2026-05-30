@@ -5,8 +5,9 @@
 
 /* Keyboard input bridge. Runs in parallel with pad_input and feeds the
  * same USIO snapshot via kb_input_merge(). All connected keyboard ports
- * are polled and merged into a single "pressed" set; per-player bindings
- * are configured under [kb_p1] / [kb_p2] sections of taiko_config.cfg. */
+ * are polled and merged into a single "pressed" set. Per-player DRUM
+ * bindings live under [kb_p1] / [kb_p2]; the shared service/menu buttons
+ * live under [kb_service] in taiko_config.cfg. */
 
 void kb_input_init(void);
 
@@ -27,7 +28,10 @@ void kb_input_merge(pad_snapshot_t *out);
 int kb_input_keycode_held(unsigned char code);
 
 void kb_input_seed_defaults(void);
+/* [kb_p1]/[kb_p2]: per-player drum bindings. Service keys ignored here. */
 void kb_input_cfg_kv(int player, const char *key, const char *value);
+/* [kb_service]: shared service/menu bindings (enter/service/test/coin/up/down). */
+void kb_input_cfg_service_kv(const char *key, const char *value);
 void kb_input_cfg_emit(int fd);
 
 #endif
