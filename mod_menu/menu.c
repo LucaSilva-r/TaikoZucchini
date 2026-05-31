@@ -47,6 +47,7 @@ typedef enum {
     /* features */
     F_USIO_EMULATION,
     F_QR_CARD_READER,
+    F_SAVED_CARD_PROMPT,
     F_CAMERA_DIAG_HOOKS,
     F_DATA00000_REDIRECT,
     F_CERT_REPLACEMENT,
@@ -79,6 +80,7 @@ static int field_get(field_id_t id) {
     switch (id) {
     case F_USIO_EMULATION:      return g_cfg.usio_emulation;
     case F_QR_CARD_READER:      return g_cfg.qr_card_reader;
+    case F_SAVED_CARD_PROMPT:   return g_cfg.saved_card_prompt;
     case F_CAMERA_DIAG_HOOKS:   return g_cfg.camera_diag_hooks;
     case F_DATA00000_REDIRECT:  return g_cfg.data00000_redirect;
     case F_CERT_REPLACEMENT:    return g_cfg.cert_replacement;
@@ -109,6 +111,7 @@ static void field_set(field_id_t id, int v) {
     switch (id) {
     case F_USIO_EMULATION:      g_cfg.usio_emulation = v; break;
     case F_QR_CARD_READER:      g_cfg.qr_card_reader = v; break;
+    case F_SAVED_CARD_PROMPT:   g_cfg.saved_card_prompt = v; break;
     case F_CAMERA_DIAG_HOOKS:   g_cfg.camera_diag_hooks = v; break;
     case F_DATA00000_REDIRECT:  g_cfg.data00000_redirect = v; break;
     case F_CERT_REPLACEMENT:    g_cfg.cert_replacement = v; break;
@@ -162,6 +165,9 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "QR card reader",
       "Uses the camera to scan Banapass QR cards. Requires USIO emulation and camera input hooks.",
       F_QR_CARD_READER, 0 },
+    { ITEM_TOGGLE,  "Saved-card prompt",
+      "Shows the saved-card overlay prompt while the game waits for a card. Stored cards still work without QR.",
+      F_SAVED_CARD_PROMPT, 0 },
 
     { ITEM_SECTION, "Network", "", 0, 0 },
     { ITEM_TOGGLE,  "Online redirect",
@@ -388,9 +394,20 @@ static void toggle_field(field_id_t id) {
             g_status = "QR enabled: USIO and camera input hooks also enabled";
         g_cfg.usio_emulation = 1;
         g_cfg.camera_diag_hooks = 1;
-    } else if (id == F_USIO_EMULATION && !new_value && g_cfg.qr_card_reader) {
+    } else if (id == F_USIO_EMULATION && !new_value) {
+        int qr_was_enabled = g_cfg.qr_card_reader;
+        int prompt_was_enabled = g_cfg.saved_card_prompt;
         g_cfg.qr_card_reader = 0;
-        g_status = "QR disabled because it requires USIO emulation";
+        g_cfg.saved_card_prompt = 0;
+        if (qr_was_enabled && prompt_was_enabled)
+            g_status = "QR and saved-card prompt disabled because they require USIO emulation";
+        else if (qr_was_enabled)
+            g_status = "QR disabled because it requires USIO emulation";
+        else if (prompt_was_enabled)
+            g_status = "Saved-card prompt disabled because it requires USIO emulation";
+    } else if (id == F_SAVED_CARD_PROMPT && new_value && !g_cfg.usio_emulation) {
+        g_cfg.usio_emulation = 1;
+        g_status = "Saved-card prompt enabled: USIO emulation also enabled";
     } else if (id == F_CAMERA_DIAG_HOOKS && !new_value && g_cfg.qr_card_reader) {
         g_cfg.qr_card_reader = 0;
         g_status = "QR disabled because it requires camera input hooks";

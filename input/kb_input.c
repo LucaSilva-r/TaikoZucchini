@@ -93,6 +93,7 @@ static uint8_t  g_kb_hit_edges[KB_PORTS][4];
 static uint16_t g_kb_coin_edges;
 static uint16_t g_kb_test_edges;
 static uint32_t g_kb_prev_pressed[8];  /* 256-bit bitmap, owned by worker */
+static uint8_t  g_kb_saved_cards[KB_MAX_BINDS];
 /* Per-port latest pressed bitmap. cellKbRead in PACKET mode is delta-
  * queued: events are produced on USB state changes only, so polls in
  * between return an empty queue. Rebuilding the global pressed set from
@@ -103,6 +104,10 @@ static uint32_t g_kb_prev_pressed[8];  /* 256-bit bitmap, owned by worker */
 static uint32_t g_kb_port_state[KB_SCAN_PORTS][8];
 
 static int              g_initialized;
+
+int kb_input_ready(void) {
+    return g_initialized;
+}
 
 static uint8_t resolve_key(const char *tok) {
     for (int i = 0; KB_NAMES[i].name; i++) {
@@ -170,6 +175,7 @@ void kb_input_seed_defaults(void) {
     g_kb_keymap[0][PAD_ACT_BTN_COIN][0]    = CELL_KEYC_F3;
     g_kb_keymap[0][PAD_ACT_BTN_UP][0]      = CELL_KEYC_UP_ARROW;
     g_kb_keymap[0][PAD_ACT_BTN_DOWN][0]    = CELL_KEYC_DOWN_ARROW;
+    g_kb_saved_cards[0] = CELL_KEYC_F4;
 }
 
 /* Per-player drum bindings ([kb_p1]/[kb_p2]). Service actions are ignored
@@ -187,6 +193,15 @@ void kb_input_cfg_kv(int player, const char *key, const char *value) {
 
 /* Global service bindings ([kb_service]). Stored in the player-0 slot. */
 void kb_input_cfg_service_kv(const char *key, const char *value) {
+    if (cfg_file_str_eq_ci(key, "saved_cards")) {
+        uint8_t parsed[KB_MAX_BINDS];
+        parse_binding_value(value, parsed);
+        if (g_initialized) sys_lwmutex_lock(&g_kb_lock, 0);
+        memcpy(g_kb_saved_cards, parsed, KB_MAX_BINDS);
+        if (g_initialized) sys_lwmutex_unlock(&g_kb_lock);
+        return;
+    }
+
     int act = resolve_action(key);
     if (act < 0 || KB_ACT_IS_DRUM(act)) return;
     uint8_t parsed[KB_MAX_BINDS];
@@ -222,7 +237,7 @@ void kb_input_cfg_emit(int fd) {
         "# only by which keys each section binds.\n"
         "# [kb_p1]/[kb_p2] hold per-player DRUM bindings only.\n"
         "# [kb_service] holds the shared service/menu buttons (enter,\n"
-        "# service, test, coin, up, down) -- bound once for both players.\n"
+        "# service, test, coin, up, down) plus saved_cards shortcut.\n"
         "# Names: A-Z 0-9 F1-F12 ENTER ESC BACKSPACE TAB SPACE MINUS EQUAL\n"
         "#        LBRACKET RBRACKET BACKSLASH SEMICOLON QUOTE COMMA PERIOD\n"
         "#        SLASH UP DOWN LEFT RIGHT HOME END PAGEUP PAGEDOWN INSERT\n"
@@ -250,6 +265,9 @@ void kb_input_cfg_emit(int fd) {
         emit_binds(fd, g_kb_keymap[0][ACT_NAMES[i].action]);
         cfg_file_write_str(fd, "\n");
     }
+    cfg_file_write_str(fd, "saved_cards = ");
+    emit_binds(fd, g_kb_saved_cards);
+    cfg_file_write_str(fd, "\n");
     cfg_file_write_str(fd, "\n");
 }
 
@@ -412,6 +430,16 @@ int kb_input_keycode_held(unsigned char code) {
     uint32_t cur[8];
     build_pressed(cur);
     int held = get_bit(cur, code);
+    sys_lwmutex_unlock(&g_kb_lock);
+    return held;
+}
+
+int kb_input_saved_cards_held(void) {
+    if (!g_initialized) return 0;
+    sys_lwmutex_lock(&g_kb_lock, 0);
+    uint32_t cur[8];
+    build_pressed(cur);
+    int held = any_bound_pressed(g_kb_saved_cards, cur);
     sys_lwmutex_unlock(&g_kb_lock);
     return held;
 }

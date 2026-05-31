@@ -12,6 +12,8 @@
 #include "bpreader_serial.h"
 #include "overlay.h"
 #include "taiko_frame.h"
+#include "kb_input.h"
+#include "runtime.h"
 #include "menu_pad.h"
 #include "menu_osk.h"
 #include "debug.h"
@@ -219,12 +221,15 @@ static void card_picker_thread(uint64_t arg) {
         int want = bpreader_hook_reader_accepting_card() &&
                    !bpreader_serial_card_present();
         if (want) {
-            if ((refresh % PROMPT_REFRESH_TICKS) == 0)
-                taiko_overlay_show_prompt("Hold L3+R3 for saved cards");
+            if (g_cfg.saved_card_prompt &&
+                (refresh % PROMPT_REFRESH_TICKS) == 0)
+                taiko_overlay_show_prompt("Hold L3+R3 or F4 for saved cards");
             refresh++;
 
             uint32_t held = menu_pad_held();
-            if ((held & MENU_BTN_L3) && (held & MENU_BTN_R3)) {
+            int open_held = ((held & MENU_BTN_L3) && (held & MENU_BTN_R3)) ||
+                            kb_input_saved_cards_held();
+            if (open_held) {
                 if (++hold >= OPEN_HOLD_TICKS) {
                     run_chooser();
                     hold = 0;

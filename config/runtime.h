@@ -17,6 +17,7 @@ typedef struct {
     /* features (subsystem on/off) */
     unsigned usio_emulation     : 1;
     unsigned qr_card_reader     : 1;
+    unsigned saved_card_prompt  : 1;
     unsigned camera_diag_hooks  : 1;
     unsigned data00000_redirect : 1;
     unsigned cert_replacement   : 1;

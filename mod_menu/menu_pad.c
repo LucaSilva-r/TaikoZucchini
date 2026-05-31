@@ -8,12 +8,14 @@
 #include <cell/sysmodule.h>
 
 #include "debug.h"
+#include "kb_input.h"
 
 #define MAX_PADS 2
 #define KB_SCAN_PORTS 4
 
 static int g_inited = 0;
 static int g_kb_inited = 0;
+static int g_kb_owned = 0;
 static uint32_t g_prev_held = 0;
 
 /* Per-port latest pressed bitmap (256 bits). cellKbRead in PACKET mode
@@ -45,8 +47,12 @@ int menu_pad_init(void) {
         g_cache_valid[p] = 0;
     }
 
-    /* Keyboard side: optional — if cellKbInit fails we just keep pad-only
-     * behaviour. Sysmodule IO is already loaded by menu_maybe_open. */
+    /* Keyboard side: optional. The runtime USIO bridge owns cellKbRead once
+     * active, so reuse its cached state instead of racing its packet queue.
+     * Early-boot mod menu runs before that bridge and keeps this local path. */
+    if (kb_input_ready())
+        return 0;
+
     int krc = cellKbInit(KB_SCAN_PORTS);
     if (krc == CELL_OK || krc == CELL_KB_ERROR_ALREADY_INITIALIZED) {
         for (uint32_t port = 0; port < KB_SCAN_PORTS; port++) {
@@ -55,6 +61,7 @@ int menu_pad_init(void) {
         }
         memset(g_kb_state, 0, sizeof g_kb_state);
         g_kb_inited = 1;
+        g_kb_owned = 1;
     } else {
         dbg_print_hex32("[menu_pad] cellKbInit rc", (uint32_t)krc);
     }
@@ -64,11 +71,12 @@ int menu_pad_init(void) {
 void menu_pad_shutdown(void) {
     if (!g_inited) return;
     cellPadEnd();
-    if (g_kb_inited) {
+    if (g_kb_owned) {
         cellKbEnd();
-        g_kb_inited = 0;
-        memset(g_kb_state, 0, sizeof g_kb_state);
     }
+    g_kb_inited = 0;
+    g_kb_owned = 0;
+    memset(g_kb_state, 0, sizeof g_kb_state);
     g_inited = 0;
     g_prev_held = 0;
     for (uint32_t p = 0; p < CELL_PAD_MAX_PORT_NUM; p++) {
@@ -144,6 +152,19 @@ static uint32_t map_kb(const uint32_t bm[8]) {
     return m;
 }
 
+static uint32_t map_kb_bridge(void) {
+    uint32_t m = 0;
+    if (kb_input_keycode_held(CELL_KEYC_UP_ARROW))    m |= MENU_BTN_UP;
+    if (kb_input_keycode_held(CELL_KEYC_DOWN_ARROW))  m |= MENU_BTN_DOWN;
+    if (kb_input_keycode_held(CELL_KEYC_LEFT_ARROW))  m |= MENU_BTN_LEFT;
+    if (kb_input_keycode_held(CELL_KEYC_RIGHT_ARROW)) m |= MENU_BTN_RIGHT;
+    if (kb_input_keycode_held(CELL_KEYC_ENTER))       m |= MENU_BTN_CROSS;
+    if (kb_input_keycode_held(CELL_KEYC_ESC))         m |= MENU_BTN_CIRCLE;
+    if (kb_input_keycode_held(CELL_KEYC_F2))          m |= MENU_BTN_KB_ENTRY;
+    if (kb_input_keycode_held(CELL_KEYC_F10))         m |= MENU_BTN_START;
+    return m;
+}
+
 uint32_t menu_pad_held(void) {
     if (!g_inited) return 0;
 
@@ -167,9 +188,13 @@ uint32_t menu_pad_held(void) {
         held |= map_raw(g_cache_d1[port], g_cache_d2[port]);
     }
 
-    uint32_t kb_bm[8];
-    kb_sample(kb_bm);
-    held |= map_kb(kb_bm);
+    if (kb_input_ready()) {
+        held |= map_kb_bridge();
+    } else {
+        uint32_t kb_bm[8];
+        kb_sample(kb_bm);
+        held |= map_kb(kb_bm);
+    }
 
     return held;
 }

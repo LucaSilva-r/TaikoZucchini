@@ -218,6 +218,9 @@ $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
 core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h network/certs.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h cards/card_picker.h
+mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h
+mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
+mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
 eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
@@ -225,7 +228,7 @@ qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu
 qr/qr_spu_host.o: qr/qr_spu_host.c qr/qr_spu_host.h qr_spu/qr_spu_shared.h core/debug.h
 bpreader/bpreader_serial.o: bpreader/bpreader_serial.c bpreader/bpreader_serial.h
 cards/card_store.o:  cards/card_store.c cards/card_store.h config/cfg_file.h core/debug.h
-cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_store.h qr/camera_qr.h hooks/bpreader_hook.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
+cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_store.h qr/camera_qr.h hooks/bpreader_hook.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h input/kb_input.h config/runtime.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
 hooks/bpreader_hook.o: hooks/bpreader_hook.c hooks/bpreader_hook.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h
@@ -241,8 +244,9 @@ network/online_diag.o:   network/online_diag.c   network/online_diag.h config.h 
 hooks/http_hook.o:      hooks/http_hook.c      hooks/http_hook.h core/icache.h core/debug.h network/http_client.h hooks/cell_http_shim.h eboot_fpt.h config/runtime.h config.h
 hooks/dns_hook.o:       hooks/dns_hook.c       hooks/dns_hook.h core/icache.h core/debug.h eboot_fpt.h config/runtime.h config.h
 hooks/socket_hook.o:    hooks/socket_hook.c    hooks/socket_hook.h core/icache.h core/debug.h eboot_fpt.h network/http_client.h config/runtime.h config.h
+hooks/video_out_hook.o: hooks/video_out_hook.c hooks/video_out_hook.h eboot_fpt.h config/runtime.h config.h core/debug.h
 network/uri.o:            network/uri.c            network/uri.h
-network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config.h
+network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
 network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h config/version.h core/debug.h core/overlay.h
 hooks/cell_http_shim.o: hooks/cell_http_shim.c hooks/cell_http_shim.h network/http_client.h core/debug.h config/runtime.h config.h
 

@@ -12,7 +12,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 11  /* v11: service buttons moved to [kb_service] */
+#define TAIKO_CFG_VERSION 12  /* v12: saved-card prompt + keyboard binding */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
@@ -20,6 +20,7 @@
 taiko_runtime_cfg_t g_cfg = {
     .usio_emulation       = TAIKO_FEATURE_BPREADER_HOOK,
     .qr_card_reader       = TAIKO_FEATURE_QR_CARD_READER,
+    .saved_card_prompt    = 1,
     .camera_diag_hooks    = TAIKO_FEATURE_CAMERA_DIAG_HOOKS,
     .data00000_redirect   = TAIKO_FEATURE_DATA00000_REDIRECT,
     .cert_replacement     = TAIKO_FEATURE_CERT_REPLACEMENT,
@@ -68,6 +69,7 @@ static void handle_features(const char *key, const char *value, void *u) {
     (void)u;
     SET_BIT("usio_emulation",     usio_emulation);
     SET_BIT("qr_card_reader",     qr_card_reader);
+    SET_BIT("saved_card_prompt",  saved_card_prompt);
     SET_BIT("camera_diag_hooks",  camera_diag_hooks);
     SET_BIT("data00000_redirect", data00000_redirect);
     SET_BIT("cert_replacement",   cert_replacement);
@@ -414,6 +416,10 @@ static void write_cfg_file(const char *path) {
         "Requires usio_emulation. Feeds QR-scanned cards to the fake reader. "
         "Off = card reader always reports 'no card'.",
         "qr_card_reader", g_cfg.qr_card_reader);
+    emit_kv_bool(fd,
+        "Shows the saved-card overlay prompt while the game waits for a card. "
+        "Stored cards and manual entry stay available when QR scanning is off.",
+        "saved_card_prompt", g_cfg.saved_card_prompt);
     emit_kv_bool(fd,
         "Hook camera_get_attribute + log diag probe attempts.",
         "camera_diag_hooks", g_cfg.camera_diag_hooks);
