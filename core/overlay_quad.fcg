@@ -1,0 +1,8 @@
+void main(float4 color : COLOR0,
+          float2 texcoord : TEXCOORD0,
+          uniform sampler2D texture,
+          out float4 oColor : COLOR0)
+{
+    float a = tex2D(texture, texcoord).a;
+    oColor = float4(color.rgb, color.a * a);
+}

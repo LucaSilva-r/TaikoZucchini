@@ -15,9 +15,9 @@
 #include "menu_osk.h"
 #include "debug.h"
 
-#define TICK_US               (16 * 1000)   /* ~60 Hz UI loop */
-#define OPEN_HOLD_TICKS       50            /* ~0.8s of L3+R3 to open */
-#define PROMPT_REFRESH_TICKS  60            /* re-show toast ~once a second */
+#define TICK_US               (4 * 1000)    /* ~250 Hz; catches quick taps */
+#define OPEN_HOLD_TICKS       200           /* ~0.8s of L3+R3 to open */
+#define PROMPT_REFRESH_TICKS  250           /* re-show toast ~once a second */
 #define QR_WAIT_TICKS         150           /* ~15s @ 100ms to capture a scan */
 
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */

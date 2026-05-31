@@ -5,35 +5,40 @@
 #include <string.h>
 
 #include <cell/gcm.h>
+#include <Cg/cgBinary.h>
 #include <sys/memory.h>
 #include <sys/sys_time.h>
 
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "menu_font_20.h"
+#include "overlay_quad_shaders.h"
 #include "video_out_hook.h"
 
 #define OVERLAY_BOOT_WINDOW_US (60ULL * 1000ULL * 1000ULL)
 #define OVERLAY_TOAST_FRAMES   120
-#define OVERLAY_TEX_W          512
-#define OVERLAY_TEX_H          64
-#define OVERLAY_MAP_SIZE       (1024 * 1024)
-#define OVERLAY_CMD_OFFSET     (256 * 1024)
-#define OVERLAY_CMD_WORDS      4096
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
-/* Interactive menu surface. Double-buffered in its own 2MB main-memory
- * block (kept out of the toast map so it never collides with the command
- * buffer at the 256KB offset). Each 512x384 ARGB slot = 768KB; the CPU
- * draws into the slot the RSX is NOT reading, then atomically publishes it
- * via g_menu_cur — otherwise the per-flip DMA races the redraw and copies a
- * half-cleared (black) image. */
-#define OVERLAY_MENU_TEX_W     512
-#define OVERLAY_MENU_TEX_H     384
-#define OVERLAY_MENU_SLOT_BYTES ((uint32_t)OVERLAY_MENU_TEX_W * OVERLAY_MENU_TEX_H * 4)
-#define OVERLAY_MENU_MAP_SIZE  (2 * 1024 * 1024)
+#define OVERLAY_MAP_SIZE       (1024 * 1024)
+#define OVERLAY_CMD_RING_SLOTS 3
+#define OVERLAY_CMD_WORDS      16384
+
+#define OVERLAY_MAX_LINES      36
+#define OVERLAY_TEXT_CAP       96
 #define OVERLAY_MENU_ROW_H     26
 #define OVERLAY_MENU_VISIBLE   10
+#define OVERLAY_ATLAS_PITCH    4096
+#define OVERLAY_SWATCH_W       16
+#define OVERLAY_SWATCH_H       16
+#define OVERLAY_VERTEX_SLOTS   3
+#define OVERLAY_VERTEX_MAX     4096
+
+#define UI_COLOR_BG       0xDC101010u
+#define UI_COLOR_PANEL    0xF0181818u
+#define UI_COLOR_ACCENT   0xFFF0C040u
+#define UI_COLOR_TEXT     0xFFFFFFFFu
+#define UI_COLOR_MUTED    0xFFA0A0A0u
+#define UI_COLOR_DARK     0xFF101010u
 
 typedef int (*gcm_flip_command_fn)(void *ctx, uint8_t id);
 typedef int (*gcm_set_display_buffer_fn)(uint8_t id, uint32_t offset,
@@ -48,29 +53,60 @@ typedef struct {
     int valid;
 } overlay_buffer_t;
 
+typedef enum {
+    TEXT_WHITE = 0,
+    TEXT_ACCENT,
+    TEXT_MUTED,
+    TEXT_DARK,
+    TEXT_COLOR_COUNT
+} text_color_t;
+
+typedef struct {
+    char title[OVERLAY_TEXT_CAP];
+    char lines[OVERLAY_MAX_LINES][OVERLAY_TEXT_CAP];
+    char footer[OVERLAY_TEXT_CAP];
+    int count;
+    int selected;
+    int top;
+} overlay_menu_state_t;
+
+typedef struct {
+    float pos[4];
+    float color[4];
+    float uv[2];
+} overlay_vertex_t;
+
 static uintptr_t g_orig_flip_command;
 static uintptr_t g_orig_set_display_buffer;
 static overlay_buffer_t g_buffers[8];
 static void *g_local_base;
-static volatile int g_toast_frames;
-static char g_toast[96];
 static uint64_t g_boot_us;
-static uint32_t *g_toast_image;
-static uint32_t g_toast_io_offset;
-static uint32_t *g_overlay_cmd;
-static uint32_t g_overlay_cmd_io_offset;
-static int g_toast_mapped;
-static int g_toast_w;
-static int g_toast_h;
-static volatile int g_toast_force;   /* draw toast outside the boot window */
 
-static uint32_t *g_menu_image;       /* base of the 2-slot block */
-static uint32_t g_menu_io_offset;    /* IO offset of slot 0 */
-static int g_menu_mapped;
+static uint32_t *g_overlay_mem;
+static uint32_t g_overlay_io;
+static uint32_t *g_overlay_cmd;
+static uint32_t g_overlay_cmd_io;
+static uint32_t g_font_tex_io;
+static uint32_t g_swatch_io[6];
+static overlay_vertex_t *g_text_vtx;
+static uint32_t g_text_vtx_io;
+static uint32_t g_text_vtx_next;
+static uint32_t g_fp_ucode_io;
+static uint32_t g_pos_attr = 0;
+static uint32_t g_col_attr = 3;
+static uint32_t g_uv_attr = 8;
+static uint32_t g_tex_unit = 0;
+static uint32_t g_cmd_next;
+static int g_overlay_mapped;
+
+static volatile int g_toast_frames;
+static volatile int g_toast_force;
+static char g_toast[OVERLAY_TEXT_CAP];
+
 static volatile int g_menu_active;
-static volatile int g_menu_cur = -1; /* slot the RSX should read (-1 = none) */
-static int g_menu_w2[2];
-static int g_menu_h2[2];
+static volatile int g_menu_cur = -1;
+static volatile int g_menu_reading = -1;
+static overlay_menu_state_t g_menu_state[3];
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -98,34 +134,17 @@ static void flush_dcache(void *addr, size_t len) {
     __asm__ volatile("sync" ::: "memory");
 }
 
-static int ensure_toast_mapped(void) {
-    if (g_toast_mapped)
-        return 1;
+static uint32_t align_up_u32(uint32_t v, uint32_t a) {
+    return (v + a - 1) & ~(a - 1);
+}
 
-    if (!g_toast_image) {
-        sys_addr_t addr = 0;
-        int arc = sys_memory_allocate(OVERLAY_MAP_SIZE,
-                                      SYS_MEMORY_PAGE_SIZE_1M, &addr);
-        if (arc != CELL_OK || !addr) {
-            dbg_print_hex32("[overlay] sys_memory_allocate rc", (uint32_t)arc);
-            return 0;
-        }
-        g_toast_image = (uint32_t *)(uintptr_t)addr;
-    }
-
-    uint32_t off = 0;
-    int rc = cellGcmMapMainMemory(g_toast_image, OVERLAY_MAP_SIZE, &off);
-    if (rc != CELL_OK) {
-        dbg_print_hex32("[overlay] cellGcmMapMainMemory rc", (uint32_t)rc);
-        return 0;
-    }
-    g_toast_io_offset = off;
-    g_overlay_cmd = (uint32_t *)((uint8_t *)g_toast_image + OVERLAY_CMD_OFFSET);
-    g_overlay_cmd_io_offset = off + OVERLAY_CMD_OFFSET;
-    g_toast_mapped = 1;
-    dbg_print_hex32("[overlay] toast io", g_toast_io_offset);
-    dbg_print_hex32("[overlay] cmd io", g_overlay_cmd_io_offset);
-    return 1;
+static void copy_str(char *dst, size_t cap, const char *src) {
+    if (!dst || cap == 0)
+        return;
+    if (!src)
+        src = "";
+    strncpy(dst, src, cap);
+    dst[cap - 1] = 0;
 }
 
 static int text_width(const char *s) {
@@ -140,121 +159,248 @@ static int text_width(const char *s) {
     return pen;
 }
 
-static inline uint32_t blend(uint32_t dst, uint32_t src, uint8_t a) {
-    if (a == 0) return dst;
-    if (a == 255) return src;
-    uint32_t sr = (src >> 16) & 0xff, sg = (src >> 8) & 0xff, sb = src & 0xff;
-    uint32_t dr = (dst >> 16) & 0xff, dg = (dst >> 8) & 0xff, db = dst & 0xff;
-    uint32_t ia = 255u - a;
-    return (((sr * a + dr * ia + 127) / 255) << 16) |
-           (((sg * a + dg * ia + 127) / 255) << 8) |
-            ((sb * a + db * ia + 127) / 255);
-}
-
-static void draw_rect(uint8_t *fb, uint32_t pitch, uint32_t fb_w, uint32_t fb_h,
-                      int x, int y, int w, int h, uint32_t color) {
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > (int)fb_w) w = (int)fb_w - x;
-    if (y + h > (int)fb_h) h = (int)fb_h - y;
-    if (w <= 0 || h <= 0) return;
-    for (int yy = 0; yy < h; yy++) {
-        uint32_t *row = (uint32_t *)(fb + (uint32_t)(y + yy) * pitch);
-        for (int xx = 0; xx < w; xx++)
-            row[x + xx] = color;
+static void build_text_atlas(uint8_t *dst) {
+    const menu_font_t *font = &menu_font_20_font;
+    for (int y = 0; y < font->atlas_h; y++) {
+        uint8_t *row = dst + (size_t)y * OVERLAY_ATLAS_PITCH;
+        const uint8_t *src = font->atlas + (size_t)y * font->atlas_w;
+        memcpy(row, src, (size_t)font->atlas_w);
     }
 }
 
-static void draw_text(uint8_t *fb, uint32_t pitch, uint32_t fb_w, uint32_t fb_h,
-                      int x, int y, uint32_t color, const char *s) {
+static int ensure_overlay_mapped(void) {
+    if (g_overlay_mapped)
+        return 1;
+
+    if (!g_overlay_mem) {
+        sys_addr_t addr = 0;
+        int arc = sys_memory_allocate(OVERLAY_MAP_SIZE,
+                                      SYS_MEMORY_PAGE_SIZE_1M, &addr);
+        if (arc != CELL_OK || !addr) {
+            dbg_print_hex32("[overlay] sys_memory_allocate rc", (uint32_t)arc);
+            return 0;
+        }
+        g_overlay_mem = (uint32_t *)(uintptr_t)addr;
+        memset(g_overlay_mem, 0, OVERLAY_MAP_SIZE);
+    }
+
+    uint32_t off = 0;
+    int rc = cellGcmMapMainMemory(g_overlay_mem, OVERLAY_MAP_SIZE, &off);
+    if (rc != CELL_OK) {
+        dbg_print_hex32("[overlay] cellGcmMapMainMemory rc", (uint32_t)rc);
+        return 0;
+    }
+
+    g_overlay_io = off;
+    uint32_t cursor = 0;
     const menu_font_t *font = &menu_font_20_font;
+    uint32_t atlas_bytes = OVERLAY_ATLAS_PITCH * font->atlas_h;
+    cursor = align_up_u32(cursor, 128);
+    g_font_tex_io = off + cursor;
+    build_text_atlas((uint8_t *)g_overlay_mem + cursor);
+    cursor += atlas_bytes;
+
+    cursor = align_up_u32(cursor, 128);
+    uint32_t swatches[] = {
+        UI_COLOR_BG, UI_COLOR_PANEL, UI_COLOR_ACCENT,
+        UI_COLOR_TEXT, UI_COLOR_MUTED, UI_COLOR_DARK
+    };
+    for (int i = 0; i < (int)(sizeof swatches / sizeof swatches[0]); i++) {
+        g_swatch_io[i] = off + cursor;
+        uint32_t *dst = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+        for (int j = 0; j < OVERLAY_SWATCH_W * OVERLAY_SWATCH_H; j++)
+            dst[j] = swatches[i];
+        cursor += OVERLAY_SWATCH_W * OVERLAY_SWATCH_H * 4;
+    }
+
+    cursor = align_up_u32(cursor, 128);
+    CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
+    g_fp_ucode_io = off + cursor;
+    memcpy((uint8_t *)g_overlay_mem + cursor,
+           (const uint8_t *)fp + fp->ucode, fp->ucodeSize);
+    cursor += fp->ucodeSize;
+
+    cursor = align_up_u32(cursor, 128);
+    g_text_vtx = (overlay_vertex_t *)((uint8_t *)g_overlay_mem + cursor);
+    g_text_vtx_io = off + cursor;
+    cursor += OVERLAY_VERTEX_SLOTS * OVERLAY_VERTEX_MAX * sizeof(overlay_vertex_t);
+
+    cursor = align_up_u32(cursor, 128);
+    g_overlay_cmd = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+    g_overlay_cmd_io = off + cursor;
+    cursor += OVERLAY_CMD_RING_SLOTS * OVERLAY_CMD_WORDS * 4;
+    if (cursor > OVERLAY_MAP_SIZE) {
+        dbg_print("[overlay] mapped block too small\n");
+        return 0;
+    }
+
+    flush_dcache(g_overlay_mem, cursor);
+    g_overlay_mapped = 1;
+    dbg_print_hex32("[overlay] io", g_overlay_io);
+    dbg_print_hex32("[overlay] cmd io", g_overlay_cmd_io);
+    return 1;
+}
+
+static uint32_t *cmd_begin(uint32_t *cmd_io_out) {
+    uint32_t slot = g_cmd_next++ % OVERLAY_CMD_RING_SLOTS;
+    if (cmd_io_out)
+        *cmd_io_out = g_overlay_cmd_io + slot * OVERLAY_CMD_WORDS * 4;
+    return g_overlay_cmd + slot * OVERLAY_CMD_WORDS;
+}
+
+static float color_chan(uint32_t argb, int shift) {
+    return (float)((argb >> shift) & 0xff) * (1.0f / 255.0f);
+}
+
+static overlay_vertex_t *text_begin(uint32_t *vtx_io, int *max_vtx) {
+    uint32_t slot = g_text_vtx_next++ % OVERLAY_VERTEX_SLOTS;
+    if (vtx_io)
+        *vtx_io = g_text_vtx_io + slot * OVERLAY_VERTEX_MAX * sizeof(overlay_vertex_t);
+    if (max_vtx)
+        *max_vtx = OVERLAY_VERTEX_MAX;
+    return g_text_vtx + slot * OVERLAY_VERTEX_MAX;
+}
+
+static void append_blend_state(CellGcmContextData *cmd, int enable) {
+    if (!cmd)
+        return;
+    if (enable) {
+        cellGcmSetBlendFunc(cmd,
+                            CELL_GCM_SRC_ALPHA, CELL_GCM_ONE_MINUS_SRC_ALPHA,
+                            CELL_GCM_SRC_ALPHA, CELL_GCM_ONE_MINUS_SRC_ALPHA);
+        cellGcmSetBlendEquation(cmd, CELL_GCM_FUNC_ADD, CELL_GCM_FUNC_ADD);
+    }
+    cellGcmSetBlendEnable(cmd, enable ? CELL_GCM_TRUE : CELL_GCM_FALSE);
+}
+
+static void text_push_vertex(overlay_vertex_t *v, int *count,
+                             float px, float py, float u, float vv,
+                             uint32_t color, uint32_t fb_w, uint32_t fb_h) {
+    overlay_vertex_t *o = &v[*count];
+    o->pos[0] = (px * 2.0f / (float)fb_w) - 1.0f;
+    o->pos[1] = 1.0f - (py * 2.0f / (float)fb_h);
+    o->pos[2] = 0.0f;
+    o->pos[3] = 1.0f;
+    o->color[0] = color_chan(color, 16);
+    o->color[1] = color_chan(color, 8);
+    o->color[2] = color_chan(color, 0);
+    o->color[3] = color_chan(color, 24);
+    o->uv[0] = u;
+    o->uv[1] = vv;
+    (*count)++;
+}
+
+static int append_text_vertices(overlay_vertex_t *v, int *count, int max_vtx,
+                                uint32_t fb_w, uint32_t fb_h,
+                                int x, int y, text_color_t color_id,
+                                const char *s) {
+    static const uint32_t colors[TEXT_COLOR_COUNT] = {
+        UI_COLOR_TEXT, UI_COLOR_ACCENT, UI_COLOR_MUTED, UI_COLOR_DARK
+    };
+    const menu_font_t *font = &menu_font_20_font;
+    uint32_t color = colors[color_id];
     int pen = x;
-    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    for (const unsigned char *p = (const unsigned char *)s; p && *p; p++) {
         int c = *p;
         if (c < font->first_char || c > font->last_char) c = '?';
         if (c < font->first_char || c > font->last_char) continue;
         const menu_glyph_t *g = &font->glyphs[c - font->first_char];
-        int gx = pen + g->bx;
-        int gy = y + font->baseline - g->by;
-        for (int yy = 0; yy < g->h; yy++) {
-            int dy = gy + yy;
-            if (dy < 0 || dy >= (int)fb_h) continue;
-            const uint8_t *src = font->atlas + (size_t)g->ox +
-                                 (size_t)yy * font->atlas_w;
-            uint32_t *dst = (uint32_t *)(fb + (uint32_t)dy * pitch);
-            for (int xx = 0; xx < g->w; xx++) {
-                int dx = gx + xx;
-                if (dx < 0 || dx >= (int)fb_w) continue;
-                dst[dx] = blend(dst[dx], color, src[xx]);
-            }
+        if (g->w && g->h) {
+            if (*count + 6 > max_vtx)
+                return 0;
+            float x0 = (float)(pen + g->bx);
+            float y0 = (float)(y + font->baseline - g->by);
+            float x1 = x0 + (float)g->w;
+            float y1 = y0 + (float)g->h;
+            float u0 = (float)g->ox / (float)font->atlas_w;
+            float v0 = 0.0f;
+            float u1 = (float)(g->ox + g->w) / (float)font->atlas_w;
+            float v1 = (float)g->h / (float)font->atlas_h;
+            text_push_vertex(v, count, x0, y0, u0, v0, color, fb_w, fb_h);
+            text_push_vertex(v, count, x1, y0, u1, v0, color, fb_w, fb_h);
+            text_push_vertex(v, count, x0, y1, u0, v1, color, fb_w, fb_h);
+            text_push_vertex(v, count, x1, y0, u1, v0, color, fb_w, fb_h);
+            text_push_vertex(v, count, x1, y1, u1, v1, color, fb_w, fb_h);
+            text_push_vertex(v, count, x0, y1, u0, v1, color, fb_w, fb_h);
         }
         pen += g->advance;
     }
-}
-
-static void build_toast_image(void) {
-    if (!ensure_toast_mapped())
-        return;
-
-    int tw = text_width(g_toast);
-    int box_w = tw + 32;
-    if (box_w < 300) box_w = 300;
-    if (box_w > OVERLAY_TEX_W) box_w = OVERLAY_TEX_W;
-    int box_h = 44;
-
-    memset(g_toast_image, 0, (size_t)OVERLAY_TEX_W * OVERLAY_TEX_H * 4);
-    draw_rect((uint8_t *)g_toast_image, OVERLAY_TEX_W * 4,
-              OVERLAY_TEX_W, OVERLAY_TEX_H, 0, 0,
-              box_w, box_h, 0x00101010);
-    draw_rect((uint8_t *)g_toast_image, OVERLAY_TEX_W * 4,
-              OVERLAY_TEX_W, OVERLAY_TEX_H, 0, 0,
-              box_w, 2, 0x00f0c040);
-    draw_text((uint8_t *)g_toast_image, OVERLAY_TEX_W * 4,
-              OVERLAY_TEX_W, OVERLAY_TEX_H, 16, 10,
-              0x00ffffff, g_toast);
-
-    g_toast_w = box_w;
-    g_toast_h = box_h;
-    flush_dcache(g_toast_image, (size_t)OVERLAY_TEX_W * OVERLAY_TEX_H * 4);
-}
-
-/* Build a main-memory -> local blit of an arbitrary source image into the
- * destination framebuffer `b` at (x,y). Source is at `src_io` with row pitch
- * `src_pitch` bytes. The single shared command buffer is rebuilt each call;
- * toast and menu are never blitted in the same flip slot before the previous
- * RSX call completes, so sharing it is safe. */
-static int build_blit_cmd(const overlay_buffer_t *b, int x, int y,
-                          uint32_t src_io, uint32_t src_pitch,
-                          int w, int h) {
-    if (!g_overlay_cmd || !b || w <= 0 || h <= 0)
-        return 0;
-
-    CellGcmContextData cmd;
-    memset(&cmd, 0, sizeof cmd);
-    cmd.begin = g_overlay_cmd;
-    cmd.current = g_overlay_cmd;
-    cmd.end = g_overlay_cmd + OVERLAY_CMD_WORDS;
-    cmd.callback = NULL;
-
-    (void)cellGcmSetTransferImageUnsafe(&cmd,
-                                        CELL_GCM_TRANSFER_MAIN_TO_LOCAL,
-                                        b->offset, b->pitch,
-                                        (uint32_t)x, (uint32_t)y,
-                                        src_io, src_pitch,
-                                        0, 0,
-                                        (uint32_t)w, (uint32_t)h, 4);
-    cellGcmSetReturnCommandUnsafe(&cmd);
-
-    size_t bytes = (size_t)(cmd.current - cmd.begin) * sizeof(uint32_t);
-    if (bytes == 0 || bytes > OVERLAY_CMD_WORDS * sizeof(uint32_t))
-        return 0;
-    flush_dcache(g_overlay_cmd, bytes);
     return 1;
 }
 
-static int build_overlay_command_buffer(const overlay_buffer_t *b,
-                                        int x, int y, int w, int h) {
-    return build_blit_cmd(b, x, y, g_toast_io_offset, OVERLAY_TEX_W * 4, w, h);
+static int append_scaled_blit(CellGcmContextData *cmd,
+                              const overlay_buffer_t *b,
+                              uint32_t src_io, uint16_t src_pitch,
+                              int src_w, int src_h,
+                              int sx, int sy, int sw, int sh,
+                              int dx, int dy, int dw, int dh,
+                              uint8_t interp) {
+    if (!cmd || !b || !b->valid || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+        return 0;
+    if (src_w <= 0 || src_h <= 0 || sx < 0 || sy < 0 ||
+        sx + sw > src_w || sy + sh > src_h)
+        return 0;
+    if (dx < 0) { dw += dx; dx = 0; }
+    if (dy < 0) { dh += dy; dy = 0; }
+    if (dx + dw > (int)b->width) dw = (int)b->width - dx;
+    if (dy + dh > (int)b->height) dh = (int)b->height - dy;
+    if (dw <= 0 || dh <= 0)
+        return 0;
+    if (cmd->current + 64 > cmd->end)
+        return 0;
+
+    uint32_t source_io = src_io + (uint32_t)sy * src_pitch + (uint32_t)sx * 4;
+    int image_w = sw;
+    if (image_w < 16)
+        image_w = 16;
+    int32_t ratioX = (int32_t)(((int64_t)sw << 20) / dw);
+    int32_t ratioY = (int32_t)(((int64_t)sh << 20) / dh);
+
+    CellGcmTransferScale scale;
+    memset(&scale, 0, sizeof scale);
+    scale.conversion = CELL_GCM_TRANSFER_CONVERSION_TRUNCATE;
+    scale.format     = CELL_GCM_TRANSFER_SCALE_FORMAT_A8R8G8B8;
+    scale.operation  = CELL_GCM_TRANSFER_OPERATION_SRCCOPY;
+    scale.clipX      = (uint16_t)dx;
+    scale.clipY      = (uint16_t)dy;
+    scale.clipW      = (uint16_t)dw;
+    scale.clipH      = (uint16_t)dh;
+    scale.outX       = (uint16_t)dx;
+    scale.outY       = (uint16_t)dy;
+    scale.outW       = (uint16_t)dw;
+    scale.outH       = (uint16_t)dh;
+    scale.ratioX     = ratioX;
+    scale.ratioY     = ratioY;
+    scale.inW        = (uint16_t)image_w;
+    scale.inH        = (uint16_t)sh;
+    scale.pitch      = src_pitch;
+    scale.origin     = CELL_GCM_TRANSFER_ORIGIN_CORNER;
+    scale.interp     = interp;
+    scale.offset     = source_io;
+    scale.inX        = 0;
+    scale.inY        = 0;
+
+    CellGcmTransferSurface surf;
+    memset(&surf, 0, sizeof surf);
+    surf.format = CELL_GCM_TRANSFER_SURFACE_FORMAT_A8R8G8B8;
+    surf.pitch  = (uint16_t)b->pitch;
+    surf.offset = b->offset;
+
+    cellGcmSetTransferScaleModeUnsafe(cmd,
+                                      CELL_GCM_TRANSFER_MAIN_TO_LOCAL,
+                                      CELL_GCM_TRANSFER_SURFACE);
+    cellGcmSetTransferScaleSurfaceUnsafe(cmd, &scale, &surf);
+    return 1;
+}
+
+static int append_rect(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                       int x, int y, int w, int h, int swatch) {
+    return append_scaled_blit(cmd, b, g_swatch_io[swatch],
+                              OVERLAY_SWATCH_W * 4,
+                              OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
+                              0, 0, OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
+                              x, y, w, h,
+                              CELL_GCM_TRANSFER_INTERPOLATOR_ZOH);
 }
 
 static int boot_window_open(void) {
@@ -262,175 +408,268 @@ static int boot_window_open(void) {
     return g_boot_us && now >= g_boot_us && now - g_boot_us <= OVERLAY_BOOT_WINDOW_US;
 }
 
-static void maybe_draw_toast(void *ctx, uint8_t id) {
-    int frames = g_toast_frames;
-    if (frames <= 0 || (!boot_window_open() && !g_toast_force) || id >= 8)
-        return;
-
-    overlay_buffer_t b = g_buffers[id];
-    if (!b.valid) {
-        cache_display_info();
-        b = g_buffers[id];
-    }
-    if (!b.valid || b.pitch == 0 ||
-        b.width < 320 || b.height < 120)
-        return;
-
-    if (!ensure_toast_mapped() || g_toast_w <= 0 || g_toast_h <= 0)
-        return;
-
-    int box_w = g_toast_w;
-    int box_h = g_toast_h;
-    if (box_w > (int)b.width - 40)
-        box_w = (int)b.width - 40;
-    int x = (int)b.width - box_w - 24;
-    int y = 24;
-
-    CellGcmContextData *gcm = (CellGcmContextData *)ctx;
-    if (!gcm || !gcm->current || !gcm->end ||
-        gcm->current + OVERLAY_GCM_HEADROOM_WORDS > gcm->end)
-        return;
-
-    if (!build_overlay_command_buffer(&b, x, y, box_w, box_h))
-        return;
-
-    cellGcmSetCallCommandUnsafe(gcm, g_overlay_cmd_io_offset);
-    g_toast_frames = frames - 1;
-}
-
-static int ensure_menu_mapped(void) {
-    if (g_menu_mapped)
-        return 1;
-
-    /* The menu shares the toast map's command buffer (g_overlay_cmd), so the
-     * toast map must be set up first. */
-    if (!ensure_toast_mapped())
+static int get_flip_buffer(uint8_t id, overlay_buffer_t *out) {
+    if (id >= 8 || !out)
         return 0;
-
-    if (!g_menu_image) {
-        sys_addr_t addr = 0;
-        int arc = sys_memory_allocate(OVERLAY_MENU_MAP_SIZE,
-                                      SYS_MEMORY_PAGE_SIZE_1M, &addr);
-        if (arc != CELL_OK || !addr) {
-            dbg_print_hex32("[overlay] menu alloc rc", (uint32_t)arc);
-            return 0;
-        }
-        g_menu_image = (uint32_t *)(uintptr_t)addr;
-    }
-
-    uint32_t off = 0;
-    int rc = cellGcmMapMainMemory(g_menu_image, OVERLAY_MENU_MAP_SIZE, &off);
-    if (rc != CELL_OK) {
-        dbg_print_hex32("[overlay] menu map rc", (uint32_t)rc);
-        return 0;
-    }
-    g_menu_io_offset = off;
-    g_menu_mapped = 1;
-    return 1;
-}
-
-void taiko_overlay_menu_set(const char *title,
-                            const char *const *lines, int count,
-                            int selected, int top, const char *footer) {
-    if (!ensure_menu_mapped())
-        return;
-
-    const int pad = 14;
-    const int title_h = 30;
-    const int footer_h = (footer && footer[0]) ? 24 : 0;
-
-    int visible = OVERLAY_MENU_VISIBLE;
-    if (count - top < visible) visible = count - top;
-    if (visible < 0) visible = 0;
-
-    int box_w = OVERLAY_MENU_TEX_W;
-    int box_h = pad + title_h + visible * OVERLAY_MENU_ROW_H + footer_h + pad;
-    if (box_h > OVERLAY_MENU_TEX_H) box_h = OVERLAY_MENU_TEX_H;
-
-    /* Draw into the slot the RSX is not currently reading. */
-    int slot = (g_menu_cur == 0) ? 1 : 0;
-    uint8_t *fb = (uint8_t *)g_menu_image + (size_t)slot * OVERLAY_MENU_SLOT_BYTES;
-    uint32_t pitch = OVERLAY_MENU_TEX_W * 4;
-
-    memset(fb, 0, OVERLAY_MENU_SLOT_BYTES);
-
-    draw_rect(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
-              0, 0, box_w, box_h, 0x00101010);
-    draw_rect(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
-              0, 0, box_w, 2, 0x00f0c040);
-
-    if (title && title[0])
-        draw_text(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
-                  pad, pad, 0x00f0c040, title);
-
-    int row_y0 = pad + title_h;
-    for (int i = 0; i < visible; i++) {
-        int idx = top + i;
-        if (idx < 0 || idx >= count) break;
-        int ry = row_y0 + i * OVERLAY_MENU_ROW_H;
-        uint32_t color = 0x00ffffff;
-        if (idx == selected) {
-            draw_rect(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
-                      pad - 6, ry - 2, box_w - 2 * (pad - 6),
-                      OVERLAY_MENU_ROW_H, 0x00f0c040);
-            color = 0x00101010;
-        }
-        if (lines && lines[idx])
-            draw_text(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
-                      pad, ry + 2, color, lines[idx]);
-    }
-
-    if (footer_h)
-        draw_text(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
-                  pad, box_h - footer_h + 2, 0x00a0a0a0, footer);
-
-    g_menu_w2[slot] = box_w;
-    g_menu_h2[slot] = box_h;
-    flush_dcache(fb, (size_t)box_h * pitch);
-    g_menu_cur = slot;   /* publish the freshly drawn slot to the RSX */
-}
-
-void taiko_overlay_menu_active(int on) {
-    if (!on)
-        g_menu_cur = -1;
-    g_menu_active = on ? 1 : 0;
-}
-
-static void maybe_draw_menu(void *ctx, uint8_t id) {
-    if (!g_menu_active || id >= 8 || !g_menu_mapped)
-        return;
-
-    int cur = g_menu_cur;       /* snapshot the published slot */
-    if (cur < 0)
-        return;
-    int mw = g_menu_w2[cur];
-    int mh = g_menu_h2[cur];
-    if (mw <= 0 || mh <= 0)
-        return;
-
     overlay_buffer_t b = g_buffers[id];
     if (!b.valid) {
         cache_display_info();
         b = g_buffers[id];
     }
     if (!b.valid || b.pitch == 0 || b.width < 320 || b.height < 120)
+        return 0;
+    *out = b;
+    return 1;
+}
+
+static int finish_and_call(CellGcmContextData *game,
+                           CellGcmContextData *cmd,
+                           uint32_t cmd_io,
+                           uint32_t *cmd_buf) {
+    cellGcmSetReturnCommandUnsafe(cmd);
+    size_t bytes = (size_t)(cmd->current - cmd->begin) * sizeof(uint32_t);
+    if (bytes == 0 || bytes > OVERLAY_CMD_WORDS * sizeof(uint32_t))
+        return 0;
+    flush_dcache(cmd_buf, bytes);
+    cellGcmSetCallCommandUnsafe(game, cmd_io);
+    return 1;
+}
+
+static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                              uint32_t vtx_io, int vtx_count) {
+    if (!cmd || !b || vtx_count <= 0)
         return;
 
-    int x = ((int)b.width - mw) / 2;
-    int y = ((int)b.height - mh) / 2;
+    CellGcmSurface surf;
+    memset(&surf, 0, sizeof surf);
+    surf.type = CELL_GCM_SURFACE_PITCH;
+    surf.antialias = CELL_GCM_SURFACE_CENTER_1;
+    surf.colorFormat = CELL_GCM_SURFACE_A8R8G8B8;
+    surf.colorTarget = CELL_GCM_SURFACE_TARGET_0;
+    for (int i = 0; i < CELL_GCM_MRT_MAXCOUNT; i++) {
+        surf.colorLocation[i] = CELL_GCM_LOCATION_LOCAL;
+        surf.colorOffset[i] = b->offset;
+        surf.colorPitch[i] = b->pitch;
+    }
+    surf.depthFormat = CELL_GCM_SURFACE_Z24S8;
+    surf.depthLocation = CELL_GCM_LOCATION_LOCAL;
+    surf.depthOffset = 0;
+    surf.depthPitch = 64;
+    surf.width = (uint16_t)b->width;
+    surf.height = (uint16_t)b->height;
+    surf.x = 0;
+    surf.y = 0;
+    cellGcmSetSurface(cmd, &surf);
+
+    float scale[4] = { (float)b->width * 0.5f, -(float)b->height * 0.5f, 0.5f, 0.0f };
+    float offset[4] = { (float)b->width * 0.5f,  (float)b->height * 0.5f, 0.5f, 0.0f };
+    cellGcmSetViewport(cmd, 0, 0, (uint16_t)b->width, (uint16_t)b->height,
+                       0.0f, 1.0f, scale, offset);
+    cellGcmSetDepthTestEnable(cmd, CELL_GCM_FALSE);
+    cellGcmSetDepthMask(cmd, CELL_GCM_FALSE);
+    cellGcmSetCullFaceEnable(cmd, CELL_GCM_FALSE);
+
+    append_blend_state(cmd, 1);
+    cellGcmSetVertexProgram(cmd, (CGprogram)overlay_quad_vp_cgb,
+                            (const uint8_t *)overlay_quad_vp_cgb +
+                            ((CgBinaryProgram *)overlay_quad_vp_cgb)->ucode);
+    cellGcmSetFragmentProgramOffset(cmd, (CGprogram)overlay_quad_fp_cgb,
+                                    g_fp_ucode_io, CELL_GCM_LOCATION_MAIN);
+    cellGcmSetFragmentProgramControl(cmd, (CGprogram)overlay_quad_fp_cgb, 0, 1, 0);
+
+    CellGcmTexture tex;
+    memset(&tex, 0, sizeof tex);
+    tex.format = CELL_GCM_TEXTURE_B8 | CELL_GCM_TEXTURE_LN;
+    tex.mipmap = 1;
+    tex.dimension = CELL_GCM_TEXTURE_DIMENSION_2;
+    tex.cubemap = CELL_GCM_FALSE;
+    tex.remap = CELL_GCM_REMAP_MODE(CELL_GCM_TEXTURE_REMAP_ORDER_XYXY,
+                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
+                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
+                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
+                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
+                                    CELL_GCM_TEXTURE_REMAP_REMAP,
+                                    CELL_GCM_TEXTURE_REMAP_REMAP,
+                                    CELL_GCM_TEXTURE_REMAP_REMAP,
+                                    CELL_GCM_TEXTURE_REMAP_REMAP);
+    tex.width = menu_font_20_font.atlas_w;
+    tex.height = menu_font_20_font.atlas_h;
+    tex.depth = 1;
+    tex.location = CELL_GCM_LOCATION_MAIN;
+    tex.pitch = OVERLAY_ATLAS_PITCH;
+    tex.offset = g_font_tex_io;
+    cellGcmSetTexture(cmd, (uint8_t)g_tex_unit, &tex);
+    cellGcmSetTextureControl(cmd, (uint8_t)g_tex_unit, CELL_GCM_TRUE,
+                             0 << 8, 12 << 8, CELL_GCM_TEXTURE_MAX_ANISO_1);
+    cellGcmSetTextureFilter(cmd, (uint8_t)g_tex_unit, 0,
+                            CELL_GCM_TEXTURE_NEAREST,
+                            CELL_GCM_TEXTURE_NEAREST,
+                            CELL_GCM_TEXTURE_CONVOLUTION_QUINCUNX);
+    cellGcmSetTextureAddress(cmd, (uint8_t)g_tex_unit,
+                             CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
+                             CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
+                             CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
+                             CELL_GCM_TEXTURE_UNSIGNED_REMAP_NORMAL,
+                             CELL_GCM_TEXTURE_ZFUNC_LESS, 0);
+
+    cellGcmSetVertexDataArray(cmd, (uint8_t)g_pos_attr, 0,
+                              sizeof(overlay_vertex_t), 4, CELL_GCM_VERTEX_F,
+                              CELL_GCM_LOCATION_MAIN, vtx_io);
+    cellGcmSetVertexDataArray(cmd, (uint8_t)g_col_attr, 0,
+                              sizeof(overlay_vertex_t), 4, CELL_GCM_VERTEX_F,
+                              CELL_GCM_LOCATION_MAIN,
+                              vtx_io + offsetof(overlay_vertex_t, color));
+    cellGcmSetVertexDataArray(cmd, (uint8_t)g_uv_attr, 0,
+                              sizeof(overlay_vertex_t), 2, CELL_GCM_VERTEX_F,
+                              CELL_GCM_LOCATION_MAIN,
+                              vtx_io + offsetof(overlay_vertex_t, uv));
+    cellGcmSetDrawArrays(cmd, CELL_GCM_PRIMITIVE_TRIANGLES, 0, (uint32_t)vtx_count);
+    append_blend_state(cmd, 0);
+    cellGcmSetDepthMask(cmd, CELL_GCM_TRUE);
+}
+
+static void maybe_draw_toast(void *ctx, uint8_t id) {
+    int frames = g_toast_frames;
+    if (frames <= 0 || (!boot_window_open() && !g_toast_force))
+        return;
+    if (!ensure_overlay_mapped())
+        return;
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end ||
+        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+        return;
+
+    int tw = text_width(g_toast);
+    int box_w = tw + 32;
+    if (box_w < 300) box_w = 300;
+    if (box_w > (int)b.width - 40) box_w = (int)b.width - 40;
+    int box_h = 44;
+    if (box_w <= 0 || box_h <= 0)
+        return;
+    int x = (int)b.width - box_w - 24;
+    int y = 24;
+
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    uint32_t vtx_io = 0;
+    int max_vtx = 0;
+    int vtx_count = 0;
+    overlay_vertex_t *vtx = text_begin(&vtx_io, &max_vtx);
+    if (!vtx || !append_text_vertices(vtx, &vtx_count, max_vtx,
+                                      b.width, b.height,
+                                      x + 16, y + 10, TEXT_WHITE, g_toast))
+        return;
+
+    if (!append_rect(&cmd, &b, x, y, box_w, box_h, 0) ||
+        !append_rect(&cmd, &b, x, y, box_w, 2, 2))
+        return;
+    flush_dcache(vtx, (size_t)vtx_count * sizeof(*vtx));
+    append_text_batch(&cmd, &b, vtx_io, vtx_count);
+    if (finish_and_call(game, &cmd, cmd_io, cmd_buf))
+        g_toast_frames = frames - 1;
+}
+
+static void maybe_draw_menu(void *ctx, uint8_t id) {
+    if (!g_menu_active || !ensure_overlay_mapped())
+        return;
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end ||
+        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+        return;
+
+    int cur = g_menu_cur;
+    if (cur < 0)
+        return;
+    g_menu_reading = cur;
+    overlay_menu_state_t m = g_menu_state[cur];
+    g_menu_reading = -1;
+    const int pad = 14;
+    const int title_h = 30;
+    const int footer_h = m.footer[0] ? 24 : 0;
+
+    int visible = OVERLAY_MENU_VISIBLE;
+    if (m.count - m.top < visible) visible = m.count - m.top;
+    if (visible < 0) visible = 0;
+
+    int box_w = 512;
+    int box_h = pad + title_h + visible * OVERLAY_MENU_ROW_H + footer_h + pad;
+    if (box_w > (int)b.width - 64) box_w = (int)b.width - 64;
+    if (box_h > (int)b.height - 64) box_h = (int)b.height - 64;
+    if (box_w < 280 || box_h < 64)
+        return;
+
+    int x = ((int)b.width - box_w) / 2;
+    int y = ((int)b.height - box_h) / 2;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
 
-    CellGcmContextData *gcm = (CellGcmContextData *)ctx;
-    if (!gcm || !gcm->current || !gcm->end ||
-        gcm->current + OVERLAY_GCM_HEADROOM_WORDS > gcm->end)
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    uint32_t vtx_io = 0;
+    int max_vtx = 0;
+    int vtx_count = 0;
+    overlay_vertex_t *vtx = text_begin(&vtx_io, &max_vtx);
+    if (!vtx)
         return;
 
-    uint32_t src_io = g_menu_io_offset + (uint32_t)cur * OVERLAY_MENU_SLOT_BYTES;
-    if (!build_blit_cmd(&b, x, y, src_io, OVERLAY_MENU_TEX_W * 4, mw, mh))
+    if (!append_rect(&cmd, &b, x, y, box_w, box_h, 1) ||
+        !append_rect(&cmd, &b, x, y, box_w, 2, 2))
         return;
 
-    cellGcmSetCallCommandUnsafe(gcm, g_overlay_cmd_io_offset);
+    if (m.title[0] &&
+        !append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                              x + pad, y + pad, TEXT_ACCENT, m.title))
+        return;
+
+    int row_y0 = y + pad + title_h;
+    for (int i = 0; i < visible; i++) {
+        int idx = m.top + i;
+        if (idx < 0 || idx >= m.count)
+            break;
+        int ry = row_y0 + i * OVERLAY_MENU_ROW_H;
+        text_color_t tc = TEXT_WHITE;
+        if (idx == m.selected) {
+            if (!append_rect(&cmd, &b, x + pad - 6, ry - 2,
+                             box_w - 2 * (pad - 6), OVERLAY_MENU_ROW_H, 2))
+                return;
+            tc = TEXT_DARK;
+        }
+        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  x + pad, ry + 2, tc, m.lines[idx]))
+            return;
+    }
+
+    if (m.footer[0] &&
+        !append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                              x + pad, y + box_h - footer_h + 2,
+                              TEXT_MUTED, m.footer))
+        return;
+
+    flush_dcache(vtx, (size_t)vtx_count * sizeof(*vtx));
+    append_text_batch(&cmd, &b, vtx_io, vtx_count);
+    (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
 }
 
 static int hk_flip_command(void *ctx, uint8_t id) {
@@ -440,12 +679,6 @@ static int hk_flip_command(void *ctx, uint8_t id) {
         cellGcmGetConfiguration(&cfg);
         g_local_base = cfg.localAddress;
     }
-    /* Toast must draw into the game's 720p source BEFORE the scale
-     * blit so the upscaled dest picks it up. Otherwise the toast is
-     * stamped into a buffer the RSX no longer scans out.
-     *
-     * Toast and menu share the single overlay command buffer, so only one
-     * may be emitted per flip — the menu (when open) takes precedence. */
     if (g_menu_active)
         maybe_draw_menu(ctx, id);
     else if (g_toast_frames > 0)
@@ -477,12 +710,6 @@ static int hk_set_display_buffer(uint8_t id, uint32_t offset, uint32_t pitch,
         g_buffers[id].height = height;
         g_buffers[id].valid = 1;
 
-        /* Upscale mode: register the game's source dims with the
-         * upscale module and rewrite the args we hand to the real
-         * cellGcmSetDisplayBuffer so PS3 scanout reads our 1080p
-         * destination instead. The game keeps rendering into its own
-         * 720p surface at `offset`; the per-flip scale blit copies
-         * that into our dest before flip. */
         if (taiko_video_upscale_active()) {
             uint32_t dst_off, dst_pitch, dst_w, dst_h;
             if (taiko_video_upscale_remap(id, offset, pitch, width, height,
@@ -505,9 +732,7 @@ void taiko_overlay_show_message(const char *message) {
     if (!message || !message[0] || !boot_window_open())
         return;
 
-    strncpy(g_toast, message, sizeof(g_toast));
-    g_toast[sizeof(g_toast) - 1] = 0;
-    build_toast_image();
+    copy_str(g_toast, sizeof g_toast, message);
     g_toast_frames = OVERLAY_TOAST_FRAMES;
 }
 
@@ -516,9 +741,7 @@ void taiko_overlay_show_prompt(const char *message) {
         return;
 
     g_toast_force = 1;
-    strncpy(g_toast, message, sizeof(g_toast));
-    g_toast[sizeof(g_toast) - 1] = 0;
-    build_toast_image();
+    copy_str(g_toast, sizeof g_toast, message);
     g_toast_frames = OVERLAY_TOAST_FRAMES;
 }
 
@@ -526,7 +749,7 @@ void taiko_overlay_show_update_available(const char *latest_version) {
     if (!latest_version || !latest_version[0])
         return;
 
-    char msg[96];
+    char msg[OVERLAY_TEXT_CAP];
     const char *prefix = "Update ";
     const char *suffix = " - hold L3+R3 or F2";
     size_t n = 0;
@@ -538,6 +761,46 @@ void taiko_overlay_show_update_available(const char *latest_version) {
     msg[n] = 0;
 
     taiko_overlay_show_message(msg);
+}
+
+void taiko_overlay_menu_set(const char *title,
+                            const char *const *lines, int count,
+                            int selected, int top, const char *footer) {
+    if (count < 0)
+        count = 0;
+    if (count > OVERLAY_MAX_LINES)
+        count = OVERLAY_MAX_LINES;
+    if (selected < 0)
+        selected = 0;
+    if (selected >= count && count > 0)
+        selected = count - 1;
+    if (top < 0)
+        top = 0;
+    if (top >= count)
+        top = count ? count - 1 : 0;
+
+    int slot = 0;
+    while (slot == g_menu_cur || slot == g_menu_reading)
+        slot++;
+    if (slot >= 3)
+        slot = (g_menu_cur + 1) % 3;
+    overlay_menu_state_t *m = &g_menu_state[slot];
+
+    copy_str(m->title, sizeof m->title, title);
+    for (int i = 0; i < count; i++)
+        copy_str(m->lines[i], sizeof m->lines[i],
+                 (lines && lines[i]) ? lines[i] : "");
+    m->count = count;
+    m->selected = selected;
+    m->top = top;
+    copy_str(m->footer, sizeof m->footer, footer);
+    g_menu_cur = slot;
+}
+
+void taiko_overlay_menu_active(int on) {
+    if (!on)
+        g_menu_cur = -1;
+    g_menu_active = on ? 1 : 0;
 }
 
 void taiko_overlay_hooks_install(void) {
