@@ -576,10 +576,10 @@ int taiko_start(unsigned int args, void *argp) {
         pad_input_init();
         kb_input_init();
     }
-    /* Saved-card picker: needs the overlay flip hook (installed above), the
-     * USIO input gate (usio_emulation) and the camera reader (qr_card_reader).
-     * Replays a stored card via the same path the QR scanner uses. */
-    if (g_cfg.usio_emulation && g_cfg.qr_card_reader)
+    /* Saved-card picker: needs the overlay flip hook and the virtual USIO
+     * input gate. QR scanning is optional; stored-card replay still works
+     * without a camera. */
+    if (g_cfg.usio_emulation)
         card_picker_start();
     if (g_cfg.online_diag)
         online_diag_start();

@@ -8,6 +8,7 @@
 #include <sys/timer.h>
 
 #include "camera_qr.h"
+#include "bpreader_hook.h"
 #include "bpreader_serial.h"
 #include "overlay.h"
 #include "taiko_frame.h"
@@ -23,7 +24,7 @@
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */
 #define MENU_VISIBLE          10
 
-#define EXTRA_ROWS            3             /* trailing actions: add kbd, add qr, quit */
+#define EXTRA_ROWS_MAX        3             /* trailing actions: add kbd, optional qr, quit */
 
 static volatile int g_capture_pending;
 static char g_capture_code[21];
@@ -62,6 +63,11 @@ static void action_add_keyboard(void) {
 }
 
 static void action_add_qr(void) {
+    if (!camera_qr_available()) {
+        taiko_overlay_show_prompt("QR camera unavailable");
+        return;
+    }
+
     g_capture_pending = 0;
     g_capture_code[0] = 0;
     camera_qr_set_capture_sink(capture_cb);
@@ -140,14 +146,18 @@ static void run_chooser(void) {
 
     for (;;) {
         int n = card_store_count();
-        int total = n + EXTRA_ROWS;
+        int qr_available = camera_qr_available();
+        int extra = qr_available ? 3 : 2;
+        int total = n + extra;
+        int quit_row = n + extra - 1;
 
-        const char *lines[CARD_STORE_MAX + EXTRA_ROWS];
+        const char *lines[CARD_STORE_MAX + EXTRA_ROWS_MAX];
         for (int i = 0; i < n; i++)
             lines[i] = card_store_label(i);
         lines[n + 0] = "+ Add via keyboard";
-        lines[n + 1] = "+ Add via QR scan";
-        lines[n + 2] = "Quit";
+        if (qr_available)
+            lines[n + 1] = "+ Add via QR scan";
+        lines[quit_row] = "Quit";
 
         if (sel >= total) sel = total - 1;
         if (sel < 0) sel = 0;
@@ -180,9 +190,9 @@ static void run_chooser(void) {
                 break;
             } else if (sel == n) {
                 action_add_keyboard();
-            } else if (sel == n + 1) {
+            } else if (qr_available && sel == n + 1) {
                 action_add_qr();
-            } else if (sel == n + 2) {
+            } else if (sel == quit_row) {
                 break;   /* Quit */
             }
         }
@@ -206,7 +216,8 @@ static void card_picker_thread(uint64_t arg) {
     int refresh = 0;
 
     for (;;) {
-        int want = camera_qr_scan_active() && !bpreader_serial_card_present();
+        int want = bpreader_hook_reader_accepting_card() &&
+                   !bpreader_serial_card_present();
         if (want) {
             if ((refresh % PROMPT_REFRESH_TICKS) == 0)
                 taiko_overlay_show_prompt("Hold L3+R3 for saved cards");

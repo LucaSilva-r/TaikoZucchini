@@ -18,10 +18,6 @@ static uint8_t  g_last_frame[0x60];
 static int      g_last_frame_valid;
 static volatile int g_gated;
 
-void taiko_frame_set_gated(int on) {
-    g_gated = on ? 1 : 0;
-}
-
 /* Per-slot pulse state. `remaining_high` counts down PEAK frames pending,
  * `cooldown` enforces 0 frame(s) between distinct hits. No queue — new
  * edges arriving during the pulse or cooldown are dropped, so spamming
@@ -32,6 +28,15 @@ typedef struct {
 } hit_slot_state_t;
 static hit_slot_state_t g_hit_state[2][4];
 
+void taiko_frame_set_gated(int on) {
+    g_gated = on ? 1 : 0;
+    if (g_gated) {
+        memset(g_hit_state, 0, sizeof g_hit_state);
+        memset(g_last_frame, 0, sizeof g_last_frame);
+        g_last_frame_valid = 1;
+    }
+}
+
 void taiko_frame_init(void) {
     g_coin_counter = 0;
     g_test_on = 0;
@@ -41,7 +46,7 @@ void taiko_frame_init(void) {
 }
 
 void taiko_frame_build(uint8_t out[0x60], int advance_input) {
-    if (!advance_input && g_last_frame_valid) {
+    if (!g_gated && !advance_input && g_last_frame_valid) {
         memcpy(out, g_last_frame, 0x60);
         return;
     }

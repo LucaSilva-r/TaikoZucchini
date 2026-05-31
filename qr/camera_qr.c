@@ -109,8 +109,19 @@ static uint8_t g_last_access_code[ACCESS_CODE_BYTES];
 static volatile uint32_t g_have_access_code;
 static volatile int g_qr_scan_requested;
 static volatile int g_qr_scan_active;
+static volatile int g_qr_initialized;
 static camera_qr_capture_fn g_capture_sink;
 static volatile int g_qr_suppress;
+
+int camera_qr_available(void) {
+    if (!g_qr_initialized)
+        return 0;
+#if CFG_QR_SELF_OPEN_CAMERA
+    return cellCameraIsAttached(0) == 1;
+#else
+    return camera_diag_frame_seq() != 0;
+#endif
+}
 
 int camera_qr_scan_active(void) {
     return g_qr_scan_active;
@@ -433,6 +444,9 @@ void camera_qr_init(void) {
     if (rc != 0) {
         dbg_print_hex32("[qr] worker create failed rc", (uint32_t)rc);
         g_qr_worker_run = 0;
+        g_qr_initialized = 0;
+    } else {
+        g_qr_initialized = 1;
     }
 }
 

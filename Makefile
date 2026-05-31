@@ -225,7 +225,7 @@ qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu
 qr/qr_spu_host.o: qr/qr_spu_host.c qr/qr_spu_host.h qr_spu/qr_spu_shared.h core/debug.h
 bpreader/bpreader_serial.o: bpreader/bpreader_serial.c bpreader/bpreader_serial.h
 cards/card_store.o:  cards/card_store.c cards/card_store.h config/cfg_file.h core/debug.h
-cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_store.h qr/camera_qr.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
+cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_store.h qr/camera_qr.h hooks/bpreader_hook.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
 hooks/bpreader_hook.o: hooks/bpreader_hook.c hooks/bpreader_hook.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h

@@ -218,6 +218,7 @@ static uint16_t g_bp_staged_len;
 static uint16_t g_bp_staged_pos;
 static int g_bp_staged_allow_trailing_zlp;
 static uint8_t g_usio_sram[USIO_SRAM_PAGE_COUNT][USIO_SRAM_PAGE_SIZE];
+static volatile int g_reader_accepting_card;
 
 static int g_virtual_write_active;
 static uint8_t g_virtual_write_channel;
@@ -236,6 +237,10 @@ static volatile uint32_t g_reader_payload_log_budget = 64;
 
 static int is_usio_endpoint(uint8_t ep) {
     return ep == USIO_EP_OUT || ep == USIO_EP_IN;
+}
+
+int bpreader_hook_reader_accepting_card(void) {
+    return g_reader_accepting_card;
 }
 
 #if BP_VERBOSE_USIO
@@ -314,17 +319,23 @@ static void bpreader_feed(const uint8_t *rx, uint16_t rx_len) {
             if (cmd == 0x0E && frame_len >= 9 && g_bp_rx[7] == 0x01) {
                 bool led_on = (g_bp_rx[8] & 0x10) == 0;
                 if (led_on) {
-                    if (!bpreader_serial_card_present())
+                    g_reader_accepting_card = 1;
+                    if (g_cfg.qr_card_reader && !bpreader_serial_card_present())
                         camera_qr_request_scan();
                 } else {
-                    camera_qr_stop_scan();
+                    g_reader_accepting_card = 0;
+                    if (g_cfg.qr_card_reader)
+                        camera_qr_stop_scan();
                     bpreader_serial_set_card_present(false);
                 }
             }
             /* Legacy 0x4A trigger kept as fallback for titles that
              * never raise the LED bit. */
-            if (cmd == 0x4A && !bpreader_serial_card_present())
-                camera_qr_request_scan();
+            if (cmd == 0x4A) {
+                g_reader_accepting_card = 1;
+                if (g_cfg.qr_card_reader && !bpreader_serial_card_present())
+                    camera_qr_request_scan();
+            }
         }
 
         size_t tx_len = bpreader_serial_process(g_bp_rx, frame_len, tx, sizeof(tx));
