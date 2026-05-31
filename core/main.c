@@ -28,6 +28,7 @@
 #include "pad_input.h"
 #include "kb_input.h"
 #include "taiko_frame.h"
+#include "card_picker.h"
 #include "usrdir_path.h"
 #include "param_sfo_fix.h"
 #include "eboot_flow.h"
@@ -575,6 +576,11 @@ int taiko_start(unsigned int args, void *argp) {
         pad_input_init();
         kb_input_init();
     }
+    /* Saved-card picker: needs the overlay flip hook (installed above), the
+     * USIO input gate (usio_emulation) and the camera reader (qr_card_reader).
+     * Replays a stored card via the same path the QR scanner uses. */
+    if (g_cfg.usio_emulation && g_cfg.qr_card_reader)
+        card_picker_start();
     if (g_cfg.online_diag)
         online_diag_start();
 

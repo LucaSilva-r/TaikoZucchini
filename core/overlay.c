@@ -22,6 +22,19 @@
 #define OVERLAY_CMD_WORDS      4096
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
+/* Interactive menu surface. Double-buffered in its own 2MB main-memory
+ * block (kept out of the toast map so it never collides with the command
+ * buffer at the 256KB offset). Each 512x384 ARGB slot = 768KB; the CPU
+ * draws into the slot the RSX is NOT reading, then atomically publishes it
+ * via g_menu_cur — otherwise the per-flip DMA races the redraw and copies a
+ * half-cleared (black) image. */
+#define OVERLAY_MENU_TEX_W     512
+#define OVERLAY_MENU_TEX_H     384
+#define OVERLAY_MENU_SLOT_BYTES ((uint32_t)OVERLAY_MENU_TEX_W * OVERLAY_MENU_TEX_H * 4)
+#define OVERLAY_MENU_MAP_SIZE  (2 * 1024 * 1024)
+#define OVERLAY_MENU_ROW_H     26
+#define OVERLAY_MENU_VISIBLE   10
+
 typedef int (*gcm_flip_command_fn)(void *ctx, uint8_t id);
 typedef int (*gcm_set_display_buffer_fn)(uint8_t id, uint32_t offset,
                                          uint32_t pitch, uint32_t width,
@@ -49,6 +62,15 @@ static uint32_t g_overlay_cmd_io_offset;
 static int g_toast_mapped;
 static int g_toast_w;
 static int g_toast_h;
+static volatile int g_toast_force;   /* draw toast outside the boot window */
+
+static uint32_t *g_menu_image;       /* base of the 2-slot block */
+static uint32_t g_menu_io_offset;    /* IO offset of slot 0 */
+static int g_menu_mapped;
+static volatile int g_menu_active;
+static volatile int g_menu_cur = -1; /* slot the RSX should read (-1 = none) */
+static int g_menu_w2[2];
+static int g_menu_h2[2];
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -196,8 +218,14 @@ static void build_toast_image(void) {
     flush_dcache(g_toast_image, (size_t)OVERLAY_TEX_W * OVERLAY_TEX_H * 4);
 }
 
-static int build_overlay_command_buffer(const overlay_buffer_t *b,
-                                        int x, int y, int w, int h) {
+/* Build a main-memory -> local blit of an arbitrary source image into the
+ * destination framebuffer `b` at (x,y). Source is at `src_io` with row pitch
+ * `src_pitch` bytes. The single shared command buffer is rebuilt each call;
+ * toast and menu are never blitted in the same flip slot before the previous
+ * RSX call completes, so sharing it is safe. */
+static int build_blit_cmd(const overlay_buffer_t *b, int x, int y,
+                          uint32_t src_io, uint32_t src_pitch,
+                          int w, int h) {
     if (!g_overlay_cmd || !b || w <= 0 || h <= 0)
         return 0;
 
@@ -212,7 +240,7 @@ static int build_overlay_command_buffer(const overlay_buffer_t *b,
                                         CELL_GCM_TRANSFER_MAIN_TO_LOCAL,
                                         b->offset, b->pitch,
                                         (uint32_t)x, (uint32_t)y,
-                                        g_toast_io_offset, OVERLAY_TEX_W * 4,
+                                        src_io, src_pitch,
                                         0, 0,
                                         (uint32_t)w, (uint32_t)h, 4);
     cellGcmSetReturnCommandUnsafe(&cmd);
@@ -224,6 +252,11 @@ static int build_overlay_command_buffer(const overlay_buffer_t *b,
     return 1;
 }
 
+static int build_overlay_command_buffer(const overlay_buffer_t *b,
+                                        int x, int y, int w, int h) {
+    return build_blit_cmd(b, x, y, g_toast_io_offset, OVERLAY_TEX_W * 4, w, h);
+}
+
 static int boot_window_open(void) {
     uint64_t now = (uint64_t)sys_time_get_system_time();
     return g_boot_us && now >= g_boot_us && now - g_boot_us <= OVERLAY_BOOT_WINDOW_US;
@@ -231,7 +264,7 @@ static int boot_window_open(void) {
 
 static void maybe_draw_toast(void *ctx, uint8_t id) {
     int frames = g_toast_frames;
-    if (frames <= 0 || !boot_window_open() || id >= 8)
+    if (frames <= 0 || (!boot_window_open() && !g_toast_force) || id >= 8)
         return;
 
     overlay_buffer_t b = g_buffers[id];
@@ -265,6 +298,141 @@ static void maybe_draw_toast(void *ctx, uint8_t id) {
     g_toast_frames = frames - 1;
 }
 
+static int ensure_menu_mapped(void) {
+    if (g_menu_mapped)
+        return 1;
+
+    /* The menu shares the toast map's command buffer (g_overlay_cmd), so the
+     * toast map must be set up first. */
+    if (!ensure_toast_mapped())
+        return 0;
+
+    if (!g_menu_image) {
+        sys_addr_t addr = 0;
+        int arc = sys_memory_allocate(OVERLAY_MENU_MAP_SIZE,
+                                      SYS_MEMORY_PAGE_SIZE_1M, &addr);
+        if (arc != CELL_OK || !addr) {
+            dbg_print_hex32("[overlay] menu alloc rc", (uint32_t)arc);
+            return 0;
+        }
+        g_menu_image = (uint32_t *)(uintptr_t)addr;
+    }
+
+    uint32_t off = 0;
+    int rc = cellGcmMapMainMemory(g_menu_image, OVERLAY_MENU_MAP_SIZE, &off);
+    if (rc != CELL_OK) {
+        dbg_print_hex32("[overlay] menu map rc", (uint32_t)rc);
+        return 0;
+    }
+    g_menu_io_offset = off;
+    g_menu_mapped = 1;
+    return 1;
+}
+
+void taiko_overlay_menu_set(const char *title,
+                            const char *const *lines, int count,
+                            int selected, int top, const char *footer) {
+    if (!ensure_menu_mapped())
+        return;
+
+    const int pad = 14;
+    const int title_h = 30;
+    const int footer_h = (footer && footer[0]) ? 24 : 0;
+
+    int visible = OVERLAY_MENU_VISIBLE;
+    if (count - top < visible) visible = count - top;
+    if (visible < 0) visible = 0;
+
+    int box_w = OVERLAY_MENU_TEX_W;
+    int box_h = pad + title_h + visible * OVERLAY_MENU_ROW_H + footer_h + pad;
+    if (box_h > OVERLAY_MENU_TEX_H) box_h = OVERLAY_MENU_TEX_H;
+
+    /* Draw into the slot the RSX is not currently reading. */
+    int slot = (g_menu_cur == 0) ? 1 : 0;
+    uint8_t *fb = (uint8_t *)g_menu_image + (size_t)slot * OVERLAY_MENU_SLOT_BYTES;
+    uint32_t pitch = OVERLAY_MENU_TEX_W * 4;
+
+    memset(fb, 0, OVERLAY_MENU_SLOT_BYTES);
+
+    draw_rect(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
+              0, 0, box_w, box_h, 0x00101010);
+    draw_rect(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
+              0, 0, box_w, 2, 0x00f0c040);
+
+    if (title && title[0])
+        draw_text(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
+                  pad, pad, 0x00f0c040, title);
+
+    int row_y0 = pad + title_h;
+    for (int i = 0; i < visible; i++) {
+        int idx = top + i;
+        if (idx < 0 || idx >= count) break;
+        int ry = row_y0 + i * OVERLAY_MENU_ROW_H;
+        uint32_t color = 0x00ffffff;
+        if (idx == selected) {
+            draw_rect(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
+                      pad - 6, ry - 2, box_w - 2 * (pad - 6),
+                      OVERLAY_MENU_ROW_H, 0x00f0c040);
+            color = 0x00101010;
+        }
+        if (lines && lines[idx])
+            draw_text(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
+                      pad, ry + 2, color, lines[idx]);
+    }
+
+    if (footer_h)
+        draw_text(fb, pitch, OVERLAY_MENU_TEX_W, OVERLAY_MENU_TEX_H,
+                  pad, box_h - footer_h + 2, 0x00a0a0a0, footer);
+
+    g_menu_w2[slot] = box_w;
+    g_menu_h2[slot] = box_h;
+    flush_dcache(fb, (size_t)box_h * pitch);
+    g_menu_cur = slot;   /* publish the freshly drawn slot to the RSX */
+}
+
+void taiko_overlay_menu_active(int on) {
+    if (!on)
+        g_menu_cur = -1;
+    g_menu_active = on ? 1 : 0;
+}
+
+static void maybe_draw_menu(void *ctx, uint8_t id) {
+    if (!g_menu_active || id >= 8 || !g_menu_mapped)
+        return;
+
+    int cur = g_menu_cur;       /* snapshot the published slot */
+    if (cur < 0)
+        return;
+    int mw = g_menu_w2[cur];
+    int mh = g_menu_h2[cur];
+    if (mw <= 0 || mh <= 0)
+        return;
+
+    overlay_buffer_t b = g_buffers[id];
+    if (!b.valid) {
+        cache_display_info();
+        b = g_buffers[id];
+    }
+    if (!b.valid || b.pitch == 0 || b.width < 320 || b.height < 120)
+        return;
+
+    int x = ((int)b.width - mw) / 2;
+    int y = ((int)b.height - mh) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    CellGcmContextData *gcm = (CellGcmContextData *)ctx;
+    if (!gcm || !gcm->current || !gcm->end ||
+        gcm->current + OVERLAY_GCM_HEADROOM_WORDS > gcm->end)
+        return;
+
+    uint32_t src_io = g_menu_io_offset + (uint32_t)cur * OVERLAY_MENU_SLOT_BYTES;
+    if (!build_blit_cmd(&b, x, y, src_io, OVERLAY_MENU_TEX_W * 4, mw, mh))
+        return;
+
+    cellGcmSetCallCommandUnsafe(gcm, g_overlay_cmd_io_offset);
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
     if (!g_local_base) {
         CellGcmConfig cfg;
@@ -274,8 +442,13 @@ static int hk_flip_command(void *ctx, uint8_t id) {
     }
     /* Toast must draw into the game's 720p source BEFORE the scale
      * blit so the upscaled dest picks it up. Otherwise the toast is
-     * stamped into a buffer the RSX no longer scans out. */
-    if (g_toast_frames > 0)
+     * stamped into a buffer the RSX no longer scans out.
+     *
+     * Toast and menu share the single overlay command buffer, so only one
+     * may be emitted per flip — the menu (when open) takes precedence. */
+    if (g_menu_active)
+        maybe_draw_menu(ctx, id);
+    else if (g_toast_frames > 0)
         maybe_draw_toast(ctx, id);
     if (taiko_video_upscale_active())
         (void)taiko_video_upscale_inject_blit(ctx, id);
@@ -332,6 +505,17 @@ void taiko_overlay_show_message(const char *message) {
     if (!message || !message[0] || !boot_window_open())
         return;
 
+    strncpy(g_toast, message, sizeof(g_toast));
+    g_toast[sizeof(g_toast) - 1] = 0;
+    build_toast_image();
+    g_toast_frames = OVERLAY_TOAST_FRAMES;
+}
+
+void taiko_overlay_show_prompt(const char *message) {
+    if (!message || !message[0])
+        return;
+
+    g_toast_force = 1;
     strncpy(g_toast, message, sizeof(g_toast));
     g_toast[sizeof(g_toast) - 1] = 0;
     build_toast_image();

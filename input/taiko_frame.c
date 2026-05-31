@@ -16,6 +16,11 @@ static uint16_t g_coin_counter;
 static int      g_test_on;
 static uint8_t  g_last_frame[0x60];
 static int      g_last_frame_valid;
+static volatile int g_gated;
+
+void taiko_frame_set_gated(int on) {
+    g_gated = on ? 1 : 0;
+}
 
 /* Per-slot pulse state. `remaining_high` counts down PEAK frames pending,
  * `cooldown` enforces 0 frame(s) between distinct hits. No queue — new
@@ -43,6 +48,11 @@ void taiko_frame_build(uint8_t out[0x60], int advance_input) {
 
     pad_snapshot_t snap;
     pad_input_consume(&snap);
+
+    /* Overlay open: drop every input this frame. Consume above already
+     * cleared the source edge counters, so nothing re-fires on un-gate. */
+    if (g_gated)
+        memset(&snap, 0, sizeof snap);
 
     const uint32_t level_any = snap.level[0] | snap.level[1];
 

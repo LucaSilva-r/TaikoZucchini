@@ -38,6 +38,7 @@ INCLUDES := -I$(CELL_SDK)/target/ppu/include \
             -Inetwork \
             -Istorage \
             -Ibpreader \
+            -Icards \
             -Ieboot_patcher \
             -Imod_menu \
             -Iftp \
@@ -97,6 +98,7 @@ SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_i
            input/pad_input.c input/kb_input.c input/taiko_frame.c \
            qr/camera_qr.c qr/qr_spu_host.c \
            bpreader/bpreader_serial.c \
+           cards/card_store.c cards/card_picker.c \
            network/certs.c \
            network/online_diag.c \
            hooks/http_hook.c hooks/cell_http_shim.c \
@@ -215,13 +217,15 @@ $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
 
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
-core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h network/certs.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h
+core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h network/certs.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h cards/card_picker.h
 eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h
 qr/qr_spu_host.o: qr/qr_spu_host.c qr/qr_spu_host.h qr_spu/qr_spu_shared.h core/debug.h
 bpreader/bpreader_serial.o: bpreader/bpreader_serial.c bpreader/bpreader_serial.h
+cards/card_store.o:  cards/card_store.c cards/card_store.h config/cfg_file.h core/debug.h
+cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_store.h qr/camera_qr.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
 hooks/bpreader_hook.o: hooks/bpreader_hook.c hooks/bpreader_hook.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h

@@ -109,6 +109,20 @@ static uint8_t g_last_access_code[ACCESS_CODE_BYTES];
 static volatile uint32_t g_have_access_code;
 static volatile int g_qr_scan_requested;
 static volatile int g_qr_scan_active;
+static camera_qr_capture_fn g_capture_sink;
+static volatile int g_qr_suppress;
+
+int camera_qr_scan_active(void) {
+    return g_qr_scan_active;
+}
+
+void camera_qr_set_capture_sink(camera_qr_capture_fn fn) {
+    g_capture_sink = fn;
+}
+
+void camera_qr_set_suppress(int on) {
+    g_qr_suppress = on ? 1 : 0;
+}
 
 #if CFG_QR_SELFTEST
 static void run_selftest(struct quirc *q) {
@@ -167,6 +181,25 @@ static void handle_decode_result(int status, const uint8_t *payload, int payload
         memcpy(g_last_access_code, ac, sizeof(ac));
         g_have_access_code = 1;
         g_qr_scan_requested = 0;
+
+        /* Capture mode (card picker "Add via QR"): hand the decoded code to
+         * the sink and consume it, rather than logging into the game. */
+        camera_qr_capture_fn sink = g_capture_sink;
+        if (sink) {
+            g_capture_sink = NULL;
+            sink(access_code);
+            dbg_print("[qr] access_code captured to sink\n");
+            return;
+        }
+
+        /* Card-picker overlay open: never auto-log-in. The user replays a
+         * card explicitly by selecting it; any live scan is dropped so a
+         * held card can't slip past the overlay into the game. */
+        if (g_qr_suppress) {
+            dbg_print("[qr] decode suppressed (picker open)\n");
+            return;
+        }
+
         bpreader_serial_set_access_code(access_code);
         bpreader_serial_set_card_present(true);
         dbg_print("[qr] access_code captured\n");
