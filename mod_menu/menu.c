@@ -6,7 +6,10 @@
 
 #include <cell/sysmodule.h>
 #include <sys/process.h>
+#include <sys/ppu_thread.h>
 #include <sys/timer.h>
+#include <cell/keyboard/kb_codes.h>
+#include <netex/net.h>
 
 #include "debug.h"
 #include "runtime.h"
@@ -20,6 +23,10 @@
 #include "ftp_server.h"
 #include "storage/chassisinfo_schema.h"
 #include "game_version.h"
+#include "overlay.h"
+#include "taiko_frame.h"
+#include "kb_input.h"
+#include "online_diag.h"
 
 #define COLOR_BG        MENU_RGB(0x00, 0x00, 0x00)
 #define COLOR_PANEL     MENU_RGB(0x10, 0x14, 0x18)
@@ -794,4 +801,408 @@ void menu_maybe_open(void) {
     dbg_print("[menu] closed, relaunching game\n");
     menu_action_reboot_game();
     sys_process_exit(0);
+}
+
+/* ----------------------------------------------------------------------
+ * In-game overlay menu (keyboard F5).
+ *
+ * Unlike menu_maybe_open() — which seizes the RSX with its own
+ * framebuffer and must relaunch the game on close — this variant draws
+ * through the existing overlay flip hook (taiko_overlay_menu_*), so it
+ * composits over the live game and resumes cleanly without a reboot.
+ * It reuses the same g_items model, toggle_field() and run_action() as
+ * the boot menu; only the render backend and exit semantics differ.
+ *
+ * Most g_items toggles are boot-time patch switches: editing them here
+ * updates g_cfg in RAM and persists on "Save settings to disk", taking
+ * effect on the next boot. The footer says so.
+ * -------------------------------------------------------------------- */
+
+/* Mirror of the overlay's private layout (core/overlay.c): it shows up to
+ * OVERLAY_MENU_VISIBLE rows and stores each line in OVERLAY_TEXT_CAP bytes.
+ * We pass exactly the visible slice (top=0), so IG_VIS must not exceed the
+ * overlay's visible-row count. */
+#define IG_VIS         10    /* == OVERLAY_MENU_VISIBLE */
+#define IG_LINE_CAP    96    /* == OVERLAY_TEXT_CAP */
+#define IG_ROWS_MAX    (ITEM_COUNT_MAX + 8)
+#define IG_TICK_US     (16 * 1000)
+
+/* In-game open triggers: keyboard F5 (tap), or pad L3+R3+CROSS held
+ * briefly. CROSS is required on top of L3+R3 so the combo can't collide
+ * with the card picker's plain L3+R3 saved-cards trigger. */
+#define IG_PAD_COMBO       (MENU_BTN_L3 | MENU_BTN_R3 | MENU_BTN_CROSS)
+#define IG_PAD_HOLD_TICKS  15   /* ~0.25 s @ IG_TICK_US */
+
+/* Row codes stored in g_ig_rows[]. */
+#define IG_Q_RESUME    0
+#define IG_Q_SAVE      1
+#define IG_Q_FTP       2
+#define IG_SEC_QUICK   3
+#define IG_GBASE       1000   /* IG_GBASE + i references g_items[i] */
+
+static volatile int g_ingame_open;
+static int g_ig_rows[IG_ROWS_MAX];
+static int g_ig_row_count;
+static int g_ig_sel;   /* index into g_ig_rows */
+static int g_ig_top;   /* first visible row index */
+static int g_ig_self_poll_kb;  /* drive kb_input_poll_tick ourselves (USIO off) */
+
+/* Keyboard freshness: when USIO emulation is on, the pad_input worker
+ * thread drives kb_input_poll_tick every frame. When it is off that worker
+ * doesn't run, so the menu watcher must pump the keyboard itself or
+ * kb_input_keycode_held(F5) never updates. No-op when something else polls. */
+static void ig_kb_pump(void) {
+    if (g_ig_self_poll_kb)
+        kb_input_poll_tick();
+}
+
+static int ig_row_selectable(int code) {
+    if (code == IG_SEC_QUICK) return 0;
+    if (code == IG_Q_RESUME || code == IG_Q_SAVE || code == IG_Q_FTP) return 1;
+    if (code >= IG_GBASE) {
+        int i = code - IG_GBASE;
+        return i >= 0 && i < ITEM_COUNT && g_items[i].kind != ITEM_SECTION;
+    }
+    return 0;
+}
+
+static void ig_build_rows(void) {
+    g_ig_row_count = 0;
+    g_ig_rows[g_ig_row_count++] = IG_SEC_QUICK;
+    g_ig_rows[g_ig_row_count++] = IG_Q_RESUME;
+    g_ig_rows[g_ig_row_count++] = IG_Q_SAVE;
+    g_ig_rows[g_ig_row_count++] = IG_Q_FTP;
+    for (int i = 0; i < ITEM_COUNT && g_ig_row_count < IG_ROWS_MAX; i++) {
+        if (g_items[i].kind == ITEM_SECTION || item_visible(i))
+            g_ig_rows[g_ig_row_count++] = IG_GBASE + i;
+    }
+}
+
+static int ig_first_selectable(void) {
+    for (int r = 0; r < g_ig_row_count; r++)
+        if (ig_row_selectable(g_ig_rows[r])) return r;
+    return 0;
+}
+
+static int ig_move(int from, int dir) {
+    int r = from;
+    for (int n = 0; n < g_ig_row_count; n++) {
+        r += dir;
+        if (r < 0) r = g_ig_row_count - 1;
+        if (r >= g_ig_row_count) r = 0;
+        if (ig_row_selectable(g_ig_rows[r])) return r;
+    }
+    return from;
+}
+
+static void ig_ensure_visible(void) {
+    if (g_ig_sel < g_ig_top) g_ig_top = g_ig_sel;
+    if (g_ig_sel >= g_ig_top + IG_VIS) g_ig_top = g_ig_sel - IG_VIS + 1;
+    if (g_ig_top < 0) g_ig_top = 0;
+}
+
+/* Append src to dst (cap-bounded, always NUL-terminated). Returns new len. */
+static int ig_append(char *dst, int n, int cap, const char *src) {
+    if (!src) return n;
+    while (*src && n < cap - 1) dst[n++] = *src++;
+    dst[n] = 0;
+    return n;
+}
+
+static int ig_append_u32(char *dst, int n, int cap, unsigned v) {
+    char tmp[12];
+    int t = 0;
+    if (v == 0) tmp[t++] = '0';
+    while (v && t < (int)sizeof tmp) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+    while (t > 0 && n < cap - 1) dst[n++] = tmp[--t];
+    dst[n] = 0;
+    return n;
+}
+
+static void ig_line_for(int code, char *buf, int cap) {
+    int n = 0;
+    buf[0] = 0;
+    if (code == IG_SEC_QUICK) {
+        ig_append(buf, 0, cap, "-- Quick --");
+        return;
+    }
+    if (code == IG_Q_RESUME) { ig_append(buf, 0, cap, "Resume game"); return; }
+    if (code == IG_Q_SAVE)   { ig_append(buf, 0, cap, "Save settings to disk"); return; }
+    if (code == IG_Q_FTP)    { build_ftp_line(buf, (size_t)cap); return; }
+
+    int i = code - IG_GBASE;
+    if (i < 0 || i >= ITEM_COUNT) return;
+    const menu_item_t *it = &g_items[i];
+    switch (it->kind) {
+    case ITEM_SECTION:
+        n = ig_append(buf, 0, cap, "-- ");
+        n = ig_append(buf, n, cap, it->label);
+        ig_append(buf, n, cap, " --");
+        break;
+    case ITEM_TOGGLE:
+        n = ig_append(buf, 0, cap, it->label);
+        n = ig_append(buf, n, cap, ": ");
+        ig_append(buf, n, cap, field_get(it->field) ? "ON" : "OFF");
+        break;
+    case ITEM_ACTION:
+        /* Relabel the "& reboot" actions to reflect their in-game behaviour
+         * (exit to XMB instead of EBOOT relaunch). Boot-menu labels in
+         * g_items are unchanged. */
+        switch (it->action) {
+        case A_SAVE_AND_REBOOT:
+            ig_append(buf, 0, cap, "Save & exit to XMB");
+            break;
+        case A_DISCARD_AND_REBOOT:
+            ig_append(buf, 0, cap, "Discard & exit to XMB");
+            break;
+        case A_DELETE_CONFIG_REBOOT:
+            ig_append(buf, 0, cap, "Delete config & exit to XMB");
+            break;
+        default:
+            ig_append(buf, 0, cap, it->label);
+            break;
+        }
+        break;
+    case ITEM_HOST_EDIT:
+        n = ig_append(buf, 0, cap, "Redirect host: ");
+        ig_append(buf, n, cap, g_cfg.online_redirect_host[0]
+                                 ? g_cfg.online_redirect_host : "(unset)");
+        break;
+    case ITEM_PORT_EDIT:
+        n = ig_append(buf, 0, cap, "Redirect port: ");
+        ig_append_u32(buf, n, cap, g_cfg.online_redirect_port);
+        break;
+    }
+}
+
+static void ig_render(void) {
+    static char linebuf[IG_VIS][IG_LINE_CAP];
+    const char *ptrs[IG_VIS];
+
+    int visible = g_ig_row_count - g_ig_top;
+    if (visible > IG_VIS) visible = IG_VIS;
+    if (visible < 0) visible = 0;
+    for (int r = 0; r < visible; r++) {
+        ig_line_for(g_ig_rows[g_ig_top + r], linebuf[r], IG_LINE_CAP);
+        ptrs[r] = linebuf[r];
+    }
+
+    const char *footer = g_status
+        ? g_status
+        : "ARROWS/DPAD move  X/ENTER select  O/F5 close  -  most toggles apply next boot";
+
+    taiko_overlay_menu_set("Taiko Zucchini (F5)", ptrs, visible,
+                           g_ig_sel - g_ig_top, 0, footer);
+    taiko_overlay_menu_active(1);
+}
+
+static int ig_action_terminates(action_id_t a) {
+    return a == A_SAVE_AND_REBOOT ||
+           a == A_DISCARD_AND_REBOOT ||
+           a == A_DELETE_CONFIG_REBOOT ||
+           a == A_EXIT_TO_XMB;
+}
+
+/* Clean up everything the mod started before a terminating action
+ * (sys_process_exit / exitspawn2). Process teardown on real hardware
+ * stalls if a mod thread is parked in a blocking syscall (a socket
+ * accept()/recv(), etc.). Stop each service we can, and print a marker
+ * after every step: if exit still hangs, the LAST marker in the TTY log
+ * names the step that blocked, so the remaining offender can be killed
+ * specifically. */
+static void ig_shutdown_for_exit(void) {
+    dbg_print("[menu] ig exit: begin shutdown\n");
+
+    taiko_overlay_menu_active(0);
+    taiko_frame_set_gated(0);
+    dbg_print("[menu] ig exit: overlay off, input ungated\n");
+
+    if (ftp_server_is_running()) {
+        dbg_print("[menu] ig exit: stopping ftp...\n");
+        ftp_server_stop();
+        dbg_print("[menu] ig exit: ftp stopped\n");
+    } else {
+        dbg_print("[menu] ig exit: ftp not running\n");
+    }
+
+    dbg_print("[menu] ig exit: stopping online_diag...\n");
+    online_diag_stop();
+    dbg_print("[menu] ig exit: online_diag signalled\n");
+
+    /* Blanket unblock: finalising libnet aborts every open socket, so any
+     * mod/game thread parked in a blocking recv()/accept()/connect()
+     * returns with an error and can exit. We're terminating the process
+     * anyway, so tearing down the game's network is harmless here. If THIS
+     * call is what hangs, the log stops right after "finalizing network".*/
+    dbg_print("[menu] ig exit: finalizing network (abort all sockets)...\n");
+    sys_net_finalize_network();
+    dbg_print("[menu] ig exit: network finalized\n");
+
+    /* Give the just-unblocked loop-threads a tick to observe their stop
+     * flags / socket errors and leave their syscalls before we terminate. */
+    sys_timer_usleep(150 * 1000);
+    dbg_print("[menu] ig exit: shutdown complete, terminating now\n");
+}
+
+static void ig_activate(int code, uint32_t edge, int *close) {
+    g_status = NULL;
+    if (code == IG_Q_RESUME) { *close = 1; return; }
+    if (code == IG_Q_SAVE) {
+        menu_action_save_config();
+        g_status = "Settings saved to disk";
+        return;
+    }
+    if (code == IG_Q_FTP) {
+        if (ftp_server_is_running()) {
+            ftp_server_stop();
+            g_status = "FTP server stopped";
+        } else {
+            /* In-game the game owns the network stack, so start in external
+             * mode (reuse it). Bring-up is async on its own thread; the FTP
+             * row updates to ftp://IP:port once it is listening, so just
+             * report that it is starting rather than probing synchronously. */
+            ftp_server_start_external();
+            g_status = "FTP server starting (see FTP row for address)...";
+        }
+        return;
+    }
+
+    int i = code - IG_GBASE;
+    if (i < 0 || i >= ITEM_COUNT) return;
+    const menu_item_t *it = &g_items[i];
+    if (it->kind == ITEM_TOGGLE) {
+        toggle_field(it->field);   /* sets g_status with any side-effect note */
+    } else if (it->kind == ITEM_ACTION && (edge & MENU_BTN_CROSS)) {
+        if (ig_action_terminates(it->action)) {
+            /* In-game, sys_game_process_exitspawn2 (the EBOOT relaunch)
+             * hangs, while plain sys_process_exit (exit to XMB) works. So
+             * every "& reboot" action is remapped here to "& exit to XMB":
+             * do the save/delete, then exit to XMB. The operator restarts
+             * the game from XMB and the next boot applies the saved config
+             * (re-patching if needed). The shared boot menu is untouched. */
+            ig_shutdown_for_exit();
+            if (it->action == A_SAVE_AND_REBOOT)
+                menu_action_save_config();
+            else if (it->action == A_DELETE_CONFIG_REBOOT)
+                menu_action_delete_config();
+            /* A_DISCARD_AND_REBOOT: leave unsaved edits unpersisted.
+             * A_EXIT_TO_XMB: nothing extra. */
+            menu_action_exit_to_xmb();      /* sys_process_exit(0) */
+        } else {
+            run_action(it->action);         /* A_DELETE_USIO_BACKUP: no exit */
+        }
+    } else if ((it->kind == ITEM_HOST_EDIT || it->kind == ITEM_PORT_EDIT) &&
+               (edge & MENU_BTN_CROSS)) {
+        g_status = "Edit redirect host/port from the boot menu (tap F2 at startup)";
+    }
+}
+
+/* Runs the interactive in-game menu. Called on the watcher thread when
+ * F5 is tapped. Blocks (gating game input) until the menu is closed,
+ * then resumes the game in place. */
+static void menu_ingame_run(void) {
+    if (g_ingame_open) return;
+    g_ingame_open = 1;
+
+    g_status = NULL;
+    ig_build_rows();
+    g_ig_sel = ig_first_selectable();
+    g_ig_top = 0;
+    ig_ensure_visible();
+
+    /* Gate controller/keyboard out of the game's USIO frame so navigating
+     * the menu never presses anything in the song. */
+    taiko_frame_set_gated(1);
+    (void)menu_pad_pressed();   /* drain the opening edge */
+
+    /* F5 is held right now (it just fired the open edge). Treat it as
+     * already-high so the close detector waits for a release first. */
+    int f5_prev = 1;
+
+    for (;;) {
+        ig_kb_pump();   /* keep keyboard fresh while the menu is open */
+        int f5 = kb_input_keycode_held(CELL_KEYC_F5);
+        int f5_edge = f5 && !f5_prev;
+        f5_prev = f5;
+
+        uint32_t edge = menu_pad_pressed();
+        int close = 0;
+
+        if (edge & MENU_BTN_UP)   { g_ig_sel = ig_move(g_ig_sel, -1); ig_ensure_visible(); }
+        if (edge & MENU_BTN_DOWN) { g_ig_sel = ig_move(g_ig_sel,  1); ig_ensure_visible(); }
+
+        if (edge & (MENU_BTN_CROSS | MENU_BTN_LEFT | MENU_BTN_RIGHT))
+            ig_activate(g_ig_rows[g_ig_sel], edge, &close);
+
+        if (edge & MENU_BTN_START) {
+            menu_action_save_config();
+            g_status = "Settings saved to disk";
+        }
+
+        if (f5_edge || (edge & MENU_BTN_CIRCLE))
+            close = 1;
+
+        if (close)
+            break;
+
+        ig_render();
+        sys_timer_usleep(IG_TICK_US);
+    }
+
+    taiko_overlay_menu_active(0);
+    taiko_frame_set_gated(0);
+    (void)menu_pad_pressed();   /* drain the closing edge */
+    g_ingame_open = 0;
+}
+
+static void ingame_menu_thread(uint64_t arg) {
+    (void)arg;
+    sys_timer_sleep(8);         /* let the game + input subsystems settle */
+    menu_pad_init();            /* refcounted; shared with card picker */
+
+    int f5_prev = 0;
+    int pad_hold = 0;
+    for (;;) {
+        int open = 0;
+
+        ig_kb_pump();   /* keep keyboard fresh when USIO (pad worker) is off */
+
+        /* Keyboard F5: rising edge (tap). */
+        int f5 = kb_input_keycode_held(CELL_KEYC_F5);
+        if (f5 && !f5_prev)
+            open = 1;
+        f5_prev = f5;
+
+        /* Pad L3+R3+CROSS: held for a brief debounce window. */
+        uint32_t held = menu_pad_held();
+        if ((held & IG_PAD_COMBO) == IG_PAD_COMBO) {
+            if (++pad_hold >= IG_PAD_HOLD_TICKS)
+                open = 1;
+        } else {
+            pad_hold = 0;
+        }
+
+        if (open && !g_ingame_open) {
+            menu_ingame_run();
+            /* Resync: the trigger key/combo is likely still held from the
+             * close action. Require a fresh release before the next open. */
+            f5_prev = 1;
+            pad_hold = 0;
+        }
+        sys_timer_usleep(IG_TICK_US);
+    }
+}
+
+void menu_ingame_start(int self_poll_keyboard) {
+    static int started;
+    if (started) return;
+    started = 1;
+
+    g_ig_self_poll_kb = self_poll_keyboard ? 1 : 0;
+
+    sys_ppu_thread_t tid = 0;
+    int rc = sys_ppu_thread_create(&tid, ingame_menu_thread, 0,
+                                   1001, 64 * 1024, 0, "taiko_ingame_menu");
+    if (rc != 0)
+        dbg_print_hex32("[menu] ingame thread create rc", (uint32_t)rc);
 }

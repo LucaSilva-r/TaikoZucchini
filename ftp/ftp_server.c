@@ -31,6 +31,9 @@ static int g_listen_sock = -1;
 static char g_ip_str[32] = "0.0.0.0";
 static sys_ppu_thread_t g_listener_tid = 0;
 static void *g_net_mem   = NULL;
+/* When set, the network stack was brought up by someone else (the game);
+ * boot_setup reuses it and ftp_server_stop must not finalise it. */
+static int g_external_net = 0;
 
 /* Per-session (one at a time). */
 typedef struct {
@@ -710,7 +713,7 @@ static void boot_thread_entry(uint64_t arg) {
     listener_entry(0);
 }
 
-int ftp_server_start(void) {
+static int ftp_server_spawn(void) {
     if (g_running) return 0;
     sys_ppu_thread_t tid = 0;
     int rc = sys_ppu_thread_create(&tid, boot_thread_entry, 0,
@@ -722,38 +725,56 @@ int ftp_server_start(void) {
     return 0;
 }
 
+int ftp_server_start(void) {
+    g_external_net = 0;
+    return ftp_server_spawn();
+}
+
+int ftp_server_start_external(void) {
+    g_external_net = 1;
+    return ftp_server_spawn();
+}
+
 static int boot_setup(void) {
-    if (cellSysmoduleLoadModule(CELL_SYSMODULE_NET) < 0) {
-        dbg_print("[ftp] sysmodule NET load failed\n");
-        return -1;
-    }
-    if (cellSysmoduleLoadModule(CELL_SYSMODULE_NETCTL) < 0) {
-        dbg_print("[ftp] sysmodule NETCTL load failed\n");
-        return -2;
-    }
+    /* External mode: the game already loaded libnet/netctl and brought the
+     * stack up. Re-initialising it returns an error and would also let our
+     * teardown finalise the game's networking — so skip the whole bring-up
+     * and bind our listening socket onto the existing stack. */
+    if (!g_external_net) {
+        if (cellSysmoduleLoadModule(CELL_SYSMODULE_NET) < 0) {
+            dbg_print("[ftp] sysmodule NET load failed\n");
+            return -1;
+        }
+        if (cellSysmoduleLoadModule(CELL_SYSMODULE_NETCTL) < 0) {
+            dbg_print("[ftp] sysmodule NETCTL load failed\n");
+            return -2;
+        }
 
-    /* libnet needs a 128 KB scratch buffer. Pull from kernel pages so we
-     * don't blow the 384 KB BSS heap (see sprx_heap_size_real_hw note). */
-    sys_addr_t mem = 0;
-    if (sys_memory_allocate(1 * 1024 * 1024,
-                            SYS_MEMORY_PAGE_SIZE_1M, &mem) != 0) {
-        dbg_print("[ftp] net mem alloc failed\n");
-        return -3;
-    }
-    g_net_mem = (void *)(uintptr_t)mem;
+        /* libnet needs a 128 KB scratch buffer. Pull from kernel pages so we
+         * don't blow the 384 KB BSS heap (see sprx_heap_size_real_hw note). */
+        sys_addr_t mem = 0;
+        if (sys_memory_allocate(1 * 1024 * 1024,
+                                SYS_MEMORY_PAGE_SIZE_1M, &mem) != 0) {
+            dbg_print("[ftp] net mem alloc failed\n");
+            return -3;
+        }
+        g_net_mem = (void *)(uintptr_t)mem;
 
-    sys_net_initialize_parameter_t np;
-    np.memory      = g_net_mem;
-    np.memory_size = NET_BUF_SIZE;
-    np.flags       = 0;
-    if (sys_net_initialize_network_ex(&np) < 0) {
-        dbg_print("[ftp] sys_net_initialize_network_ex failed\n");
-        return -4;
-    }
+        sys_net_initialize_parameter_t np;
+        np.memory      = g_net_mem;
+        np.memory_size = NET_BUF_SIZE;
+        np.flags       = 0;
+        if (sys_net_initialize_network_ex(&np) < 0) {
+            dbg_print("[ftp] sys_net_initialize_network_ex failed\n");
+            return -4;
+        }
 
-    if (cellNetCtlInit() < 0) {
-        dbg_print("[ftp] cellNetCtlInit failed\n");
-        return -5;
+        if (cellNetCtlInit() < 0) {
+            dbg_print("[ftp] cellNetCtlInit failed\n");
+            return -5;
+        }
+    } else {
+        dbg_print("[ftp] external net mode: reusing game network stack\n");
     }
 
     if (wait_for_ip(5000) != 0) {
@@ -815,11 +836,15 @@ void ftp_server_stop(void) {
      * touch sockets after we finalise the network stack. */
     sys_timer_usleep(200 * 1000);
 
-    cellNetCtlTerm();
-    sys_net_finalize_network();
-    if (g_net_mem) {
-        sys_memory_free((sys_addr_t)(uintptr_t)g_net_mem);
-        g_net_mem = NULL;
+    /* Only tear the stack down if WE brought it up. In external mode the
+     * game owns it — finalising here would kill the game's networking. */
+    if (!g_external_net) {
+        cellNetCtlTerm();
+        sys_net_finalize_network();
+        if (g_net_mem) {
+            sys_memory_free((sys_addr_t)(uintptr_t)g_net_mem);
+            g_net_mem = NULL;
+        }
     }
     g_ip_str[0] = '0'; g_ip_str[1] = '.'; g_ip_str[2] = '0';
     g_ip_str[3] = '.'; g_ip_str[4] = '0'; g_ip_str[5] = '.';

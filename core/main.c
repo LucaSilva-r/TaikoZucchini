@@ -575,12 +575,22 @@ int taiko_start(unsigned int args, void *argp) {
         taiko_frame_init();
         pad_input_init();
         kb_input_init();
+    } else {
+        /* USIO off: the game's input path isn't emulated, but the in-game
+         * menu still needs the keyboard. pad_input (which normally drives
+         * keyboard polling) isn't running, so the menu watcher polls the
+         * keyboard itself — see the self_poll flag on menu_ingame_start. */
+        kb_input_init();
     }
     /* Saved-card picker: needs the overlay flip hook and the virtual USIO
      * input gate. QR scanning is optional; stored-card replay still works
      * without a camera. */
     if (g_cfg.usio_emulation)
         card_picker_start();
+    /* In-game mod menu (keyboard F5 / pad L3+R3+X). Must open in BOTH USIO
+     * states, so it is started unconditionally. The pad path is independent
+     * of USIO; when USIO is off the watcher also self-polls the keyboard. */
+    menu_ingame_start(!g_cfg.usio_emulation);
     if (g_cfg.online_diag)
         online_diag_start();
 
