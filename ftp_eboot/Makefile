@@ -4,7 +4,7 @@
 # the SelfResigner tooling required for real consoles.
 
 CELL_SDK     ?= $(abspath $(CURDIR)/../cell)
-CELL_HOST    := $(CELL_SDK)/host-linux
+CELL_HOST    ?= $(firstword $(wildcard $(CELL_SDK)/host-win32 $(CELL_SDK)/host-linux) $(CELL_SDK)/host-linux)
 PPU_PREFIX   := $(CELL_HOST)/ppu/bin/ppu-lv2-
 
 PPU_CC       := $(PPU_PREFIX)gcc

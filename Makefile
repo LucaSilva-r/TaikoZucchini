@@ -9,7 +9,10 @@
 # or set CELL_SDK in the environment.
 
 CELL_SDK     ?= $(abspath $(CURDIR)/../cell)
-CELL_HOST    := $(CELL_SDK)/host-linux
+# Auto-pick the host toolchain layout: a native Windows SDK ships host-win32/
+# (.exe tools, runnable directly under git-bash/MSYS), otherwise the Wine-wrapped
+# host-linux/ layout. Override CELL_HOST explicitly to force one.
+CELL_HOST    ?= $(firstword $(wildcard $(CELL_SDK)/host-win32 $(CELL_SDK)/host-linux) $(CELL_SDK)/host-linux)
 PPU_PREFIX   := $(CELL_HOST)/ppu/bin/ppu-lv2-
 SPU_PREFIX   := $(CELL_HOST)/spu/bin/spu-lv2-
 
