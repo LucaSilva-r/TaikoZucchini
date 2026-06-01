@@ -24,7 +24,7 @@
 #define QR_WAIT_TICKS         150           /* ~15s @ 100ms to capture a scan */
 
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */
-#define MENU_VISIBLE          10
+#define MENU_VISIBLE          16
 
 #define EXTRA_ROWS_MAX        3             /* trailing actions: add kbd, optional qr, quit */
 
@@ -125,7 +125,8 @@ static int confirm_delete(const char *label) {
     (void)menu_pad_pressed();
     for (;;) {
         const char *lines[2] = { "Yes, delete", "No, keep" };
-        taiko_overlay_menu_set(title, lines, 2, sel, 0, "X:confirm  O:cancel");
+        taiko_overlay_menu_set(title, lines, NULL, NULL, 2, sel, 0,
+                               NULL, "X:confirm  O:cancel");
         taiko_overlay_menu_active(1);
 
         uint32_t edge = menu_pad_pressed();
@@ -166,8 +167,8 @@ static void run_chooser(void) {
         if (sel < top) top = sel;
         if (sel >= top + MENU_VISIBLE) top = sel - MENU_VISIBLE + 1;
 
-        taiko_overlay_menu_set("Saved Cards", lines, total, sel, top,
-                               "Up/Down  X:select  O:delete card");
+        taiko_overlay_menu_set("Saved Cards", lines, NULL, NULL, total, sel, top,
+                               NULL, "Up/Down  X:select  O:delete card");
         taiko_overlay_menu_active(1);
 
         uint32_t edge = menu_pad_pressed();

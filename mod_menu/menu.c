@@ -187,53 +187,6 @@ static const menu_item_t g_items[] = {
       "Private server TCP port. Usually 443.",
       0, 0 },
 
-    { ITEM_SECTION, "Advanced", "", 0, 0 },
-    { ITEM_TOGGLE,  "Camera input hooks",
-      "Captures camera frames for QR scanning and logs camera probe attempts.",
-      F_CAMERA_DIAG_HOOKS, 0 },
-    { ITEM_TOGGLE,  "DATA00000 redirect",
-      "Reads DATA00000.BIN from game USRDIR instead of a USB stick.",
-      F_DATA00000_REDIRECT, 0 },
-    { ITEM_TOGGLE,  "Cert replacement",
-      "Loads replacement TLS certificates from disk. Useful for private online servers.",
-      F_CERT_REPLACEMENT, 0 },
-    { ITEM_TOGGLE,  "Online diagnostics",
-      "Periodically writes network and online state to the debug log.",
-      F_ONLINE_DIAG, 0 },
-    { ITEM_TOGGLE,  "Probe patches",
-      "Makes the game recognize the virtual dongle and VU device at the expected USB index.",
-      F_PROBE_PATCHES, 0 },
-    { ITEM_TOGGLE,  "Strict dongle probe",
-      "Uses the earlier hard probe site. Normally leave this enabled with probe patches.",
-      F_HARD_DONGLE_PROBE, 0 },
-    { ITEM_TOGGLE,  "Auth stat bypass",
-      "Skips filesystem stat checks during dongle/VU auth so no real device is needed.",
-      F_AUTH_STAT_BYPASS, 0 },
-    { ITEM_TOGGLE,  "Virtual FD dispatch",
-      "Allows the game to route file-control calls to the virtual device handlers.",
-      F_FCNTL_DISPATCH, 0 },
-    { ITEM_TOGGLE,  "USIO endpoint filter",
-      "Filters USB endpoint enumeration so only the emulated IO board is exposed.",
-      F_USIO_ENDPOINT_FILTER, 0 },
-    { ITEM_TOGGLE,  "PS3A-USJ exact PID",
-      "Forces the USB PID expected by this game build.",
-      F_PS3A_USJ_EXACT_PID, 0 },
-    { ITEM_TOGGLE,  "XMB exit patch",
-      "Prevents XMB-triggered process exit from tearing down the resident module.",
-      F_XMB_EXIT_PATCH, 0 },
-    { ITEM_TOGGLE,  "Watchdog patches",
-      "Disables arcade watchdog resets during slow patching or network waits.",
-      F_WATCHDOG_PATCHES, 0 },
-    { ITEM_TOGGLE,  "Net cleanup guard",
-      "Skips game network cleanup paths that can crash after hooks are installed.",
-      F_NET_CLEANUP_GUARD, 0 },
-    { ITEM_TOGGLE,  "Clearlocks stub",
-      "No-ops file lock cleanup that conflicts with the patch flow.",
-      F_CLEARLOCKS_STUB, 0 },
-    { ITEM_TOGGLE,  "Allow screen tearing",
-      "Uses HSYNC flips instead of VSYNC. Can tear, but may reduce rhythm-lane jumps.",
-      F_ALLOW_SCREEN_TEARING, 0 },
-
     { ITEM_SECTION, "Chassis settings (chassisinfo.xml)", "", 0, 0 },
     { ITEM_TOGGLE, "is_promotion",
       "Promotion mode: free play + locked song list. Use for demo/event cabinets.",
@@ -297,6 +250,53 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE, "ignore_battlenpc_lvcap",
       "Disable level cap on NPC battle opponents. S10100-1 (Yellow) only.",
       (field_id_t)(F_CHASSIS_BASE + CI_F_IGNORE_BATTLENPC_LVCAP), 0 },
+
+    { ITEM_SECTION, "Advanced", "", 0, 0 },
+    { ITEM_TOGGLE,  "Camera input hooks",
+      "Captures camera frames for QR scanning and logs camera probe attempts.",
+      F_CAMERA_DIAG_HOOKS, 0 },
+    { ITEM_TOGGLE,  "DATA00000 redirect",
+      "Reads DATA00000.BIN from game USRDIR instead of a USB stick.",
+      F_DATA00000_REDIRECT, 0 },
+    { ITEM_TOGGLE,  "Cert replacement",
+      "Loads replacement TLS certificates from disk. Useful for private online servers.",
+      F_CERT_REPLACEMENT, 0 },
+    { ITEM_TOGGLE,  "Online diagnostics",
+      "Periodically writes network and online state to the debug log.",
+      F_ONLINE_DIAG, 0 },
+    { ITEM_TOGGLE,  "Probe patches",
+      "Makes the game recognize the virtual dongle and VU device at the expected USB index.",
+      F_PROBE_PATCHES, 0 },
+    { ITEM_TOGGLE,  "Strict dongle probe",
+      "Uses the earlier hard probe site. Normally leave this enabled with probe patches.",
+      F_HARD_DONGLE_PROBE, 0 },
+    { ITEM_TOGGLE,  "Auth stat bypass",
+      "Skips filesystem stat checks during dongle/VU auth so no real device is needed.",
+      F_AUTH_STAT_BYPASS, 0 },
+    { ITEM_TOGGLE,  "Virtual FD dispatch",
+      "Allows the game to route file-control calls to the virtual device handlers.",
+      F_FCNTL_DISPATCH, 0 },
+    { ITEM_TOGGLE,  "USIO endpoint filter",
+      "Filters USB endpoint enumeration so only the emulated IO board is exposed.",
+      F_USIO_ENDPOINT_FILTER, 0 },
+    { ITEM_TOGGLE,  "PS3A-USJ exact PID",
+      "Forces the USB PID expected by this game build.",
+      F_PS3A_USJ_EXACT_PID, 0 },
+    { ITEM_TOGGLE,  "XMB exit patch",
+      "Prevents XMB-triggered process exit from tearing down the resident module.",
+      F_XMB_EXIT_PATCH, 0 },
+    { ITEM_TOGGLE,  "Watchdog patches",
+      "Disables arcade watchdog resets during slow patching or network waits.",
+      F_WATCHDOG_PATCHES, 0 },
+    { ITEM_TOGGLE,  "Net cleanup guard",
+      "Skips game network cleanup paths that can crash after hooks are installed.",
+      F_NET_CLEANUP_GUARD, 0 },
+    { ITEM_TOGGLE,  "Clearlocks stub",
+      "No-ops file lock cleanup that conflicts with the patch flow.",
+      F_CLEARLOCKS_STUB, 0 },
+    { ITEM_TOGGLE,  "Allow screen tearing",
+      "Uses HSYNC flips instead of VSYNC. Can tear, but may reduce rhythm-lane jumps.",
+      F_ALLOW_SCREEN_TEARING, 0 },
 
     { ITEM_SECTION, "Actions", "", 0, 0 },
     { ITEM_ACTION,  "Delete usiobackup.bin",
@@ -822,8 +822,9 @@ void menu_maybe_open(void) {
  * OVERLAY_MENU_VISIBLE rows and stores each line in OVERLAY_TEXT_CAP bytes.
  * We pass exactly the visible slice (top=0), so IG_VIS must not exceed the
  * overlay's visible-row count. */
-#define IG_VIS         10    /* == OVERLAY_MENU_VISIBLE */
-#define IG_LINE_CAP    96    /* == OVERLAY_TEXT_CAP */
+#define IG_VIS         16    /* == OVERLAY_MENU_VISIBLE */
+#define IG_LINE_CAP    96    /* == OVERLAY_TEXT_CAP  */
+#define IG_VAL_CAP     48    /* == OVERLAY_VALUE_CAP */
 #define IG_ROWS_MAX    (ITEM_COUNT_MAX + 8)
 #define IG_TICK_US     (16 * 1000)
 
@@ -919,80 +920,118 @@ static int ig_append_u32(char *dst, int n, int cap, unsigned v) {
     return n;
 }
 
-static void ig_line_for(int code, char *buf, int cap) {
-    int n = 0;
-    buf[0] = 0;
+/* Fill the label / right-aligned value / colour-kind for one row code.
+ * Sections carry only a label; toggles map ON->green, OFF->red; actions
+ * get a dim ">" marker. The overlay renderer does the colouring. */
+static void ig_row_info(int code, char *label, int lcap,
+                        char *value, int vcap, unsigned char *kind) {
+    label[0] = 0;
+    value[0] = 0;
+    *kind = TAIKO_OVL_ROW_NORMAL;
+
     if (code == IG_SEC_QUICK) {
-        ig_append(buf, 0, cap, "-- Quick --");
+        ig_append(label, 0, lcap, "Quick");
+        *kind = TAIKO_OVL_ROW_SECTION;
         return;
     }
-    if (code == IG_Q_RESUME) { ig_append(buf, 0, cap, "Resume game"); return; }
-    if (code == IG_Q_SAVE)   { ig_append(buf, 0, cap, "Save settings to disk"); return; }
-    if (code == IG_Q_FTP)    { build_ftp_line(buf, (size_t)cap); return; }
+    if (code == IG_Q_RESUME) {
+        ig_append(label, 0, lcap, "Resume game");
+        ig_append(value, 0, vcap, ">");
+        *kind = TAIKO_OVL_ROW_ACTION;
+        return;
+    }
+    if (code == IG_Q_SAVE) {
+        ig_append(label, 0, lcap, "Save settings to disk");
+        ig_append(value, 0, vcap, ">");
+        *kind = TAIKO_OVL_ROW_ACTION;
+        return;
+    }
+    if (code == IG_Q_FTP) {
+        /* Address (or "not running") in the label; ON/OFF chip as value. */
+        build_ftp_line(label, (size_t)lcap);
+        int up = ftp_server_is_running();
+        ig_append(value, 0, vcap, up ? "ON" : "OFF");
+        *kind = up ? TAIKO_OVL_ROW_TOGGLE_ON : TAIKO_OVL_ROW_TOGGLE_OFF;
+        return;
+    }
 
     int i = code - IG_GBASE;
     if (i < 0 || i >= ITEM_COUNT) return;
     const menu_item_t *it = &g_items[i];
     switch (it->kind) {
     case ITEM_SECTION:
-        n = ig_append(buf, 0, cap, "-- ");
-        n = ig_append(buf, n, cap, it->label);
-        ig_append(buf, n, cap, " --");
+        ig_append(label, 0, lcap, it->label);
+        *kind = TAIKO_OVL_ROW_SECTION;
         break;
-    case ITEM_TOGGLE:
-        n = ig_append(buf, 0, cap, it->label);
-        n = ig_append(buf, n, cap, ": ");
-        ig_append(buf, n, cap, field_get(it->field) ? "ON" : "OFF");
+    case ITEM_TOGGLE: {
+        ig_append(label, 0, lcap, it->label);
+        int on = field_get(it->field);
+        ig_append(value, 0, vcap, on ? "ON" : "OFF");
+        *kind = on ? TAIKO_OVL_ROW_TOGGLE_ON : TAIKO_OVL_ROW_TOGGLE_OFF;
         break;
+    }
     case ITEM_ACTION:
         /* Relabel the "& reboot" actions to reflect their in-game behaviour
          * (exit to XMB instead of EBOOT relaunch). Boot-menu labels in
          * g_items are unchanged. */
         switch (it->action) {
-        case A_SAVE_AND_REBOOT:
-            ig_append(buf, 0, cap, "Save & exit to XMB");
-            break;
-        case A_DISCARD_AND_REBOOT:
-            ig_append(buf, 0, cap, "Discard & exit to XMB");
-            break;
-        case A_DELETE_CONFIG_REBOOT:
-            ig_append(buf, 0, cap, "Delete config & exit to XMB");
-            break;
-        default:
-            ig_append(buf, 0, cap, it->label);
-            break;
+        case A_SAVE_AND_REBOOT:      ig_append(label, 0, lcap, "Save & exit to XMB"); break;
+        case A_DISCARD_AND_REBOOT:   ig_append(label, 0, lcap, "Discard & exit to XMB"); break;
+        case A_DELETE_CONFIG_REBOOT: ig_append(label, 0, lcap, "Delete config & exit to XMB"); break;
+        default:                     ig_append(label, 0, lcap, it->label); break;
         }
+        ig_append(value, 0, vcap, ">");
+        *kind = TAIKO_OVL_ROW_ACTION;
         break;
     case ITEM_HOST_EDIT:
-        n = ig_append(buf, 0, cap, "Redirect host: ");
-        ig_append(buf, n, cap, g_cfg.online_redirect_host[0]
-                                 ? g_cfg.online_redirect_host : "(unset)");
+        ig_append(label, 0, lcap, "Redirect host");
+        ig_append(value, 0, vcap, g_cfg.online_redirect_host[0]
+                                    ? g_cfg.online_redirect_host : "(unset)");
         break;
     case ITEM_PORT_EDIT:
-        n = ig_append(buf, 0, cap, "Redirect port: ");
-        ig_append_u32(buf, n, cap, g_cfg.online_redirect_port);
+        ig_append(label, 0, lcap, "Redirect port");
+        ig_append_u32(value, 0, vcap, g_cfg.online_redirect_port);
         break;
     }
 }
 
+/* Description shown in the overlay's bottom panel for the selected row. */
+static const char *ig_desc_for(int code) {
+    if (code == IG_SEC_QUICK) return "Resume, save settings, or toggle the operator FTP server.";
+    if (code == IG_Q_RESUME)  return "Close this menu and return to the game.";
+    if (code == IG_Q_SAVE)    return "Write the current settings to taiko_config.cfg now.";
+    if (code == IG_Q_FTP)     return "Toggle the operator FTP server for transferring files over the network.";
+    int i = code - IG_GBASE;
+    if (i >= 0 && i < ITEM_COUNT && g_items[i].desc && g_items[i].desc[0])
+        return g_items[i].desc;
+    return "";
+}
+
 static void ig_render(void) {
-    static char linebuf[IG_VIS][IG_LINE_CAP];
-    const char *ptrs[IG_VIS];
+    static char labelbuf[IG_VIS][IG_LINE_CAP];
+    static char valuebuf[IG_VIS][IG_VAL_CAP];
+    static unsigned char kinds[IG_VIS];
+    const char *lptrs[IG_VIS];
+    const char *vptrs[IG_VIS];
 
     int visible = g_ig_row_count - g_ig_top;
     if (visible > IG_VIS) visible = IG_VIS;
     if (visible < 0) visible = 0;
     for (int r = 0; r < visible; r++) {
-        ig_line_for(g_ig_rows[g_ig_top + r], linebuf[r], IG_LINE_CAP);
-        ptrs[r] = linebuf[r];
+        ig_row_info(g_ig_rows[g_ig_top + r],
+                    labelbuf[r], IG_LINE_CAP,
+                    valuebuf[r], IG_VAL_CAP, &kinds[r]);
+        lptrs[r] = labelbuf[r];
+        vptrs[r] = valuebuf[r];
     }
 
     const char *footer = g_status
         ? g_status
         : "ARROWS/DPAD move  X/ENTER select  O/F5 close  -  most toggles apply next boot";
+    const char *desc = ig_desc_for(g_ig_rows[g_ig_sel]);
 
-    taiko_overlay_menu_set("Taiko Zucchini (F5)", ptrs, visible,
-                           g_ig_sel - g_ig_top, 0, footer);
+    taiko_overlay_menu_set("Taiko Zucchini (F5)", lptrs, vptrs, kinds,
+                           visible, g_ig_sel - g_ig_top, 0, desc, footer);
     taiko_overlay_menu_active(1);
 }
 

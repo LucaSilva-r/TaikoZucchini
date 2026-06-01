@@ -19,19 +19,22 @@
 #define OVERLAY_TOAST_FRAMES   120
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
-#define OVERLAY_MAP_SIZE       (1024 * 1024)
+#define OVERLAY_MAP_SIZE       (2 * 1024 * 1024)
 #define OVERLAY_CMD_RING_SLOTS 3
 #define OVERLAY_CMD_WORDS      16384
 
 #define OVERLAY_MAX_LINES      36
 #define OVERLAY_TEXT_CAP       96
+#define OVERLAY_VALUE_CAP      48
+#define OVERLAY_DESC_CAP       320   /* selected-row description (pre-wrap)  */
+#define OVERLAY_DESC_LINES     4     /* max wrapped description rows         */
 #define OVERLAY_MENU_ROW_H     26
-#define OVERLAY_MENU_VISIBLE   10
+#define OVERLAY_MENU_VISIBLE   16
 #define OVERLAY_ATLAS_PITCH    4096
 #define OVERLAY_SWATCH_W       16
 #define OVERLAY_SWATCH_H       16
 #define OVERLAY_VERTEX_SLOTS   3
-#define OVERLAY_VERTEX_MAX     4096
+#define OVERLAY_VERTEX_MAX     8192   /* room for 16 rows + wrapped desc */
 
 #define UI_COLOR_BG       0xDC101010u
 #define UI_COLOR_PANEL    0xF0181818u
@@ -39,6 +42,9 @@
 #define UI_COLOR_TEXT     0xFFFFFFFFu
 #define UI_COLOR_MUTED    0xFFA0A0A0u
 #define UI_COLOR_DARK     0xFF101010u
+#define UI_COLOR_GREEN    0xFF60E080u   /* toggle ON  */
+#define UI_COLOR_RED      0xFFE06060u   /* toggle OFF */
+#define UI_COLOR_SECTION  0xFF80C0FFu   /* category header */
 
 typedef int (*gcm_flip_command_fn)(void *ctx, uint8_t id);
 typedef int (*gcm_set_display_buffer_fn)(uint8_t id, uint32_t offset,
@@ -58,12 +64,18 @@ typedef enum {
     TEXT_ACCENT,
     TEXT_MUTED,
     TEXT_DARK,
+    TEXT_GREEN,
+    TEXT_RED,
+    TEXT_SECTION,
     TEXT_COLOR_COUNT
 } text_color_t;
 
 typedef struct {
     char title[OVERLAY_TEXT_CAP];
     char lines[OVERLAY_MAX_LINES][OVERLAY_TEXT_CAP];
+    char values[OVERLAY_MAX_LINES][OVERLAY_VALUE_CAP];
+    unsigned char kinds[OVERLAY_MAX_LINES];
+    char desc[OVERLAY_DESC_CAP];
     char footer[OVERLAY_TEXT_CAP];
     int count;
     int selected;
@@ -295,7 +307,8 @@ static int append_text_vertices(overlay_vertex_t *v, int *count, int max_vtx,
                                 int x, int y, text_color_t color_id,
                                 const char *s) {
     static const uint32_t colors[TEXT_COLOR_COUNT] = {
-        UI_COLOR_TEXT, UI_COLOR_ACCENT, UI_COLOR_MUTED, UI_COLOR_DARK
+        UI_COLOR_TEXT, UI_COLOR_ACCENT, UI_COLOR_MUTED, UI_COLOR_DARK,
+        UI_COLOR_GREEN, UI_COLOR_RED, UI_COLOR_SECTION
     };
     const menu_font_t *font = &menu_font_20_font;
     uint32_t color = colors[color_id];
@@ -580,6 +593,48 @@ static void maybe_draw_toast(void *ctx, uint8_t id) {
         g_toast_frames = frames - 1;
 }
 
+/* Greedy word-wrap `src` to `max_w` pixels. Writes up to `max_lines`
+ * NUL-terminated rows into out[][OVERLAY_TEXT_CAP]. Returns rows used.
+ * A single word wider than max_w just overflows its line. */
+static int wrap_text(const char *src, int max_w, int max_lines,
+                     char out[][OVERLAY_TEXT_CAP]) {
+    if (!src || !src[0] || max_lines <= 0)
+        return 0;
+    int line = 0;
+    int cur_len = 0;
+    out[0][0] = 0;
+    const char *p = src;
+    while (*p && line < max_lines) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char *w0 = p;
+        while (*p && *p != ' ') p++;
+        int wlen = (int)(p - w0);
+        if (wlen > OVERLAY_TEXT_CAP - 1) wlen = OVERLAY_TEXT_CAP - 1;
+
+        char cand[OVERLAY_TEXT_CAP];
+        int cn = 0;
+        for (int i = 0; i < cur_len && cn < OVERLAY_TEXT_CAP - 1; i++)
+            cand[cn++] = out[line][i];
+        if (cur_len > 0 && cn < OVERLAY_TEXT_CAP - 1) cand[cn++] = ' ';
+        for (int i = 0; i < wlen && cn < OVERLAY_TEXT_CAP - 1; i++)
+            cand[cn++] = w0[i];
+        cand[cn] = 0;
+
+        if (cur_len > 0 && text_width(cand) > max_w) {
+            line++;
+            if (line >= max_lines) break;
+            cn = 0;
+            for (int i = 0; i < wlen && cn < OVERLAY_TEXT_CAP - 1; i++)
+                cand[cn++] = w0[i];
+            cand[cn] = 0;
+        }
+        memcpy(out[line], cand, (size_t)cn + 1);
+        cur_len = cn;
+    }
+    return out[0][0] ? line + 1 : 0;
+}
+
 static void maybe_draw_menu(void *ctx, uint8_t id) {
     if (!g_menu_active || !ensure_overlay_mapped())
         return;
@@ -599,19 +654,31 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
     g_menu_reading = cur;
     overlay_menu_state_t m = g_menu_state[cur];
     g_menu_reading = -1;
-    const int pad = 14;
-    const int title_h = 30;
-    const int footer_h = m.footer[0] ? 24 : 0;
+
+    const int pad      = 18;
+    const int title_h  = 34;
+    const int row_h    = OVERLAY_MENU_ROW_H;
+    const int desc_lh  = 22;   /* description line height */
+    const int footer_h = m.footer[0] ? 26 : 0;
 
     int visible = OVERLAY_MENU_VISIBLE;
     if (m.count - m.top < visible) visible = m.count - m.top;
     if (visible < 0) visible = 0;
 
-    int box_w = 512;
-    int box_h = pad + title_h + visible * OVERLAY_MENU_ROW_H + footer_h + pad;
-    if (box_w > (int)b.width - 64) box_w = (int)b.width - 64;
-    if (box_h > (int)b.height - 64) box_h = (int)b.height - 64;
-    if (box_w < 280 || box_h < 64)
+    /* Take ~3/4 of the screen width so the list breathes. */
+    int box_w = (int)b.width * 3 / 4;
+    if (box_w > (int)b.width - 48) box_w = (int)b.width - 48;
+    if (box_w < 280) box_w = 280;
+    int inner_w = box_w - 2 * pad;
+
+    /* Word-wrap the selected-row description into the bottom panel. */
+    char desc_lines[OVERLAY_DESC_LINES][OVERLAY_TEXT_CAP];
+    int desc_n = wrap_text(m.desc, inner_w, OVERLAY_DESC_LINES, desc_lines);
+    int desc_h = desc_n > 0 ? (desc_n * desc_lh + 8) : 0;
+
+    int box_h = pad + title_h + visible * row_h + 8 + desc_h + footer_h + pad;
+    if (box_h > (int)b.height - 48) box_h = (int)b.height - 48;
+    if (box_h < 64)
         return;
 
     int x = ((int)b.width - box_w) / 2;
@@ -634,13 +701,17 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
     if (!vtx)
         return;
 
+    /* Panel + accent top bar. */
     if (!append_rect(&cmd, &b, x, y, box_w, box_h, 1) ||
-        !append_rect(&cmd, &b, x, y, box_w, 2, 2))
+        !append_rect(&cmd, &b, x, y, box_w, 3, 2))
         return;
 
     if (m.title[0] &&
         !append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
                               x + pad, y + pad, TEXT_ACCENT, m.title))
+        return;
+    /* Rule under the title. */
+    if (!append_rect(&cmd, &b, x + pad, y + pad + title_h - 8, inner_w, 1, 4))
         return;
 
     int row_y0 = y + pad + title_h;
@@ -648,17 +719,62 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
         int idx = m.top + i;
         if (idx < 0 || idx >= m.count)
             break;
-        int ry = row_y0 + i * OVERLAY_MENU_ROW_H;
-        text_color_t tc = TEXT_WHITE;
-        if (idx == m.selected) {
-            if (!append_rect(&cmd, &b, x + pad - 6, ry - 2,
-                             box_w - 2 * (pad - 6), OVERLAY_MENU_ROW_H, 2))
+        int ry = row_y0 + i * row_h;
+        int kind = m.kinds[idx];
+
+        if (kind == TAIKO_OVL_ROW_SECTION) {
+            if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                      x + pad, ry + 2, TEXT_SECTION, m.lines[idx]))
                 return;
-            tc = TEXT_DARK;
+            /* Divider rule trailing the header label. */
+            int lw = text_width(m.lines[idx]);
+            int rule_x = x + pad + lw + 14;
+            int rule_w = (x + box_w - pad) - rule_x;
+            if (rule_w > 8)
+                append_rect(&cmd, &b, rule_x, ry + row_h / 2, rule_w, 1, 4);
+            continue;
         }
-        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
-                                  x + pad, ry + 2, tc, m.lines[idx]))
+
+        int selected = (idx == m.selected);
+        if (selected &&
+            !append_rect(&cmd, &b, x + pad - 6, ry - 2,
+                         box_w - 2 * (pad - 6), row_h, 2))
             return;
+
+        text_color_t label_c = selected ? TEXT_DARK : TEXT_WHITE;
+        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  x + pad, ry + 2, label_c, m.lines[idx]))
+            return;
+
+        if (m.values[idx][0]) {
+            text_color_t val_c;
+            if (selected) {
+                val_c = TEXT_DARK;
+            } else switch (kind) {
+                case TAIKO_OVL_ROW_TOGGLE_ON:  val_c = TEXT_GREEN; break;
+                case TAIKO_OVL_ROW_TOGGLE_OFF: val_c = TEXT_RED;   break;
+                case TAIKO_OVL_ROW_ACTION:     val_c = TEXT_MUTED; break;
+                default:                       val_c = TEXT_WHITE; break;
+            }
+            int vw = text_width(m.values[idx]);
+            int vx = x + box_w - pad - vw;
+            if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                      vx, ry + 2, val_c, m.values[idx]))
+                return;
+        }
+    }
+
+    /* Description panel above the footer. */
+    int desc_y0 = row_y0 + visible * row_h + 6;
+    if (desc_n > 0) {
+        if (!append_rect(&cmd, &b, x + pad, desc_y0, inner_w, 1, 4))
+            return;
+        for (int i = 0; i < desc_n; i++) {
+            if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                      x + pad, desc_y0 + 8 + i * desc_lh,
+                                      TEXT_WHITE, desc_lines[i]))
+                return;
+        }
     }
 
     if (m.footer[0] &&
@@ -764,8 +880,11 @@ void taiko_overlay_show_update_available(const char *latest_version) {
 }
 
 void taiko_overlay_menu_set(const char *title,
-                            const char *const *lines, int count,
-                            int selected, int top, const char *footer) {
+                            const char *const *labels,
+                            const char *const *values,
+                            const unsigned char *kinds, int count,
+                            int selected, int top,
+                            const char *desc, const char *footer) {
     if (count < 0)
         count = 0;
     if (count > OVERLAY_MAX_LINES)
@@ -787,12 +906,17 @@ void taiko_overlay_menu_set(const char *title,
     overlay_menu_state_t *m = &g_menu_state[slot];
 
     copy_str(m->title, sizeof m->title, title);
-    for (int i = 0; i < count; i++)
+    for (int i = 0; i < count; i++) {
         copy_str(m->lines[i], sizeof m->lines[i],
-                 (lines && lines[i]) ? lines[i] : "");
+                 (labels && labels[i]) ? labels[i] : "");
+        copy_str(m->values[i], sizeof m->values[i],
+                 (values && values[i]) ? values[i] : "");
+        m->kinds[i] = kinds ? kinds[i] : (unsigned char)TAIKO_OVL_ROW_NORMAL;
+    }
     m->count = count;
     m->selected = selected;
     m->top = top;
+    copy_str(m->desc, sizeof m->desc, desc);
     copy_str(m->footer, sizeof m->footer, footer);
     g_menu_cur = slot;
 }
