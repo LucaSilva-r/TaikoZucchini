@@ -51,7 +51,7 @@ typedef struct {
 } xmb_exit_sites_t;
 
 typedef struct {
-    uintptr_t tails[3];
+    uintptr_t stubs[3];
 } watchdog_sites_t;
 
 typedef struct {
@@ -743,9 +743,19 @@ static int resolve_xmb_exit_sites(xmb_exit_sites_t *s) {
     };
     uintptr_t xmb_sig = 0;
 
+    /*
+     * Only the first 8 words are version-stable: the `cmpdi rX,0x101 / beq`
+     * test plus the fall-through epilogue. After the beq target the exit
+     * body differs per build (green: bl + flag write; Murasaki: plain flag
+     * write), so matching the full 24-word tail fails on Murasaki. The
+     * 8-word head is unique in both green and Murasaki, and the exit branch
+     * (patch site) is always at sig+0x20 (= beq target). The full xmb_orig
+     * table is kept for reference / documentation of the green tail.
+     */
+    enum { XMB_ANCHOR_WORDS = 8 };
     if (!find_unique_masked_words(CFG_SCAN_TEXT_START, 0x00300000u,
                                   xmb_orig, xmb_mask,
-                                  sizeof(xmb_orig) / 4, &xmb_sig)) {
+                                  XMB_ANCHOR_WORDS, &xmb_sig)) {
         uintptr_t found = 0;
         uint32_t count = 0;
 
@@ -773,10 +783,20 @@ static int resolve_xmb_exit_sites(xmb_exit_sites_t *s) {
 
             if (!candidate)
                 continue;
-            found = candidate;
-            count++;
-            if (count > 1)
+            /*
+             * Dedupe by candidate, not by anchor occurrence. White's sysutil
+             * callback (FUN_000ec09c) tests `cmpdi rX,0x101` twice and both
+             * branch to the SAME exit block (0xec47c), so counting raw anchor
+             * hits sees 2 and wrongly bails. Only treat a DIFFERENT candidate
+             * as ambiguous.
+             */
+            if (count == 0) {
+                found = candidate;
+                count = 1;
+            } else if (candidate != found) {
+                count = 2;
                 break;
+            }
         }
 
         if (count != 1) {
@@ -835,63 +855,24 @@ static void apply_xmb_exit_patch(void) {
 }
 
 static int resolve_watchdog_sites(watchdog_sites_t *s) {
-#if CFG_RUNTIME_SCAN_WATCHDOG_PATCHES
-    uintptr_t http_anchor = 0;
     static const uint32_t watchdog_fnids[] = {
         0x6E05231Du, /* sys_game_watchdog_stop */
         0x9E0623B5u, /* sys_game_watchdog_start */
         0xACAD8FB6u, /* sys_game_watchdog_clear */
     };
-    static const uint16_t watchdog_delta_green[] = {
-        0x0D30u, 0x0DD0u, 0x0E70u,
-    };
-    static const uint16_t watchdog_delta_blue[] = {
-        0x0A30u, 0x0AD0u, 0x0B70u,
-    };
-    const uint16_t *watchdog_delta = watchdog_delta_green;
-
-    if (!find_http_stub_anchor(&http_anchor)) {
-        for (size_t i = 0; i < 3; i++) {
-            if (!find_import_stub_by_fnid(watchdog_fnids[i], &s->tails[i])) {
-                dbg_print("[patch] watchdog scan failed: HTTP stub anchor/FNID fallback\n");
-                return 0;
-            }
-        }
-        dbg_print("[patch] watchdog runtime scan resolved sites\n");
-        dbg_print_hex32("[patch] watchdog_0", (uint32_t)s->tails[0]);
-        dbg_print_hex32("[patch] watchdog_1", (uint32_t)s->tails[1]);
-        dbg_print_hex32("[patch] watchdog_2", (uint32_t)s->tails[2]);
-        return 1;
-    }
 
     for (size_t i = 0; i < 3; i++) {
-        uintptr_t tail = http_anchor + watchdog_delta[i];
-        if (!import_stub_matches(tail - 0x10u, NULL)) {
-            watchdog_delta = watchdog_delta_blue;
-            break;
-        }
-        s->tails[i] = tail;
-    }
-    if (watchdog_delta == watchdog_delta_blue) {
-        for (size_t i = 0; i < 3; i++) {
-            uintptr_t tail = http_anchor + watchdog_delta[i];
-            if (!import_stub_matches(tail - 0x10u, NULL)) {
-                dbg_print("[patch] watchdog scan failed: import stub validation\n");
-                return 0;
-            }
-            s->tails[i] = tail;
+        if (!find_import_stub_by_fnid(watchdog_fnids[i], &s->stubs[i])) {
+            dbg_print("[patch] watchdog scan failed: FNID lookup\n");
+            return 0;
         }
     }
 
-    dbg_print("[patch] watchdog runtime scan resolved sites\n");
-    dbg_print_hex32("[patch] watchdog_0", (uint32_t)s->tails[0]);
-    dbg_print_hex32("[patch] watchdog_1", (uint32_t)s->tails[1]);
-    dbg_print_hex32("[patch] watchdog_2", (uint32_t)s->tails[2]);
+    dbg_print("[patch] watchdog FNID scan resolved stubs\n");
+    dbg_print_hex32("[patch] watchdog_stub_0", (uint32_t)s->stubs[0]);
+    dbg_print_hex32("[patch] watchdog_stub_1", (uint32_t)s->stubs[1]);
+    dbg_print_hex32("[patch] watchdog_stub_2", (uint32_t)s->stubs[2]);
     return 1;
-#else
-    *s = GREEN_WATCHDOG_SITES;
-    return 1;
-#endif
 }
 
 static void apply_watchdog_patches(void) {
@@ -906,9 +887,19 @@ static void apply_watchdog_patches(void) {
         return;
     }
 
-    write_stream(sites.tails[0], return_ok, sizeof(return_ok) / 4);
-    write_stream(sites.tails[1], return_ok, sizeof(return_ok) / 4);
-    write_stream(sites.tails[2], return_ok, sizeof(return_ok) / 4);
+    /*
+     * Patch at stub+0x10, NOT the stub head. The import trampoline saves
+     * the caller's TOC with `std r2,0x28(r1)` at +0x0c; the caller restores
+     * it with `ld r2,0x28(r1)` after the bl. Overwriting the head skips the
+     * TOC save, so the caller reloads a stale/garbage r2 and crashes on the
+     * next TOC-relative access (observed: FUN_001b4258 -> memcpy from junk
+     * after sys_game_watchdog_clear on Murasaki). Writing the no-op after
+     * the TOC save keeps r2 valid and still returns 0. Matches GREEN sites
+     * (function + 0x10).
+     */
+    write_stream(sites.stubs[0] + 0x10u, return_ok, sizeof(return_ok) / 4);
+    write_stream(sites.stubs[1] + 0x10u, return_ok, sizeof(return_ok) / 4);
+    write_stream(sites.stubs[2] + 0x10u, return_ok, sizeof(return_ok) / 4);
 }
 
 /*
