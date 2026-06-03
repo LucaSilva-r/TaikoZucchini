@@ -166,6 +166,7 @@ static const fpt_stub_fnid_t FPT_STUB_FNIDS[] = {
     { 0xa397d042u, TAIKO_FPT_FS_LSEEK }, /* cellFsLseek */
     { 0x2cb51f0du, TAIKO_FPT_FS_CLOSE }, /* cellFsClose */
     { 0xef3efa34u, TAIKO_FPT_FS_FSTAT }, /* cellFsFstat */
+    { 0x7de6dcedu, TAIKO_FPT_FS_STAT  }, /* cellFsStat */
 
     /* sys_net (10 specific functions) */
     { 0x1f953b9fu, TAIKO_FPT_NET_RECVFROM      },

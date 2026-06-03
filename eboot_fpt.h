@@ -55,8 +55,9 @@ enum {
     TAIKO_FPT_GCM_GET_CONFIGURATION  = 83,
     TAIKO_FPT_GCM_GET_DISPLAY_INFO   = 84,
     TAIKO_FPT_GAME_LOCAL_ALLOC        = 85,
+    TAIKO_FPT_FS_STAT                 = 86,
 
-    TAIKO_FPT_SLOT_COUNT = 86,
+    TAIKO_FPT_SLOT_COUNT = 87,
 };
 
 typedef struct {

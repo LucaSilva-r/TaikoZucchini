@@ -235,6 +235,9 @@ int eboot_flow_run(eboot_flow_args_t *args) {
                                 &data00000_product) == 0) {
         have_data00000 = 1;
     }
+    patches_set_data00000_metadata(data00000_series,
+                                   data00000_product,
+                                   have_data00000);
 
     REPORT(args, EBOOT_PHASE_DECRYPTING, 0);
     if ((rc = self_parse(&ctx, buf, buf_len)) != 0) { ok = -400 + rc; goto done; }

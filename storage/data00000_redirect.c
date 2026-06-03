@@ -42,6 +42,7 @@
 
 #define CELLFS_OPEN_FNID 0x718BF5F8u
 #define TARGET_PATH_TAIL "DATA00000.BIN"
+#define VERSIONUP_TAIL "/VERSIONUP"
 
 /* Wide scan window. Blue and Green ship .lib.stub/.sceStub.text at
  * different addresses; the structural validators inside
@@ -65,13 +66,22 @@ static void resolve_redirect_path(void) {
     dbg_print("[data00000] usrdir resolution failed\n");
 }
 
-static int path_matches(const char *p) {
+static int path_ends_with(const char *p, const char *tail) {
     if (!p) return 0;
     size_t len = 0;
     while (p[len] && len < 256) len++;
-    const size_t tail = sizeof(TARGET_PATH_TAIL) - 1;
-    if (len < tail) return 0;
-    return memcmp(p + len - tail, TARGET_PATH_TAIL, tail) == 0;
+    size_t tail_len = 0;
+    while (tail[tail_len]) tail_len++;
+    if (len < tail_len) return 0;
+    return memcmp(p + len - tail_len, tail, tail_len) == 0;
+}
+
+static int data00000_path_matches(const char *p) {
+    return path_ends_with(p, TARGET_PATH_TAIL);
+}
+
+static int versionup_path_matches(const char *p) {
+    return path_ends_with(p, VERSIONUP_TAIL) || path_ends_with(p, "/VERSIONUP/");
 }
 
 /* SPRX-side cellFsOpen is imported through libfs_stub independently of
@@ -84,7 +94,7 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
     if (chassisinfo_synth_try_open(path, fd))
         return CELL_FS_SUCCEEDED;
 
-    if (g_cfg.data00000_redirect && path_matches(path)) {
+    if (g_cfg.data00000_redirect && data00000_path_matches(path)) {
         if (!g_redirect_ready) resolve_redirect_path();
         if (g_redirect_ready) {
             dbg_print("[data00000] redirecting open to ");
@@ -97,6 +107,35 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
 }
 
 static const void * const hk_cellFsOpen_opd = (const void *)hk_cellFsOpen;
+
+static int hk_cellFsStat(const char *path, CellFsStat *sb) {
+    if (g_cfg.data00000_redirect &&
+        (data00000_path_matches(path) || versionup_path_matches(path))) {
+        if (!g_redirect_ready) resolve_redirect_path();
+        if (g_redirect_ready) {
+            CellFsStat file_st;
+            int rc = cellFsStat(g_redirect_path, &file_st);
+            if (rc == CELL_FS_SUCCEEDED) {
+                if (sb) {
+                    if (versionup_path_matches(path)) {
+                        memset(sb, 0, sizeof(*sb));
+                        sb->st_mode = CELL_FS_S_IFDIR | 0755;
+                        sb->st_blksize = file_st.st_blksize;
+                    } else {
+                        *sb = file_st;
+                    }
+                }
+                dbg_print("[data00000] faking stat for ");
+                dbg_print(path);
+                dbg_print("\n");
+                return CELL_FS_SUCCEEDED;
+            }
+        }
+    }
+    return cellFsStat(path, sb);
+}
+
+static const void * const hk_cellFsStat_opd = (const void *)hk_cellFsStat;
 
 static int import_stub_matches(uintptr_t addr, uintptr_t *got_slot) {
     const volatile uint32_t *p = (const volatile uint32_t *)addr;
@@ -202,6 +241,10 @@ void data00000_redirect_install(void) {
         }
         taiko_fpt_publish(TAIKO_FPT_FS_OPEN, hk_cellFsOpen_opd);
         dbg_print("[data00000] FPT cellFsOpen hook published\n");
+        if (taiko_fpt_publish(TAIKO_FPT_FS_STAT, hk_cellFsStat_opd))
+            dbg_print("[data00000] FPT cellFsStat hook published\n");
+        else
+            dbg_print("[data00000] FPT cellFsStat hook publish failed\n");
         return;
     }
 

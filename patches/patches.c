@@ -84,6 +84,7 @@ static const data00000_sites_t GREEN_DATA00000_SITES = {
 };
 
 static usb_patch_sites_t g_usb_sites;
+static uintptr_t branch_target(uintptr_t src, uint32_t w);
 static uint32_t g_data00000_series_version;
 static uint32_t g_data00000_product_version;
 static int g_have_data00000_metadata;
@@ -381,85 +382,158 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
     uintptr_t start = CFG_SCAN_TEXT_START;
     uintptr_t end = CFG_SCAN_TEXT_END;
 
+    memset(s, 0, sizeof(*s));
+
     if (!find_unique_masked_words(start, end, dongle_probe_orig,
                                   dongle_probe_mask,
                                   sizeof(dongle_probe_orig) / 4,
                                   &s->dongle_probe)) {
-        dbg_print("[patch] USB scan failed: dongle probe signature\n");
-        return 0;
-    }
-    s->dongle_hard_probe = s->dongle_probe - 0x18u;
-    if (!masked_words_match(s->dongle_hard_probe, dongle_hard_probe_orig,
-                            dongle_hard_probe_mask,
-                            sizeof(dongle_hard_probe_orig) / 4)) {
-        dbg_print("[patch] USB scan failed: hard dongle probe signature\n");
-        return 0;
+        dbg_print("[patch] USB scan: dongle probe signature absent\n");
+    } else {
+        s->dongle_hard_probe = s->dongle_probe - 0x18u;
+        if (!masked_words_match(s->dongle_hard_probe, dongle_hard_probe_orig,
+                                dongle_hard_probe_mask,
+                                sizeof(dongle_hard_probe_orig) / 4)) {
+            dbg_print("[patch] USB scan: hard dongle probe signature absent\n");
+            s->dongle_hard_probe = 0;
+        }
+        s->dongle_skip = s->dongle_probe - 0xA0u;
+        s->dongle_match = s->dongle_probe + 0x38u;
     }
     if (!find_unique_masked_words(start, end, vu_probe_orig,
                                   vu_probe_mask,
                                   sizeof(vu_probe_orig) / 4,
                                   &s->vu_probe)) {
-        dbg_print("[patch] USB scan failed: VU probe signature\n");
-        return 0;
-    }
-    if (!find_unique_words(start, end, fcntl_dispatch_orig,
-                           sizeof(fcntl_dispatch_orig) / 4, &s->fcntl_dispatch)) {
-        dbg_print("[patch] USB scan failed: fcntl dispatch signature\n");
-        return 0;
-    }
-    if (!find_unique_masked_words(start, end, vu_auth_stat_orig,
-                                  vu_auth_stat_mask,
-                                  sizeof(vu_auth_stat_orig) / 4,
-                                  &s->vu_auth_stat_branch)) {
-        if (!find_unique_masked_words(start, end, vu_auth_stat_white_orig,
-                                      vu_auth_stat_mask,
-                                      sizeof(vu_auth_stat_white_orig) / 4,
-                                      &s->vu_auth_stat_branch)) {
-            dbg_print("[patch] USB scan failed: VU auth stat signature\n");
-            return 0;
-        }
-    }
-    if (!find_unique_masked_words(start, end, dongle_auth_stat_orig,
-                                  dongle_auth_stat_mask,
-                                  sizeof(dongle_auth_stat_orig) / 4,
-                                  &s->dongle_auth_stat_branch)) {
-        dbg_print("[patch] USB scan failed: dongle auth stat signature\n");
-        return 0;
-    }
-    if (!find_unique_words(start, end, usio_endpoint_filter_orig,
-                           sizeof(usio_endpoint_filter_orig) / 4,
-                           &s->usio_endpoint_filter)) {
-        dbg_print("[patch] USB scan failed: USIO endpoint signature\n");
-        return 0;
-    }
-    if (!find_unique_words(start, end, ps3a_usj_exact_pid_orig,
-                           sizeof(ps3a_usj_exact_pid_orig) / 4,
-                           &s->ps3a_usj_exact_pid)) {
-        dbg_print("[patch] USB scan failed: PS3A-USJ PID signature\n");
-        return 0;
+        dbg_print("[patch] USB scan: VU probe signature absent\n");
+    } else {
+        s->vu_skip = s->vu_probe - 0x84u;
+        s->vu_match = s->vu_probe + 0x50u;
     }
 
-    /* These are intra-function deltas from Green S111. They are intentionally
-     * derived only after exact signature matches, and logged for review. */
-    s->dongle_skip = s->dongle_probe - 0xA0u;
-    s->dongle_match = s->dongle_probe + 0x38u;
-    s->vu_skip = s->vu_probe - 0x84u;
-    s->vu_match = s->vu_probe + 0x50u;
-    s->vu_auth_stat_branch += 0x18u;
-    s->vu_auth_stat_success = s->vu_auth_stat_branch + 0x50u;
-    s->dongle_auth_stat_branch += 0x18u;
-    s->dongle_auth_stat_success = s->dongle_auth_stat_branch + 0x8Cu;
-    if (s->dongle_auth_stat_branch < s->vu_auth_stat_branch) {
-        s->fcntl_dongle_below_threshold = 1;
-        s->fcntl_dongle_threshold =
-            s->dongle_auth_stat_branch +
-            ((s->vu_auth_stat_branch - s->dongle_auth_stat_branch) / 2u);
+    if (!find_unique_words(start, end, fcntl_dispatch_orig,
+                           sizeof(fcntl_dispatch_orig) / 4, &s->fcntl_dispatch))
+        dbg_print("[patch] USB scan: fcntl dispatch signature absent\n");
+
+    int have_vu_auth =
+        find_unique_masked_words(start, end, vu_auth_stat_orig,
+                                 vu_auth_stat_mask,
+                                 sizeof(vu_auth_stat_orig) / 4,
+                                 &s->vu_auth_stat_branch) ||
+        find_unique_masked_words(start, end, vu_auth_stat_white_orig,
+                                 vu_auth_stat_mask,
+                                 sizeof(vu_auth_stat_white_orig) / 4,
+                                 &s->vu_auth_stat_branch);
+    if (!have_vu_auth)
+        dbg_print("[patch] USB scan: VU auth stat signature absent\n");
+
+    int have_dongle_auth =
+        find_unique_masked_words(start, end, dongle_auth_stat_orig,
+                                 dongle_auth_stat_mask,
+                                 sizeof(dongle_auth_stat_orig) / 4,
+                                 &s->dongle_auth_stat_branch);
+    if (!have_dongle_auth)
+        dbg_print("[patch] USB scan: dongle auth stat signature absent\n");
+
+    if (!find_unique_words(start, end, usio_endpoint_filter_orig,
+                           sizeof(usio_endpoint_filter_orig) / 4,
+                           &s->usio_endpoint_filter))
+        dbg_print("[patch] USB scan: USIO endpoint signature absent\n");
+
+    if (!find_unique_words(start, end, ps3a_usj_exact_pid_orig,
+                           sizeof(ps3a_usj_exact_pid_orig) / 4,
+                           &s->ps3a_usj_exact_pid))
+        dbg_print("[patch] USB scan: PS3A-USJ PID signature absent\n");
+
+    if (have_vu_auth && have_dongle_auth) {
+        s->vu_auth_stat_branch += 0x18u;
+        s->vu_auth_stat_success = s->vu_auth_stat_branch + 0x50u;
+        s->dongle_auth_stat_branch += 0x18u;
+        s->dongle_auth_stat_success = s->dongle_auth_stat_branch + 0x8Cu;
+        if (s->dongle_auth_stat_branch < s->vu_auth_stat_branch) {
+            s->fcntl_dongle_below_threshold = 1;
+            s->fcntl_dongle_threshold =
+                s->dongle_auth_stat_branch +
+                ((s->vu_auth_stat_branch - s->dongle_auth_stat_branch) / 2u);
+        } else {
+            s->fcntl_dongle_below_threshold = 0;
+            s->fcntl_dongle_threshold =
+                s->vu_auth_stat_branch +
+                ((s->dongle_auth_stat_branch - s->vu_auth_stat_branch) / 2u);
+        }
     } else {
-        s->fcntl_dongle_below_threshold = 0;
-        s->fcntl_dongle_threshold =
-            s->vu_auth_stat_branch +
-            ((s->dongle_auth_stat_branch - s->vu_auth_stat_branch) / 2u);
+        s->vu_auth_stat_branch = 0;
+        s->dongle_auth_stat_branch = 0;
     }
+
+    /* Some builds expose only the probe-loop device-info getter. Use it only
+     * when the authenticate-time fcntl helper was not resolved; Kimidori has
+     * both, and auth calls the later helper. */
+    if (!s->fcntl_dispatch && !s->fcntl_dongle_threshold &&
+        s->dongle_probe && s->vu_probe) {
+        uintptr_t dongle_call = s->dongle_probe + 8u;
+        uintptr_t vu_call = s->vu_probe + 0x20u;
+        uint32_t dw = pt_read32(T, dongle_call);
+        uint32_t vw = pt_read32(T, vu_call);
+        if ((dw >> 26) == 18u && (dw & 1u) && !(dw & 2u) &&
+            (vw >> 26) == 18u && (vw & 1u) && !(vw & 2u)) {
+            uintptr_t getter = branch_target(dongle_call, dw);
+            if (getter && branch_target(vu_call, vw) == getter) {
+                uintptr_t dret = dongle_call + 4u;
+                uintptr_t vret = vu_call + 4u;
+                s->fcntl_dispatch = getter;
+                if (dret < vret) {
+                    s->fcntl_dongle_threshold = dret + (vret - dret) / 2u;
+                    s->fcntl_dongle_below_threshold = 1;
+                } else {
+                    s->fcntl_dongle_threshold = vret + (dret - vret) / 2u;
+                    s->fcntl_dongle_below_threshold = 0;
+                }
+                /* The mock writes the serial through r4, so the forced-index
+                 * probe path must still execute the getter setup before it
+                 * jumps to the match block. */
+                s->dongle_match = dongle_call - 8u;
+                s->vu_match = vu_call - 8u;
+                dbg_print("[patch] USB scan: device-info getter fallback\n");
+            }
+        }
+    }
+
+    if (!s->fcntl_dongle_threshold && s->fcntl_dispatch) {
+        uintptr_t calls[2];
+        uint32_t count = 0;
+        for (uintptr_t p = start; p + 4u <= end; p += 4u) {
+            uint32_t w = pt_read32(T, p);
+            if ((w >> 26) != 18u || !(w & 1u) || (w & 2u))
+                continue;
+            if (branch_target(p, w) != s->fcntl_dispatch)
+                continue;
+            if (count < 2u)
+                calls[count] = p;
+            count++;
+            if (count > 2u)
+                break;
+        }
+        if (count == 2u) {
+            uintptr_t ret0 = calls[0] + 4u;
+            uintptr_t ret1 = calls[1] + 4u;
+            if (ret0 < ret1) {
+                s->fcntl_dongle_threshold = ret0 + (ret1 - ret0) / 2u;
+                s->fcntl_dongle_below_threshold = 0;
+            } else {
+                s->fcntl_dongle_threshold = ret1 + (ret0 - ret1) / 2u;
+                s->fcntl_dongle_below_threshold = 1;
+            }
+            dbg_print("[patch] USB scan: fcntl callsite threshold fallback\n");
+            dbg_print_hex32("[patch] fcntl_call_0", (uint32_t)calls[0]);
+            dbg_print_hex32("[patch] fcntl_call_1", (uint32_t)calls[1]);
+        } else {
+            dbg_print("[patch] USB scan: fcntl callsite threshold absent\n");
+        }
+    }
+
+    if (!s->dongle_probe && !s->vu_probe && !s->fcntl_dispatch &&
+        !s->usio_endpoint_filter && !s->ps3a_usj_exact_pid)
+        return 0;
 
     dbg_print("[patch] USB runtime scan resolved sites\n");
     dbg_print_hex32("[patch] dongle_hard_probe", (uint32_t)s->dongle_hard_probe);
@@ -543,7 +617,7 @@ static void apply_probe_patch(uintptr_t addr, uint32_t target_index,
 
 static void apply_probe_patches(void) {
     uintptr_t dongle_probe = g_usb_sites.dongle_probe;
-    if (g_cfg.hard_dongle_probe)
+    if (g_cfg.hard_dongle_probe && g_usb_sites.dongle_hard_probe)
         dongle_probe = g_usb_sites.dongle_hard_probe;
 
     apply_probe_patch(dongle_probe, CFG_DONGLE_INDEX,
@@ -1050,7 +1124,6 @@ static void apply_data00000_embed_patch(void) {
                                         original_head,
                                         sizeof(original_head) / 4, &addr)) {
             dbg_print("[patch] DATA00000 embed skipped; unresolved VU reader\n");
-            g_patch_error = -20;
             return;
         }
     }
@@ -1061,7 +1134,6 @@ static void apply_data00000_embed_patch(void) {
     write_stream(addr, stub, sizeof(stub) / 4);
     if (!words_match(addr, stub, sizeof(stub) / 4)) {
         dbg_print("[patch] DATA00000 embed failed; write verify mismatch\n");
-        g_patch_error = -21;
     }
 }
 
@@ -1076,11 +1148,14 @@ static void patches_apply_all_impl(void) {
                       || g_cfg.ps3a_usj_exact_pid;
     if (need_usb_sites) {
         if (!resolve_usb_patch_sites(&g_usb_sites)) {
+            memset(&g_usb_sites, 0, sizeof(g_usb_sites));
             dbg_print("[patch] USB patches skipped; unresolved patch sites\n");
         }
     }
     if (g_cfg.probe_patches &&
-        g_usb_sites.dongle_probe && g_usb_sites.vu_probe)
+        g_usb_sites.dongle_probe && g_usb_sites.dongle_skip &&
+        g_usb_sites.dongle_match && g_usb_sites.vu_probe &&
+        g_usb_sites.vu_skip && g_usb_sites.vu_match)
         apply_probe_patches();
     if (g_cfg.auth_stat_bypass &&
         g_usb_sites.vu_auth_stat_branch && g_usb_sites.dongle_auth_stat_branch)
