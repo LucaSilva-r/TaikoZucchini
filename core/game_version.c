@@ -8,8 +8,9 @@
  * Folder layout: <prefix><N>100-<M>.
  *
  * SFO format: 0x14-byte header, index table (16 bytes per entry),
- * key table, data table. We walk the index, locate the "TITLE" key,
- * and return that data blob. Everything is little-endian on PS3 SFO.
+ * key table, data table. We walk the index, locate TITLE/TITLE_XX
+ * keys, and return the first title blob carrying a parenthesized build
+ * code. Everything is little-endian on PS3 SFO.
  *
  * The PARAM.SFO lives one directory above USRDIR. We get USRDIR from
  * the bootstrap args or patched-EBOOT argv[0], strip the trailing
@@ -75,10 +76,50 @@ static void compute_dir(void) {
     g_dir[pi]   = '\0';
 }
 
-/* Walk SFO, return pointer + len of TITLE value, or 0 if not found.
+/* Locate the "(...)" suffix in `s` and copy the inner text into
+ * `out` (uppercase ASCII letters + digits only). */
+static int extract_code_to(const char *s, size_t len, char *out, size_t cap) {
+    /* SFO TITLE may be padded with NULs; find effective length. */
+    size_t n = 0;
+    while (n < len && s[n]) n++;
+    /* Find last '('. */
+    size_t open_idx = n;
+    for (size_t i = 0; i < n; i++) if (s[i] == '(') open_idx = i;
+    if (open_idx == n) return 0;
+    size_t close_idx = n;
+    for (size_t i = open_idx + 1; i < n; i++)
+        if (s[i] == ')') { close_idx = i; break; }
+    if (close_idx == n) return 0;
+    size_t inner = close_idx - open_idx - 1;
+    if (inner == 0 || inner >= cap) return 0;
+    for (size_t i = 0; i < inner; i++) {
+        char c = s[open_idx + 1 + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) return 0;
+        out[i] = c;
+    }
+    out[inner] = '\0';
+    return 1;
+}
+
+static int sfo_key_is_title(const uint8_t *buf, size_t buf_len, size_t kabs) {
+    static const char title[] = "TITLE";
+    for (size_t i = 0; i < sizeof title - 1; i++) {
+        if (kabs + i >= buf_len || buf[kabs + i] != (uint8_t)title[i])
+            return 0;
+    }
+    if (kabs + 5 >= buf_len) return 0;
+    if (buf[kabs + 5] == '\0') return 1;
+    if (buf[kabs + 5] != '_') return 0;
+    if (kabs + 8 >= buf_len) return 0;
+    return buf[kabs + 6] >= '0' && buf[kabs + 6] <= '9' &&
+           buf[kabs + 7] >= '0' && buf[kabs + 7] <= '9' &&
+           buf[kabs + 8] == '\0';
+}
+
+/* Walk SFO, copy the first build code found in TITLE/TITLE_XX values.
  * `buf` is the entire SFO file. */
-static int sfo_find_title(const uint8_t *buf, size_t buf_len,
-                          const char **out, size_t *out_len) {
+static int sfo_find_title_code(const uint8_t *buf, size_t buf_len,
+                               char *out, size_t cap) {
     if (buf_len < 0x14) return 0;
     if (memcmp(buf, "\x00PSF", 4) != 0) return 0;
     uint32_t key_table  = le32(buf + 0x08);
@@ -95,13 +136,12 @@ static int sfo_find_title(const uint8_t *buf, size_t buf_len,
 
         size_t kabs = key_table + key_off;
         if (kabs >= buf_len) continue;
-        if (strncmp((const char *)(buf + kabs), "TITLE", 5) == 0 &&
-            buf[kabs + 5] == '\0') {
+        if (sfo_key_is_title(buf, buf_len, kabs)) {
             size_t dabs = data_table + data_off;
             if (dabs + data_len > buf_len) return 0;
-            *out     = (const char *)(buf + dabs);
-            *out_len = data_len;
-            return 1;
+            if (extract_code_to((const char *)(buf + dabs), data_len,
+                                out, cap))
+                return 1;
         }
     }
     return 0;
@@ -124,30 +164,6 @@ static int derive_paramsfo_path(const char *usrdir, char *out, size_t cap) {
     memcpy(out + root_len, name, nl);
     out[root_len + nl] = '\0';
     return 1;
-}
-
-/* Locate the "(...)" suffix in `s` and copy the inner text into
- * g_version_code (uppercase ASCII letters + digits only). */
-static void extract_code(const char *s, size_t len) {
-    /* SFO TITLE may be padded with NULs; find effective length. */
-    size_t n = 0;
-    while (n < len && s[n]) n++;
-    /* Find last '('. */
-    size_t open_idx = n;
-    for (size_t i = 0; i < n; i++) if (s[i] == '(') open_idx = i;
-    if (open_idx == n) return;
-    size_t close_idx = n;
-    for (size_t i = open_idx + 1; i < n; i++)
-        if (s[i] == ')') { close_idx = i; break; }
-    if (close_idx == n) return;
-    size_t inner = close_idx - open_idx - 1;
-    if (inner == 0 || inner >= sizeof g_version_code) return;
-    for (size_t i = 0; i < inner; i++) {
-        char c = s[open_idx + 1 + i];
-        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z'))) return;
-        g_version_code[i] = c;
-    }
-    g_version_code[inner] = '\0';
 }
 
 static void scan_once(void) {
@@ -186,14 +202,10 @@ static void scan_once(void) {
         return;
     }
 
-    const char *title = NULL; size_t tlen = 0;
-    if (!sfo_find_title(sfo_buf, (size_t)got, &title, &tlen)) {
-        dbg_print("[gamever] TITLE field missing in PARAM.SFO\n");
-        return;
-    }
-    extract_code(title, tlen);
-    if (!g_version_code[0]) {
-        dbg_print("[gamever] TITLE has no (...) code\n");
+    g_version_code[0] = '\0';
+    if (!sfo_find_title_code(sfo_buf, (size_t)got, g_version_code,
+                             sizeof g_version_code)) {
+        dbg_print("[gamever] TITLE fields have no (...) code\n");
         return;
     }
     compute_dir();

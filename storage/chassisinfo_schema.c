@@ -1,6 +1,6 @@
 /* Per-version chassisinfo.xml schemas. Field lists and header
  * versions verified against the on-disk XML shipped in
- * data/config/<DIR>/chassisinfo.xml for each build. Adding a new
+ * data/config/<DIR>/chassisinfo.xml or data/chassisinfo.xml for each build. Adding a new
  * version means defining its field id array + header_version +
  * countdown name, and appending an entry to g_schemas. */
 
@@ -47,6 +47,14 @@ static const uint8_t order_st5100_1[] = {
     CI_F_IGNORE_NETWORK_AUTHENTICATION, CI_F_IGNORE_NETWORK_CONNECTION,
     CI_F_IGNORE_CLOSETIME,
     CI_F_DISABLE_COUNTDOWNTIMER,
+};
+
+static const uint8_t order_st4100_1[] = {
+    CI_F_IS_PROMOTION, CI_F_FORCE_OFFLINE, CI_F_FORCE_FREEPLAY,
+    CI_F_FORCE_AUTOPLAY,
+    CI_F_FORCE_MUSICINFO_ALLRELEASE,
+    CI_F_IGNORE_NETWORK_AUTHENTICATION, CI_F_IGNORE_NETWORK_CONNECTION,
+    CI_F_IGNORE_CLOSETIME,
 };
 
 static const uint8_t order_st6100_1[] = {
@@ -120,6 +128,12 @@ static const uint8_t order_s11100_1[] = {
 #define COUNT_OF(a) (uint8_t)(sizeof(a) / sizeof((a)[0]))
 
 static const chassisinfo_schema_t g_schemas[] = {
+    /* Sorairo does not ship data/chassisinfo.xml in the current dump, but
+     * its PARAM.SFO carries ST31 in localized TITLE fields. Keep a schema
+     * so the synth can satisfy a chassisinfo.xml open if this build asks. */
+    { "ST3100-1", 0x20130206, order_st4100_1, COUNT_OF(order_st4100_1), "disable_songselect_countdown" },
+    { "ST4100-1", 0x20130206, order_st4100_1, COUNT_OF(order_st4100_1), "disable_songselect_countdown" },
+    { "ST4100-8", 0x20140107, order_st5100_1, COUNT_OF(order_st5100_1), "disable_songselect_countdown" },
     { "ST5100-1", 0x20140107, order_st5100_1, COUNT_OF(order_st5100_1), "disable_songselect_countdown" },
     { "ST5100-7", 0x20140714, order_st5100_7, COUNT_OF(order_st5100_7), "disable_songselect_countdown" },
     { "ST6100-1", 0x20140107, order_st6100_1, COUNT_OF(order_st6100_1), "disable_songselect_countdown" },
