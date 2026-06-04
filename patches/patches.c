@@ -1147,9 +1147,6 @@ static void apply_data00000_embed_patch(void) {
         0xF821FE31u, 0x7C0802A6u, 0xFB8101B0u, 0x3B81008Cu,
         0xFBA101B8u, 0x7F9DE378u, 0x38800000u, 0x38A00000u,
     };
-    static const uint32_t original_head[] = {
-        0xF821FE31u, 0x7C0802A6u, 0xFB8101B0u, 0x3B81008Cu,
-    };
     uint32_t hi = (g_data00000_product_version >> 16) & 0xffffu;
     uint32_t lo = g_data00000_product_version & 0xffffu;
     uint32_t stub[] = {
@@ -1178,16 +1175,29 @@ static void apply_data00000_embed_patch(void) {
     const uint32_t *patch = stub;
     size_t patch_words = sizeof(stub) / 4;
 
+    /*
+     * The `stub` above hard-codes GREEN TOC offsets (0x32dc series object,
+     * 0x35f0 product global). It is only correct on a binary that is
+     * actually green, so every path that selects it must positively
+     * identify a green reader by matching the full 8-word `original_fixed`
+     * prologue -- NOT just the 4-word head. Murasaki's version-up reader
+     * (0x6ce9e8) shares the first 4 words (stdu/mflr/std r28/addi r28) but
+     * differs at word 6 (clrldi r29,r28,32 vs green's mr r29,r28). A 4-word
+     * fallback false-matched it via vu_auth_stat_branch+0xF54 and wrote the
+     * green stub there, so r9 = TOC[0x32dc] was garbage (0x200) and the
+     * `stw r0,0x88(r9)` faulted writing 0x288. Requiring the 8-word match
+     * lets Murasaki fall through to its working cellFsOpen-redirect reader.
+     */
     if (!words_match(addr, original_fixed, sizeof(original_fixed) / 4)) {
         addr = 0;
         if (g_usb_sites.vu_auth_stat_branch) {
             uintptr_t derived = g_usb_sites.vu_auth_stat_branch + 0xF54u;
-            if (words_match(derived, original_head, sizeof(original_head) / 4))
+            if (words_match(derived, original_fixed, sizeof(original_fixed) / 4))
                 addr = derived;
         }
         if (!addr && !find_unique_words(0x00900000u, 0x00940000u,
-                                        original_head,
-                                        sizeof(original_head) / 4, &addr)) {
+                                        original_fixed,
+                                        sizeof(original_fixed) / 4, &addr)) {
             if (resolve_kimidori_data00000_reader(&addr)) {
                 patch = kimidori_stub;
                 patch_words = sizeof(kimidori_stub) / 4;
