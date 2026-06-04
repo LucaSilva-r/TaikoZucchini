@@ -39,31 +39,25 @@ int menu_action_save_config(void) {
 }
 
 int menu_action_reboot_game(void) {
-    static char path[256];
-    if (!usrdir_resolve_path("EBOOT.BIN", path, sizeof(path))) {
-        dbg_print("[menu_act] reboot: usrdir unresolved\n");
-        return -1;
-    }
-    dbg_print("[menu_act] relaunching EBOOT via exitspawn2: ");
-    dbg_print(path);
-    dbg_print("\n");
-
-    /* PS3 firmware verifies the stack-size flag against the new EBOOT's
-     * SYS_PROCESS_PARAM header. Passing flags=0 causes the relaunch to
-     * fail silently on real hardware (control returns to XMB instead of
-     * the new process) while RPCS3 happily ignores it. Both the
-     * bootstrap EBOOT and the patched game EBOOT declare 64 KB primary
-     * stacks, so we always pass STACK_SIZE_64K.
+    /*
+     * Exit to XMB instead of an in-process EBOOT relaunch.
      *
-     * argv must contain at least argv[0]; some firmware drops the
-     * relaunch when argv is NULL. envp/data stay NULL — the new
-     * process does not need them. */
-    static const char *argv[2];
-    argv[0] = path;
-    argv[1] = NULL;
-    sys_game_process_exitspawn2(path, argv, NULL, 0, 0, 1001,
-                                SYS_PROCESS_PRIMARY_STACK_SIZE_64K);
-    /* Fallback if exitspawn2 returned (it shouldn't). */
+     * sys_game_process_exitspawn2 crashes on RPCS3 when called from the
+     * full game EBOOT: its exitspawn memory-container save/respawn
+     * re-enters a game global constructor against stale state (observed
+     * fault: writing null at FUN_003ec4fc). This affects every relaunch
+     * site that can run inside the loaded game — the boot/operator menu,
+     * the in-game menu, and the runtime repatch flow. Only the minimal
+     * bootstrap EBOOT survived exitspawn2, and it is not worth keeping a
+     * second code path for that one case.
+     *
+     * sys_process_exit(0) tears the process down cleanly to XMB; the
+     * operator relaunches the game, and the next boot applies the saved
+     * config / freshly patched EBOOT. The name is kept so callers and the
+     * boot-menu "& reboot" actions need no changes — "reboot" now means
+     * "exit so the next launch is clean".
+     */
+    dbg_print("[menu_act] exit to XMB (relaunch manually)\n");
     sys_process_exit(0);
     return 0;
 }

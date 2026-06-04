@@ -186,6 +186,12 @@ void patch_ui_finish_ok(void) {
                "The game will restart.");
 }
 
+void patch_ui_finish_ok_manual(void) {
+    show_final("Taiko Zucchini\n"
+               "Patch complete.\n"
+               "Exiting to XMB — relaunch the game to apply.");
+}
+
 void patch_ui_finish_error(int rc) {
     (void)rc;
     show_final("Taiko Zucchini\n"

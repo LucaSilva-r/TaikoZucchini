@@ -369,7 +369,7 @@ static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
     dbg_print_hex32("[eboot] flow rc", (uint32_t)rc);
     if (rc == 0) {
         remember_patch_success(&a, patcher_hash, have_patcher_hash);
-        patch_ui_finish_ok();
+        patch_ui_finish_ok_manual();
     } else {
         patch_ui_finish_error(rc);
     }
@@ -445,7 +445,7 @@ static int maybe_repatch_from_original(void) {
     }
 
     remember_patch_success(&a, patcher_hash, 1);
-    patch_ui_finish_ok();
+    patch_ui_finish_ok_manual();
     dbg_print("[eboot] repatch complete; new EBOOT will run next launch\n");
     return 1;
 }
@@ -544,8 +544,8 @@ int taiko_start(unsigned int args, void *argp) {
                      "and other modes. The current launch was terminated so "
                      "XMB can re-read PARAM.SFO. Relaunch the game from XMB.\n");
         sys_timer_sleep(2);
-        menu_action_reboot_game();   /* best-effort warm relaunch */
-        sys_process_exit(0);         /* always reached unless warm reboot worked */
+        menu_action_reboot_game();   /* exits to XMB (see menu_actions.c) */
+        sys_process_exit(0);         /* belt-and-suspenders */
         return SYS_PRX_RESIDENT;
     }
 
@@ -592,9 +592,12 @@ int taiko_start(unsigned int args, void *argp) {
     dbg_print("[patch] DATA00000 runtime hook marker\n");
     apply_runtime_data00000_patch();
     if (maybe_repatch_from_original()) {
-        dbg_print("[eboot] repatch complete; relaunching game\n");
+        /* menu_action_reboot_game now exits to XMB (exitspawn2 crashes the
+         * RPCS3 respawn from the full game EBOOT — see menu_actions.c). The
+         * freshly repatched EBOOT.BIN applies on the next manual launch. */
+        dbg_print("[eboot] repatch complete; exit to XMB for clean relaunch\n");
         menu_action_reboot_game();
-        /* Fallback if exitspawn2 returned (it shouldn't). */
+        /* Fallback if the exit syscall returned (it shouldn't). */
         sys_process_exit(0);
         return SYS_PRX_RESIDENT;
     }

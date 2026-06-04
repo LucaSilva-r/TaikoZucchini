@@ -11,6 +11,10 @@
 void patch_ui_open(void);
 void patch_ui_phase(eboot_phase_t phase, int rc);
 void patch_ui_finish_ok(void);
+/* Like patch_ui_finish_ok, but tells the operator to relaunch the game
+ * manually (used when the caller exits to XMB instead of auto-relaunching
+ * via exitspawn2 — see the runtime repatch path in main.c). */
+void patch_ui_finish_ok_manual(void);
 void patch_ui_finish_error(int rc);
 
 #endif

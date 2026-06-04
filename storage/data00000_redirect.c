@@ -53,7 +53,6 @@
 
 static char g_redirect_path[512];
 static int  g_redirect_ready = 0;
-static uint32_t g_stat_probe_logs = 0;
 
 static char ascii_lower(char c) {
     if (c >= 'A' && c <= 'Z')
@@ -71,32 +70,6 @@ static void resolve_redirect_path(void) {
         return;
     }
     dbg_print("[data00000] usrdir resolution failed\n");
-}
-
-static int path_starts_with(const char *p, const char *prefix) {
-    if (!p || !prefix) return 0;
-    while (*prefix) {
-        if (ascii_lower(*p) != ascii_lower(*prefix))
-            return 0;
-        p++;
-        prefix++;
-    }
-    return 1;
-}
-
-static int path_contains(const char *p, const char *needle) {
-    if (!p || !needle || !needle[0]) return 0;
-    size_t nlen = 0;
-    while (needle[nlen]) nlen++;
-    for (size_t i = 0; p[i] && i < 256; i++) {
-        size_t j = 0;
-        while (j < nlen && p[i + j] &&
-               ascii_lower(p[i + j]) == ascii_lower(needle[j]))
-            j++;
-        if (j == nlen)
-            return 1;
-    }
-    return 0;
 }
 
 static int path_ends_with(const char *p, const char *tail) {
@@ -121,12 +94,6 @@ static int versionup_path_matches(const char *p) {
     return path_ends_with(p, VERSIONUP_TAIL) || path_ends_with(p, "/VERSIONUP/");
 }
 
-static int interesting_usb_path(const char *p) {
-    return path_starts_with(p, "/dev_usb") ||
-           path_contains(p, "VERSIONUP") ||
-           path_contains(p, "DATA00000");
-}
-
 /* SPRX-side cellFsOpen is imported through libfs_stub independently of
  * the EBOOT's stub. Calling it here forwards to firmware. */
 static int hk_cellFsOpen(const char *path, int flags, int *fd,
@@ -136,12 +103,6 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
      * Fstat hooks recognize and back with an in-memory XML buffer. */
     if (chassisinfo_synth_try_open(path, fd))
         return CELL_FS_SUCCEEDED;
-
-    if (interesting_usb_path(path)) {
-        dbg_print("[data00000] open seen ");
-        dbg_print(path);
-        dbg_print("\n");
-    }
 
     if (g_cfg.data00000_redirect && data00000_path_matches(path)) {
         if (!g_redirect_ready) resolve_redirect_path();
@@ -158,13 +119,6 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
 static const void * const hk_cellFsOpen_opd = (const void *)hk_cellFsOpen;
 
 static int hk_cellFsStat(const char *path, CellFsStat *sb) {
-    if (interesting_usb_path(path) && g_stat_probe_logs < 64u) {
-        dbg_print("[data00000] stat seen ");
-        dbg_print(path);
-        dbg_print("\n");
-        g_stat_probe_logs++;
-    }
-
     if (g_cfg.data00000_redirect &&
         (data00000_path_matches(path) || versionup_path_matches(path))) {
         if (!g_redirect_ready) resolve_redirect_path();
