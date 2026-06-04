@@ -1205,6 +1205,88 @@ static int resolve_kimidori_data00000_reader(uintptr_t *out) {
     return 1;
 }
 
+/*
+ * Momoiro (Wadaiko series) has the same ifstream-based reader shape as
+ * Kimidori -- fopen() in the SDK libc issues sys_fs_open directly, so the
+ * cellFsOpen FPT redirect never sees it and the import warns "Can't import
+ * Version Up Data". The reader (FUN_00615cd0) is located by the same
+ * entry+0x70 path-build block, but with Momoiro's TOC/field offsets:
+ *   lwz   r8,0x5acc(r2)   ; VU storage object (TOC slot)
+ *   li    r6,-1
+ *   addi  r4,r8,0x44      ; object mount-path field
+ *   ...
+ *   lwz   r4,0x5d30(r2)   ; "/VERSIONUP/DATA00000.BIN"
+ * Unlike Kimidori, Momoiro's success path stores PRODUCT to *(*(r2+0x5d34))
+ * and SERIES to (r2+0x5acc object)+0x80 (see momoiro_stub below), so it
+ * needs its own stub.
+ */
+static int resolve_momoiro_data00000_reader(uintptr_t *out) {
+    static const uint32_t anchor[] = {
+        0x81025ACCu, /* lwz r8,0x5acc(r2) */
+        0x38C0FFFFu, /* li r6,-1          */
+        0x38880044u, /* addi r4,r8,0x44   */
+        0x38A00000u, /* li r5,0           */
+        0x78C60020u, /* rldicl r6,r6,0,32 */
+        0x7FA3EB78u, /* or r3,r29,r29     */
+    };
+    enum { ENTRY_DELTA = 0x70u };
+    uintptr_t anchor_addr = 0;
+
+    if (!find_unique_words(CFG_SCAN_TEXT_START, CFG_SCAN_TEXT_END, anchor,
+                           sizeof(anchor) / 4, &anchor_addr))
+        return 0;
+
+    /* Confirm the DATA00000.BIN string load two insns past the masked bl. */
+    if (pt_read32(T, anchor_addr + 0x1Cu) != 0x60000000u ||
+        pt_read32(T, anchor_addr + 0x20u) != 0x80825D30u)
+        return 0;
+
+    uintptr_t entry = anchor_addr - ENTRY_DELTA;
+    if (pt_read32(T, entry) != 0xF821FD21u) /* stdu r1,-0x2e0(r1) */
+        return 0;
+
+    *out = entry;
+    return 1;
+}
+
+/*
+ * Wadaiko is a stripped-down Momoiro and shares the identical ifstream
+ * reader (FUN_006308a4), only with different TOC/field offsets:
+ *   lwz   r8,0x62ac(r2)   ; VU storage object
+ *   addi  r4,r8,0x48      ; mount-path field (0x48, like Kimidori)
+ *   lwz   r4,0x6508(r2)   ; "/VERSIONUP/DATA00000.BIN"
+ * Success path (@0x631064) stores PRODUCT to *(*(r2+0x650c)) and SERIES to
+ * (r2+0x62ac object)+0x88 -- series offset is 0x88 here (Kimidori-style),
+ * not Momoiro's 0x80. Needs its own stub.
+ */
+static int resolve_wadaiko_data00000_reader(uintptr_t *out) {
+    static const uint32_t anchor[] = {
+        0x810262ACu, /* lwz r8,0x62ac(r2) */
+        0x38C0FFFFu, /* li r6,-1          */
+        0x38880048u, /* addi r4,r8,0x48   */
+        0x38A00000u, /* li r5,0           */
+        0x78C60020u, /* rldicl r6,r6,0,32 */
+        0x7FA3EB78u, /* or r3,r29,r29     */
+    };
+    enum { ENTRY_DELTA = 0x70u };
+    uintptr_t anchor_addr = 0;
+
+    if (!find_unique_words(CFG_SCAN_TEXT_START, CFG_SCAN_TEXT_END, anchor,
+                           sizeof(anchor) / 4, &anchor_addr))
+        return 0;
+
+    if (pt_read32(T, anchor_addr + 0x1Cu) != 0x60000000u ||
+        pt_read32(T, anchor_addr + 0x20u) != 0x80826508u)
+        return 0;
+
+    uintptr_t entry = anchor_addr - ENTRY_DELTA;
+    if (pt_read32(T, entry) != 0xF821FD21u) /* stdu r1,-0x2e0(r1) */
+        return 0;
+
+    *out = entry;
+    return 1;
+}
+
 static void apply_data00000_embed_patch(void) {
     static const uint32_t original_fixed[] = {
         0xF821FE31u, 0x7C0802A6u, 0xFB8101B0u, 0x3B81008Cu,
@@ -1231,6 +1313,38 @@ static void apply_data00000_embed_patch(void) {
         0x3C000000u | hi,                                 /* lis r0,product@h */
         0x60000000u | lo,                                 /* ori r0,r0,product@l */
         0x900B0000u,                                      /* stw r0,0(r11)    ; product */
+        0x38600001u,                                      /* li r3,1 */
+        0x4E800020u,                                      /* blr */
+    };
+    /*
+     * Momoiro success path (faithful replica of FUN_00615cd0 @ 0x616490):
+     *   lwz r11,0x5d34(r2) ; lwz r8,0x5acc(r2)
+     *   *(*(r2+0x5d34)) = product   (fail path defaults this to 0x201111)
+     *   (r2+0x5acc object)+0x80 = series
+     * Both pointers are dereferenced+written in the reader's own fail path
+     * too, so they are always valid when the reader runs -- no null guard
+     * needed, matching the original.
+     */
+    uint32_t momoiro_stub[] = {
+        0x81625D34u,                                      /* lwz r11,0x5d34(r2) ; product slot ptr */
+        0x81025ACCu,                                      /* lwz r8,0x5acc(r2)  ; VU object */
+        0x3D200000u | hi,                                 /* lis r9,product@h */
+        0x61290000u | lo,                                 /* ori r9,r9,product@l */
+        0x912B0000u,                                      /* stw r9,0(r11)     ; *(*0x5d34) = product */
+        0x38000000u | (g_data00000_series_version & 0xffffu), /* li r0,series */
+        0x90080080u,                                      /* stw r0,0x80(r8)   ; object+0x80 = series */
+        0x38600001u,                                      /* li r3,1 */
+        0x4E800020u,                                      /* blr */
+    };
+    /* Wadaiko: same as Momoiro but TOC 0x650c/0x62ac and series at +0x88. */
+    uint32_t wadaiko_stub[] = {
+        0x8162650Cu,                                      /* lwz r11,0x650c(r2) ; product slot ptr */
+        0x810262ACu,                                      /* lwz r8,0x62ac(r2)  ; VU object */
+        0x3D200000u | hi,                                 /* lis r9,product@h */
+        0x61290000u | lo,                                 /* ori r9,r9,product@l */
+        0x912B0000u,                                      /* stw r9,0(r11)     ; *(*0x650c) = product */
+        0x38000000u | (g_data00000_series_version & 0xffffu), /* li r0,series */
+        0x90080088u,                                      /* stw r0,0x88(r8)   ; object+0x88 = series */
         0x38600001u,                                      /* li r3,1 */
         0x4E800020u,                                      /* blr */
     };
@@ -1265,6 +1379,14 @@ static void apply_data00000_embed_patch(void) {
                 patch = kimidori_stub;
                 patch_words = sizeof(kimidori_stub) / 4;
                 dbg_print("[patch] DATA00000 embed using Kimidori reader thunk\n");
+            } else if (resolve_momoiro_data00000_reader(&addr)) {
+                patch = momoiro_stub;
+                patch_words = sizeof(momoiro_stub) / 4;
+                dbg_print("[patch] DATA00000 embed using Momoiro reader thunk\n");
+            } else if (resolve_wadaiko_data00000_reader(&addr)) {
+                patch = wadaiko_stub;
+                patch_words = sizeof(wadaiko_stub) / 4;
+                dbg_print("[patch] DATA00000 embed using Wadaiko reader thunk\n");
             } else {
                 dbg_print("[patch] DATA00000 embed skipped; unresolved VU reader\n");
                 return;
