@@ -53,6 +53,13 @@
 
 static char g_redirect_path[512];
 static int  g_redirect_ready = 0;
+static uint32_t g_stat_probe_logs = 0;
+
+static char ascii_lower(char c) {
+    if (c >= 'A' && c <= 'Z')
+        return (char)(c + ('a' - 'A'));
+    return c;
+}
 
 static void resolve_redirect_path(void) {
     if (usrdir_resolve_path(CFG_DATA00000_REDIRECT_NAME,
@@ -66,6 +73,32 @@ static void resolve_redirect_path(void) {
     dbg_print("[data00000] usrdir resolution failed\n");
 }
 
+static int path_starts_with(const char *p, const char *prefix) {
+    if (!p || !prefix) return 0;
+    while (*prefix) {
+        if (ascii_lower(*p) != ascii_lower(*prefix))
+            return 0;
+        p++;
+        prefix++;
+    }
+    return 1;
+}
+
+static int path_contains(const char *p, const char *needle) {
+    if (!p || !needle || !needle[0]) return 0;
+    size_t nlen = 0;
+    while (needle[nlen]) nlen++;
+    for (size_t i = 0; p[i] && i < 256; i++) {
+        size_t j = 0;
+        while (j < nlen && p[i + j] &&
+               ascii_lower(p[i + j]) == ascii_lower(needle[j]))
+            j++;
+        if (j == nlen)
+            return 1;
+    }
+    return 0;
+}
+
 static int path_ends_with(const char *p, const char *tail) {
     if (!p) return 0;
     size_t len = 0;
@@ -73,7 +106,11 @@ static int path_ends_with(const char *p, const char *tail) {
     size_t tail_len = 0;
     while (tail[tail_len]) tail_len++;
     if (len < tail_len) return 0;
-    return memcmp(p + len - tail_len, tail, tail_len) == 0;
+    for (size_t i = 0; i < tail_len; i++) {
+        if (ascii_lower(p[len - tail_len + i]) != ascii_lower(tail[i]))
+            return 0;
+    }
+    return 1;
 }
 
 static int data00000_path_matches(const char *p) {
@@ -82,6 +119,12 @@ static int data00000_path_matches(const char *p) {
 
 static int versionup_path_matches(const char *p) {
     return path_ends_with(p, VERSIONUP_TAIL) || path_ends_with(p, "/VERSIONUP/");
+}
+
+static int interesting_usb_path(const char *p) {
+    return path_starts_with(p, "/dev_usb") ||
+           path_contains(p, "VERSIONUP") ||
+           path_contains(p, "DATA00000");
 }
 
 /* SPRX-side cellFsOpen is imported through libfs_stub independently of
@@ -93,6 +136,12 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
      * Fstat hooks recognize and back with an in-memory XML buffer. */
     if (chassisinfo_synth_try_open(path, fd))
         return CELL_FS_SUCCEEDED;
+
+    if (interesting_usb_path(path)) {
+        dbg_print("[data00000] open seen ");
+        dbg_print(path);
+        dbg_print("\n");
+    }
 
     if (g_cfg.data00000_redirect && data00000_path_matches(path)) {
         if (!g_redirect_ready) resolve_redirect_path();
@@ -109,12 +158,20 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
 static const void * const hk_cellFsOpen_opd = (const void *)hk_cellFsOpen;
 
 static int hk_cellFsStat(const char *path, CellFsStat *sb) {
+    if (interesting_usb_path(path) && g_stat_probe_logs < 64u) {
+        dbg_print("[data00000] stat seen ");
+        dbg_print(path);
+        dbg_print("\n");
+        g_stat_probe_logs++;
+    }
+
     if (g_cfg.data00000_redirect &&
         (data00000_path_matches(path) || versionup_path_matches(path))) {
         if (!g_redirect_ready) resolve_redirect_path();
         if (g_redirect_ready) {
             CellFsStat file_st;
             int rc = cellFsStat(g_redirect_path, &file_st);
+            dbg_print_hex32("[data00000] redirect stat rc", (uint32_t)rc);
             if (rc == CELL_FS_SUCCEEDED) {
                 if (sb) {
                     if (versionup_path_matches(path)) {
@@ -130,6 +187,8 @@ static int hk_cellFsStat(const char *path, CellFsStat *sb) {
                 dbg_print("\n");
                 return CELL_FS_SUCCEEDED;
             }
+        } else {
+            dbg_print("[data00000] stat match but redirect unresolved\n");
         }
     }
     return cellFsStat(path, sb);
@@ -228,6 +287,11 @@ static void patch_stub(uintptr_t stub_addr, const void *opd) {
 void data00000_redirect_install(void) {
     if (taiko_fpt_available()) {
         uintptr_t original = taiko_fpt_original_opd(TAIKO_FPT_FS_OPEN);
+        uintptr_t stat_original = taiko_fpt_original_opd(TAIKO_FPT_FS_STAT);
+        dbg_print_hex32("[data00000] FPT cellFsOpen original",
+                        (uint32_t)original);
+        dbg_print_hex32("[data00000] FPT cellFsStat original",
+                        (uint32_t)stat_original);
         if (original)
             taiko_fpt_publish(TAIKO_FPT_FS_OPEN, (const void *)original);
 

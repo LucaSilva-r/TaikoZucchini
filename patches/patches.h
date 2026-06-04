@@ -15,4 +15,7 @@ void patches_set_data00000_metadata(uint32_t series_version,
 int  patches_apply_all_to_buffer(uint8_t *elf, size_t len,
                                  const seg_map_t *segs, size_t nsegs);
 
+void patches_apply_data00000_embed_live(uint32_t series_version,
+                                        uint32_t product_version);
+
 #endif

@@ -269,6 +269,52 @@ static int hash_live_eboot(unsigned char out[20]) {
     return hash_file(path, out);
 }
 
+static int read_runtime_data00000_metadata(uint32_t *series_version,
+                                           uint32_t *product_version) {
+    char path[256];
+    uint8_t data[64];
+    int fd = -1;
+    uint64_t got = 0;
+
+    if (!series_version || !product_version)
+        return -1;
+    if (!usrdir_resolve_path("DATA00000.BIN", path, sizeof(path)))
+        return -2;
+    if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+        return -3;
+    if (cellFsRead(fd, data, sizeof(data), &got) != CELL_FS_SUCCEEDED) {
+        cellFsClose(fd);
+        return -4;
+    }
+    cellFsClose(fd);
+
+    if (got < 0x31u)
+        return -5;
+    if (memcmp(data + 4, "serialization::archive", 22) != 0)
+        return -6;
+
+    *series_version = data[0x2c];
+    *product_version = ((uint32_t)data[0x2d] << 24) |
+                       ((uint32_t)data[0x2e] << 16) |
+                       ((uint32_t)data[0x2f] << 8) |
+                       (uint32_t)data[0x30];
+    return 0;
+}
+
+static void apply_runtime_data00000_patch(void) {
+    uint32_t series = 0;
+    uint32_t product = 0;
+    int rc = read_runtime_data00000_metadata(&series, &product);
+    if (rc != 0) {
+        dbg_print_hex32("[patch] DATA00000 runtime metadata rc",
+                        (uint32_t)rc);
+        return;
+    }
+    dbg_print_hex32("[patch] DATA00000 runtime series", series);
+    dbg_print_hex32("[patch] DATA00000 runtime product", product);
+    patches_apply_data00000_embed_live(series, product);
+}
+
 static void remember_patch_success(const eboot_flow_args_t *a,
                                    const unsigned char patcher_hash[20],
                                    int have_patcher_hash) {
@@ -543,6 +589,8 @@ int taiko_start(unsigned int args, void *argp) {
     /* Runtime path: same operator override window before the auto-repatch
      * hash check runs. */
     menu_maybe_open();
+    dbg_print("[patch] DATA00000 runtime hook marker\n");
+    apply_runtime_data00000_patch();
     if (maybe_repatch_from_original()) {
         dbg_print("[eboot] repatch complete; relaunching game\n");
         menu_action_reboot_game();
