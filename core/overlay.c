@@ -19,8 +19,8 @@
 #define OVERLAY_TOAST_FRAMES   120
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
-#define OVERLAY_MAP_SIZE       (2 * 1024 * 1024)
-#define OVERLAY_CMD_RING_SLOTS 3
+#define OVERLAY_MAP_SIZE       (8 * 1024 * 1024)
+#define OVERLAY_CMD_RING_SLOTS 64
 #define OVERLAY_CMD_WORDS      16384
 
 #define OVERLAY_MAX_LINES      36
@@ -33,7 +33,7 @@
 #define OVERLAY_ATLAS_PITCH    4096
 #define OVERLAY_SWATCH_W       16
 #define OVERLAY_SWATCH_H       16
-#define OVERLAY_VERTEX_SLOTS   3
+#define OVERLAY_VERTEX_SLOTS   8
 #define OVERLAY_VERTEX_MAX     8192   /* room for 16 rows + wrapped desc */
 
 #define UI_COLOR_BG       0xDC101010u
@@ -254,6 +254,9 @@ static int ensure_overlay_mapped(void) {
 }
 
 static uint32_t *cmd_begin(uint32_t *cmd_io_out) {
+    /* CallCommands execute asynchronously. Keep enough distinct command
+     * buffers that a later flip cannot overwrite an unexecuted command
+     * containing the previous flip id's framebuffer offset. */
     uint32_t slot = g_cmd_next++ % OVERLAY_CMD_RING_SLOTS;
     if (cmd_io_out)
         *cmd_io_out = g_overlay_cmd_io + slot * OVERLAY_CMD_WORDS * 4;

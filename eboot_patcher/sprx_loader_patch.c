@@ -250,7 +250,7 @@ static int va_in_load(elf64_phdr_t *phdrs, uint16_t phnum, uint32_t va,
     return 0;
 }
 
-static int local_alloc_wrapper_matches(const uint8_t *b) {
+static int local_alloc_debug_wrapper_matches(const uint8_t *b) {
     return load_be32(b + 0x00) == 0xF821FF71u &&
            load_be32(b + 0x04) == 0x7C0802A6u &&
            load_be32(b + 0x08) == 0xFBA10078u &&
@@ -268,6 +268,31 @@ static int local_alloc_wrapper_matches(const uint8_t *b) {
            load_be32(b + 0x54) == 0x7FA3EB78u &&
            load_be32(b + 0x58) == 0x7BE40020u &&
            load_be32(b + 0x5C) == 0x7BC50020u;
+}
+
+/* Older builds such as Kimidori use a small wrapper around the same
+ * two-argument local-memory allocator instead of the assert-heavy
+ * wrapper above:
+ *
+ *   mr r5,r4; mr r0,r3; lwz r3,...(r2); mr r4,r0; bl allocator
+ *
+ * This shape is also used by unrelated heaps, so callers must provide
+ * the additional local-RSX evidence checked below. */
+static int local_alloc_thin_wrapper_matches(const uint8_t *b) {
+    return load_be32(b + 0x00) == 0xF821FF91u &&
+           load_be32(b + 0x04) == 0x7C0802A6u &&
+           load_be32(b + 0x08) == 0x7C852378u &&
+           load_be32(b + 0x0C) == 0xF8010080u &&
+           load_be32(b + 0x10) == 0x7C601B78u &&
+           (load_be32(b + 0x14) & 0xFFFF0000u) == 0x80620000u &&
+           load_be32(b + 0x18) == 0x7C040378u &&
+           is_relative_bl(load_be32(b + 0x1C)) &&
+           load_be32(b + 0x20) == 0x60000000u &&
+           load_be32(b + 0x24) == 0xE8010080u &&
+           load_be32(b + 0x28) == 0x78630020u &&
+           load_be32(b + 0x2C) == 0x7C0803A6u &&
+           load_be32(b + 0x30) == 0x38210070u &&
+           load_be32(b + 0x34) == 0x4E800020u;
 }
 
 static int find_opd_for_entry(self_ctx_t *ctx, elf64_phdr_t *phdrs,
@@ -326,6 +351,61 @@ static uint32_t count_direct_calls_to(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     return count;
 }
 
+static int find_stub_by_fnid(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                             uint16_t phnum, uint32_t fnid,
+                             uint32_t *out_stub_va, uint32_t *out_got_va);
+
+/* Thin wrappers are only accepted when a direct caller passes 64 KiB
+ * alignment and then converts the returned address to an RSX offset.
+ * This rejects same-shaped main-memory allocators and libc memalign. */
+static uint32_t count_local_rsx_alloc_calls(self_ctx_t *ctx,
+                                            elf64_phdr_t *phdrs,
+                                            uint16_t phnum, uint32_t target,
+                                            uint32_t address_to_offset_stub) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+    uint32_t count = 0;
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 4u)
+            continue;
+
+        for (uint64_t pos = 0; pos + 4u <= size; pos += 4u) {
+            uint32_t insn = load_be32(ctx->buf + base + pos);
+            uint32_t insn_va = (uint32_t)(p->p_vaddr + pos);
+            if (!is_relative_bl(insn) || branch_target(insn, insn_va) != target)
+                continue;
+
+            int has_64k_align = 0;
+            for (uint64_t back = 4u; back <= 32u && back <= pos; back += 4u) {
+                if (load_be32(ctx->buf + base + pos - back) == 0x3C800001u) {
+                    has_64k_align = 1; /* lis r4,1 */
+                    break;
+                }
+            }
+            if (!has_64k_align)
+                continue;
+
+            for (uint64_t ahead = 4u; ahead <= 32u && pos + ahead + 4u <= size;
+                 ahead += 4u) {
+                uint32_t next = load_be32(ctx->buf + base + pos + ahead);
+                uint32_t next_va = (uint32_t)(p->p_vaddr + pos + ahead);
+                if (is_relative_bl(next) &&
+                    branch_target(next, next_va) == address_to_offset_stub) {
+                    count++;
+                    break;
+                }
+            }
+        }
+    }
+
+    return count;
+}
+
 static int find_game_local_alloc_opd(self_ctx_t *ctx, elf64_phdr_t *phdrs,
                                      uint16_t phnum, uint32_t *out_opd) {
     int prefer_elf = use_elf_file_offsets(ctx);
@@ -333,6 +413,11 @@ static int find_game_local_alloc_opd(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     uint32_t found_opd = 0;
     uint32_t found_calls = 0;
     uint32_t count = 0;
+    uint32_t address_to_offset_stub = 0;
+    uint32_t address_to_offset_got = 0;
+
+    (void)find_stub_by_fnid(ctx, phdrs, phnum, 0x21ac3697u,
+                            &address_to_offset_stub, &address_to_offset_got);
 
     for (uint16_t i = 0; i < phnum; i++) {
         elf64_phdr_t *p = &phdrs[i];
@@ -345,16 +430,30 @@ static int find_game_local_alloc_opd(self_ctx_t *ctx, elf64_phdr_t *phdrs,
 
         for (uint64_t pos = 0; pos + 0x60u <= size; pos += 4u) {
             const uint8_t *b = ctx->buf + base + pos;
-            if (!local_alloc_wrapper_matches(b))
+            int debug_wrapper = local_alloc_debug_wrapper_matches(b);
+            int thin_wrapper = local_alloc_thin_wrapper_matches(b);
+            if (!debug_wrapper && !thin_wrapper)
                 continue;
             uint32_t entry = (uint32_t)(p->p_vaddr + pos);
             uint32_t opd = 0;
             if (find_opd_for_entry(ctx, phdrs, phnum, entry, &opd) != 0)
                 continue;
             uint32_t calls = count_direct_calls_to(ctx, phdrs, phnum, entry);
+            uint32_t rsx_calls = 0;
+            if (thin_wrapper) {
+                if (!address_to_offset_stub)
+                    continue;
+                rsx_calls = count_local_rsx_alloc_calls(ctx, phdrs, phnum,
+                                                        entry,
+                                                        address_to_offset_stub);
+                if (!rsx_calls)
+                    continue;
+            }
             dbg_print_hex32("[patch] local alloc-like entry", entry);
             dbg_print_hex32("[patch] local alloc-like opd", opd);
             dbg_print_hex32("[patch] local alloc-like calls", calls);
+            if (thin_wrapper)
+                dbg_print_hex32("[patch] local alloc-like RSX calls", rsx_calls);
             if (calls > found_calls) {
                 found_entry = entry;
                 found_opd = opd;
