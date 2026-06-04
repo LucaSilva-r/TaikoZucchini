@@ -1287,6 +1287,40 @@ static int resolve_wadaiko_data00000_reader(uintptr_t *out) {
     return 1;
 }
 
+/*
+ * Sorairo: same reader (FUN_0051f19c), Momoiro-style (mount-path field +0x44,
+ * series at object+0x80), with its own TOC offsets:
+ *   lwz r8,0x33dc(r2) ; addi r4,r8,0x44 ; lwz r4,0x3640(r2)
+ * Success path (@0x51f95c): product -> *(*(r2+0x3644)), series -> (r2+0x33dc)+0x80.
+ */
+static int resolve_sorairo_data00000_reader(uintptr_t *out) {
+    static const uint32_t anchor[] = {
+        0x810233DCu, /* lwz r8,0x33dc(r2) */
+        0x38C0FFFFu, /* li r6,-1          */
+        0x38880044u, /* addi r4,r8,0x44   */
+        0x38A00000u, /* li r5,0           */
+        0x78C60020u, /* rldicl r6,r6,0,32 */
+        0x7FA3EB78u, /* or r3,r29,r29     */
+    };
+    enum { ENTRY_DELTA = 0x70u };
+    uintptr_t anchor_addr = 0;
+
+    if (!find_unique_words(CFG_SCAN_TEXT_START, CFG_SCAN_TEXT_END, anchor,
+                           sizeof(anchor) / 4, &anchor_addr))
+        return 0;
+
+    if (pt_read32(T, anchor_addr + 0x1Cu) != 0x60000000u ||
+        pt_read32(T, anchor_addr + 0x20u) != 0x80823640u)
+        return 0;
+
+    uintptr_t entry = anchor_addr - ENTRY_DELTA;
+    if (pt_read32(T, entry) != 0xF821FD21u) /* stdu r1,-0x2e0(r1) */
+        return 0;
+
+    *out = entry;
+    return 1;
+}
+
 static void apply_data00000_embed_patch(void) {
     static const uint32_t original_fixed[] = {
         0xF821FE31u, 0x7C0802A6u, 0xFB8101B0u, 0x3B81008Cu,
@@ -1348,6 +1382,18 @@ static void apply_data00000_embed_patch(void) {
         0x38600001u,                                      /* li r3,1 */
         0x4E800020u,                                      /* blr */
     };
+    /* Sorairo: Momoiro-style (series at +0x80) but TOC 0x3644/0x33dc. */
+    uint32_t sorairo_stub[] = {
+        0x81623644u,                                      /* lwz r11,0x3644(r2) ; product slot ptr */
+        0x810233DCu,                                      /* lwz r8,0x33dc(r2)  ; VU object */
+        0x3D200000u | hi,                                 /* lis r9,product@h */
+        0x61290000u | lo,                                 /* ori r9,r9,product@l */
+        0x912B0000u,                                      /* stw r9,0(r11)     ; *(*0x3644) = product */
+        0x38000000u | (g_data00000_series_version & 0xffffu), /* li r0,series */
+        0x90080080u,                                      /* stw r0,0x80(r8)   ; object+0x80 = series */
+        0x38600001u,                                      /* li r3,1 */
+        0x4E800020u,                                      /* blr */
+    };
     uintptr_t addr = GREEN_DATA00000_SITES.read_versionup_data_bin;
     const uint32_t *patch = stub;
     size_t patch_words = sizeof(stub) / 4;
@@ -1387,6 +1433,10 @@ static void apply_data00000_embed_patch(void) {
                 patch = wadaiko_stub;
                 patch_words = sizeof(wadaiko_stub) / 4;
                 dbg_print("[patch] DATA00000 embed using Wadaiko reader thunk\n");
+            } else if (resolve_sorairo_data00000_reader(&addr)) {
+                patch = sorairo_stub;
+                patch_words = sizeof(sorairo_stub) / 4;
+                dbg_print("[patch] DATA00000 embed using Sorairo reader thunk\n");
             } else {
                 dbg_print("[patch] DATA00000 embed skipped; unresolved VU reader\n");
                 return;
