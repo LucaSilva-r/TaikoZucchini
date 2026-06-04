@@ -339,7 +339,12 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         0xA0010074u, 0x2F8013FEu,
     };
     static const uint32_t vu_probe_mask[] = {
-        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFC000003u, 0xFFFFFFFFu,
+        /* word[0] is `mr r4,rX` (= or r4,rX,rX). The source register holding
+         * the device-list iterator is build-specific (green: r27 / 0x7F64DB78,
+         * Momoiro: r26 / 0x7F44D378), so mask out the rS/rB fields and keep
+         * only opcode + destination r4 + extended opcode. The 13 exact words
+         * that follow keep the match unique. */
+        0xFC1F07FFu, 0xFFFFFFFFu, 0xFC000003u, 0xFFFFFFFFu,
         0xFFFFFFFFu, 0xFFFF0003u, 0xFFFFFFFFu, 0xFFFFFFFFu,
         0xFC000003u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFF0003u,
         0xFFFFFFFFu, 0xFFFFFFFFu,
@@ -369,6 +374,38 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
     };
     static const uint32_t dongle_auth_stat_mask[] = {
         0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFC000003u,
+        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+    };
+    /* Momoiro obtains the value to authenticate differently than green/white
+     * (it loads an object field rather than building a path buffer), so the
+     * three words before the `bl/ld r2,0x28/cmpwi/beq` tail differ. The
+     * success-jump deltas are identical to green (VU beq +0x50, dongle beq
+     * +0x8C), so the branch/success arithmetic below is unchanged; only the
+     * anchor prologue is new. The lwz TOC/field displacements are masked. */
+    static const uint32_t vu_auth_stat_momoiro_orig[] = {
+        0x787F0020u, /* clrldi r31,r3,32  */
+        0x80820000u, /* lwz r4,disp(r2)   */
+        0x7FE3FB78u, /* mr r3,r31         */
+        0x48000001u, /* bl (masked)       */
+        0xE8410028u, /* ld r2,0x28(r1)    */
+        0x2F830000u, /* cmpwi cr7,r3,0    */
+        0x419E0050u, /* beq cr7,+0x50     */
+    };
+    static const uint32_t vu_auth_stat_momoiro_mask[] = {
+        0xFFFFFFFFu, 0xFFFF0000u, 0xFFFFFFFFu, 0xFC000003u,
+        0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+    };
+    static const uint32_t dongle_auth_stat_momoiro_orig[] = {
+        0x807A0000u, /* lwz r3,disp(r26)  */
+        0x7FC4F378u, /* mr r4,r30         */
+        0x7C6307B4u, /* extsw r3,r3       */
+        0x48000001u, /* bl (masked)       */
+        0xE8410028u, /* ld r2,0x28(r1)    */
+        0x2F830000u, /* cmpwi cr7,r3,0    */
+        0x419E008Cu, /* beq cr7,+0x8C     */
+    };
+    static const uint32_t dongle_auth_stat_momoiro_mask[] = {
+        0xFFFF0000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFC000003u,
         0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
     };
     static const uint32_t usio_endpoint_filter_orig[] = {
@@ -422,6 +459,10 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         find_unique_masked_words(start, end, vu_auth_stat_white_orig,
                                  vu_auth_stat_mask,
                                  sizeof(vu_auth_stat_white_orig) / 4,
+                                 &s->vu_auth_stat_branch) ||
+        find_unique_masked_words(start, end, vu_auth_stat_momoiro_orig,
+                                 vu_auth_stat_momoiro_mask,
+                                 sizeof(vu_auth_stat_momoiro_orig) / 4,
                                  &s->vu_auth_stat_branch);
     if (!have_vu_auth)
         dbg_print("[patch] USB scan: VU auth stat signature absent\n");
@@ -430,6 +471,10 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         find_unique_masked_words(start, end, dongle_auth_stat_orig,
                                  dongle_auth_stat_mask,
                                  sizeof(dongle_auth_stat_orig) / 4,
+                                 &s->dongle_auth_stat_branch) ||
+        find_unique_masked_words(start, end, dongle_auth_stat_momoiro_orig,
+                                 dongle_auth_stat_momoiro_mask,
+                                 sizeof(dongle_auth_stat_momoiro_orig) / 4,
                                  &s->dongle_auth_stat_branch);
     if (!have_dongle_auth)
         dbg_print("[patch] USB scan: dongle auth stat signature absent\n");
@@ -445,21 +490,18 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         dbg_print("[patch] USB scan: PS3A-USJ PID signature absent\n");
 
     if (have_vu_auth && have_dongle_auth) {
+        /* Resolve the bypass branch + success target only. The fcntl
+         * dongle/VU threshold is derived separately below from the actual
+         * fcntl call sites -- NOT from these auth-stat branches. On green
+         * the auth stat sits beside the fcntl callers so the midpoint of the
+         * two happened to coincide, but on Momoiro the auth stat lives in a
+         * far-away function (0x334/0x34c vs fcntl callers at 0x616), so using
+         * it for the threshold would mis-route the serial mock. The auth-branch
+         * midpoint is kept only as a last resort (see below). */
         s->vu_auth_stat_branch += 0x18u;
         s->vu_auth_stat_success = s->vu_auth_stat_branch + 0x50u;
         s->dongle_auth_stat_branch += 0x18u;
         s->dongle_auth_stat_success = s->dongle_auth_stat_branch + 0x8Cu;
-        if (s->dongle_auth_stat_branch < s->vu_auth_stat_branch) {
-            s->fcntl_dongle_below_threshold = 1;
-            s->fcntl_dongle_threshold =
-                s->dongle_auth_stat_branch +
-                ((s->vu_auth_stat_branch - s->dongle_auth_stat_branch) / 2u);
-        } else {
-            s->fcntl_dongle_below_threshold = 0;
-            s->fcntl_dongle_threshold =
-                s->vu_auth_stat_branch +
-                ((s->dongle_auth_stat_branch - s->vu_auth_stat_branch) / 2u);
-        }
     } else {
         s->vu_auth_stat_branch = 0;
         s->dongle_auth_stat_branch = 0;
@@ -529,6 +571,27 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         } else {
             dbg_print("[patch] USB scan: fcntl callsite threshold absent\n");
         }
+    }
+
+    /* Last resort: midpoint of the auth-stat branches. Only correct when the
+     * auth stat sits beside the fcntl call sites (green); preserved so green
+     * still resolves a threshold if its fcntl callsite scan does not find a
+     * clean pair. Momoiro never reaches here because the callsite derivation
+     * above succeeds. */
+    if (!s->fcntl_dongle_threshold &&
+        s->vu_auth_stat_branch && s->dongle_auth_stat_branch) {
+        if (s->dongle_auth_stat_branch < s->vu_auth_stat_branch) {
+            s->fcntl_dongle_below_threshold = 1;
+            s->fcntl_dongle_threshold =
+                s->dongle_auth_stat_branch +
+                ((s->vu_auth_stat_branch - s->dongle_auth_stat_branch) / 2u);
+        } else {
+            s->fcntl_dongle_below_threshold = 0;
+            s->fcntl_dongle_threshold =
+                s->vu_auth_stat_branch +
+                ((s->dongle_auth_stat_branch - s->vu_auth_stat_branch) / 2u);
+        }
+        dbg_print("[patch] USB scan: auth-branch threshold fallback\n");
     }
 
     if (!s->dongle_probe && !s->vu_probe && !s->fcntl_dispatch &&
