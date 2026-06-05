@@ -168,6 +168,24 @@ static int find_unique_masked_words(uintptr_t start, uintptr_t end,
     return 0;
 }
 
+enum {
+    FCNTL_CALL_UNKNOWN = 0,
+    FCNTL_CALL_DONGLE = 1,
+    FCNTL_CALL_VU     = 2,
+};
+
+static int classify_fcntl_callsite(uintptr_t callsite) {
+    for (uintptr_t p = callsite + 4u;
+         p < callsite + 0x100u && p + 4u <= CFG_SCAN_TEXT_END; p += 4u) {
+        uint32_t w = pt_read32(T, p);
+        if (w == 0x2F800B9Au) /* cmpwi cr7,r0,0x0B9A */
+            return FCNTL_CALL_DONGLE;
+        if (w == 0x2F8013FEu) /* cmpwi cr7,r0,0x13FE */
+            return FCNTL_CALL_VU;
+    }
+    return FCNTL_CALL_UNKNOWN;
+}
+
 static int import_stub_matches(uintptr_t addr, uintptr_t *got_slot) {
     uint32_t w0 = pt_read32(T, addr + 0);
     uint32_t w1 = pt_read32(T, addr + 4);
@@ -558,16 +576,30 @@ static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
         if (count == 2u) {
             uintptr_t ret0 = calls[0] + 4u;
             uintptr_t ret1 = calls[1] + 4u;
+            int cls0 = classify_fcntl_callsite(calls[0]);
+            int cls1 = classify_fcntl_callsite(calls[1]);
+
             if (ret0 < ret1) {
                 s->fcntl_dongle_threshold = ret0 + (ret1 - ret0) / 2u;
-                s->fcntl_dongle_below_threshold = 0;
             } else {
                 s->fcntl_dongle_threshold = ret1 + (ret0 - ret1) / 2u;
+            }
+            if (cls0 != cls1 &&
+                (cls0 == FCNTL_CALL_DONGLE || cls1 == FCNTL_CALL_DONGLE)) {
+                uintptr_t dongle_ret =
+                    (cls0 == FCNTL_CALL_DONGLE) ? ret0 : ret1;
+                s->fcntl_dongle_below_threshold =
+                    dongle_ret < s->fcntl_dongle_threshold;
+            } else if (ret0 < ret1) {
+                s->fcntl_dongle_below_threshold = 0;
+            } else {
                 s->fcntl_dongle_below_threshold = 1;
             }
             dbg_print("[patch] USB scan: fcntl callsite threshold fallback\n");
             dbg_print_hex32("[patch] fcntl_call_0", (uint32_t)calls[0]);
             dbg_print_hex32("[patch] fcntl_call_1", (uint32_t)calls[1]);
+            dbg_print_hex32("[patch] fcntl_class_0", (uint32_t)cls0);
+            dbg_print_hex32("[patch] fcntl_class_1", (uint32_t)cls1);
         } else {
             dbg_print("[patch] USB scan: fcntl callsite threshold absent\n");
         }
