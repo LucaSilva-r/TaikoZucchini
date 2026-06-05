@@ -23,6 +23,7 @@
 #include "camera_diag.h"
 #include "camera_qr.h"
 #include "bpreader_hook.h"
+#include "bpreader_serial.h"
 #include "chassisinfo_hook.h"
 #include "game_version.h"
 #include "pad_input.h"
@@ -617,7 +618,22 @@ int taiko_start(unsigned int args, void *argp) {
     taiko_overlay_hooks_install();
     taiko_version_check_start();
     camera_diag_hooks_install();
-    if (g_cfg.qr_card_reader)
+    /* The card reader can only authenticate cards with the game's BNG transform
+     * tables. Some Taiko versions don't ship the reader at all; probe once and,
+     * if unavailable, disable the card UI and tell the operator how to produce
+     * the shared dump (boot a version that has it — e.g. Green — and tap a card
+     * once; the dump persists in the plugin dir for every version afterwards). */
+    int card_reader_ok = 1;
+    if (g_cfg.qr_card_reader || g_cfg.usio_emulation) {
+        if (bpreader_bngrw_probe() == BPREADER_BNGRW_UNAVAILABLE) {
+            card_reader_ok = 0;
+            taiko_overlay_show_message(
+                "Card reader off: this Taiko version has no card tables yet. "
+                "Boot Taiko Green once and tap any card to generate them - "
+                "the reader then works on every version.");
+        }
+    }
+    if (g_cfg.qr_card_reader && card_reader_ok)
         camera_qr_init();
     bpreader_hook_install();
     (void)taiko_game_chassisinfo_dir();  /* warm cache + log detected version */
@@ -636,7 +652,7 @@ int taiko_start(unsigned int args, void *argp) {
     /* Saved-card picker: needs the overlay flip hook and the virtual USIO
      * input gate. QR scanning is optional; stored-card replay still works
      * without a camera. */
-    if (g_cfg.usio_emulation)
+    if (g_cfg.usio_emulation && card_reader_ok)
         card_picker_start();
     /* In-game mod menu (keyboard F5 / pad L3+R3+X). Must open in BOTH USIO
      * states, so it is started unconditionally. The pad path is independent

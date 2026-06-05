@@ -5,7 +5,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <cell/fs/cell_fs_file_api.h>
+#include <cell/fs/cell_fs_errno.h>
+
+#include "config.h"
 #include "debug.h"
+#include "overlay.h"
 
 /* PRX libc has no strtoul. The only caller below parses a base-10
  * unsigned integer with no leading whitespace or sign; inline that. */
@@ -81,8 +86,185 @@ static const uint8_t FELICA_8000_FALLBACK[BPREADER_FELICA_BLOCK_SIZE] = {
     0x9F, 0xA7, 0xD9, 0x6C, 0x44, 0xB5, 0x1F, 0x3D
 };
 
-#define BNGRW_TABLE0 ((const uint8_t *)0x01397350u)
-#define BNGRW_TABLE1 ((const uint8_t *)0x01396b50u)
+/* BNG reader transform tables. These live in the game EBOOT's bss, filled at
+ * runtime by the game's reader library (FUN_0041e924 on Taiko Green). The table
+ * base is build-specific: the old hardcoded 0x01397350 / 0x01396b50 were Green's
+ * bss addresses and only mapped under RPCS3's layout — on a build that lacks the
+ * reader (Kimidori/Murasaki/Sorairo) or on real PS3 they land in an unmapped
+ * region and fault (Data Storage / DSI) at first access.
+ *
+ * Resolution (lazy, idempotent) in bngrw_tables_ensure():
+ *   1. If a previously extracted dump exists next to the plugin, load it.
+ *   2. Else, on a build that has the game-side reader, find FUN_0041e924 by
+ *      signature, read the two tables out of the running game's memory, and
+ *      persist them to that dump so every build (and real HW) can reuse them.
+ *   3. Else the transform stays unavailable and populate_card() falls back to
+ *      FELICA_8000_FALLBACK.
+ * No proprietary data ships in the plugin; the dump is produced from the user's
+ * own running game. */
+#define BNGRW_TABLE0_LEN 0x100u
+#define BNGRW_TABLE1_LEN 0x800u
+#define BNGRW_STORE_LEN  (BNGRW_TABLE0_LEN + BNGRW_TABLE1_LEN)
+#define BNGRW_DUMP_PATH  "/dev_hdd0/plugins/taiko/bngrw_tables.bin"
+
+/* On-disk format shared with scripts/banapassport_from_access_code.py:
+ * 16-byte header then TABLE0 (0x100) then TABLE1 (0x800). */
+static const uint8_t BNGRW_DUMP_HEADER[16] = {
+    'B', 'N', 'G', 'R', 'W', 'T', 'B', 'L',
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00,
+};
+
+static uint8_t g_bngrw_store[BNGRW_STORE_LEN]; /* [0]=table0, [0x100]=table1 */
+static const uint8_t *g_bngrw_table0; /* 0x100-byte table */
+static const uint8_t *g_bngrw_table1; /* 0x800-byte table (8 substitution boxes) */
+#define BNGRW_TABLE0 (g_bngrw_table0)
+#define BNGRW_TABLE1 (g_bngrw_table1)
+
+static bool bngrw_is_permutation(const uint8_t *p) {
+    bool seen[0x100] = {false};
+    for (size_t i = 0; i < 0x100; i++) {
+        if (seen[p[i]])
+            return false;
+        seen[p[i]] = true;
+    }
+    return true;
+}
+
+/* TABLE0 is 1 box, TABLE1 is 8 boxes; the store is valid iff all nine are
+ * byte permutations. Gates both the on-disk load and the live extraction so a
+ * zero-filled (not-yet-initialised) game bss is never accepted or persisted. */
+static bool bngrw_store_valid(void) {
+    if (!bngrw_is_permutation(g_bngrw_store))
+        return false;
+    for (size_t key = 0; key < 8; key++) {
+        if (!bngrw_is_permutation(g_bngrw_store + BNGRW_TABLE0_LEN + key * 0x100))
+            return false;
+    }
+    return true;
+}
+
+static void bngrw_publish_store(void) {
+    g_bngrw_table0 = g_bngrw_store;
+    g_bngrw_table1 = g_bngrw_store + BNGRW_TABLE0_LEN;
+}
+
+static bool bngrw_load_dump(void) {
+    int fd = -1;
+    if (cellFsOpen(BNGRW_DUMP_PATH, CELL_FS_O_RDONLY, &fd, NULL, 0)
+            != CELL_FS_SUCCEEDED)
+        return false;
+
+    uint8_t header[16];
+    uint64_t got = 0;
+    bool ok = cellFsRead(fd, header, sizeof header, &got) == CELL_FS_SUCCEEDED &&
+              got == sizeof header &&
+              memcmp(header, BNGRW_DUMP_HEADER, 8) == 0;
+    if (ok) {
+        ok = cellFsRead(fd, g_bngrw_store, sizeof g_bngrw_store, &got)
+                 == CELL_FS_SUCCEEDED &&
+             got == sizeof g_bngrw_store;
+    }
+    cellFsClose(fd);
+
+    if (!ok || !bngrw_store_valid())
+        return false;
+    bngrw_publish_store();
+    dbg_print("[bngrw] tables loaded from dump\n");
+    return true;
+}
+
+static void bngrw_save_dump(void) {
+    int fd = -1;
+    if (cellFsOpen(BNGRW_DUMP_PATH,
+                   CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                   &fd, NULL, 0) != CELL_FS_SUCCEEDED) {
+        dbg_print("[bngrw] dump save: open failed\n");
+        return;
+    }
+    uint64_t wrote = 0;
+    bool ok = cellFsWrite(fd, BNGRW_DUMP_HEADER, sizeof BNGRW_DUMP_HEADER, &wrote)
+                  == CELL_FS_SUCCEEDED &&
+              cellFsWrite(fd, g_bngrw_store, sizeof g_bngrw_store, &wrote)
+                  == CELL_FS_SUCCEEDED;
+    cellFsClose(fd);
+    dbg_print(ok ? "[bngrw] tables dumped next to plugin\n"
+                 : "[bngrw] dump save: write failed\n");
+}
+
+/* The game's reader-transform consumer (FUN_0041e924 on Green) bakes the table
+ * base as absolute lis/addic immediates:
+ *   lis  r4,HI ; li r3,8 ; ori r5,r1,0 ; addic r4,r4,LO ; mtctr r3
+ * TABLE0 = (HI<<16) + sext16(LO); TABLE1 sits 0x800 below TABLE0. Builds without
+ * the reader (Kimidori/Murasaki/Sorairo) lack this code, so the scan simply
+ * misses and the transform stays disabled. */
+static bool bngrw_extract_from_game(void) {
+    for (uintptr_t p = CFG_SCAN_TEXT_START;
+         p + 20u <= CFG_SCAN_TEXT_END; p += 4) {
+        const uint32_t *w = (const uint32_t *)p;
+        if ((w[0] & 0xFFFF0000u) != 0x3C800000u || /* lis  r4,HI       */
+            w[1] != 0x38600008u ||                  /* li   r3,8        */
+            w[2] != 0x60250000u ||                  /* ori  r5,r1,0     */
+            (w[3] & 0xFFFF0000u) != 0x30840000u ||  /* addic r4,r4,LO   */
+            w[4] != 0x7C6903A6u)                    /* mtctr r3         */
+            continue;
+
+        uint32_t hi = w[0] & 0xFFFFu;
+        int32_t lo = (int16_t)(w[3] & 0xFFFFu);
+        uintptr_t table0 = (uintptr_t)((hi << 16) + lo);
+        uintptr_t table1 = table0 - BNGRW_TABLE1_LEN;
+        if (table1 < CFG_SCAN_TEXT_START)
+            continue;
+
+        memcpy(g_bngrw_store, (const void *)table0, BNGRW_TABLE0_LEN);
+        memcpy(g_bngrw_store + BNGRW_TABLE0_LEN, (const void *)table1,
+               BNGRW_TABLE1_LEN);
+        if (!bngrw_store_valid())
+            continue; /* not initialised yet, or false-positive match */
+
+        bngrw_publish_store();
+        bngrw_save_dump();
+        dbg_print("[bngrw] tables extracted from running game\n");
+        taiko_overlay_show_message(
+            "Card tables saved. The card reader now works on every Taiko version.");
+        return true;
+    }
+    return false;
+}
+
+/* Match only the FUN_0041e924 signature, without touching the (possibly not
+ * yet initialised) table bss. Tells the caller whether THIS build can ever
+ * produce the tables, independent of whether they're filled yet. */
+static bool bngrw_signature_present(void) {
+    for (uintptr_t p = CFG_SCAN_TEXT_START;
+         p + 20u <= CFG_SCAN_TEXT_END; p += 4) {
+        const uint32_t *w = (const uint32_t *)p;
+        if ((w[0] & 0xFFFF0000u) == 0x3C800000u &&
+            w[1] == 0x38600008u &&
+            w[2] == 0x60250000u &&
+            (w[3] & 0xFFFF0000u) == 0x30840000u &&
+            w[4] == 0x7C6903A6u)
+            return true;
+    }
+    return false;
+}
+
+/* Make the transform tables available, or report that they are not. Cheap and
+ * idempotent: safe to call on every card operation. */
+static bool bngrw_tables_ensure(void) {
+    if (g_bngrw_table0 && g_bngrw_table1)
+        return true;
+    if (bngrw_load_dump())
+        return true;
+    return bngrw_extract_from_game();
+}
+
+bpreader_bngrw_status_t bpreader_bngrw_probe(void) {
+    if ((g_bngrw_table0 && g_bngrw_table1) || bngrw_load_dump())
+        return BPREADER_BNGRW_READY;
+    if (bngrw_signature_present())
+        return BPREADER_BNGRW_EXTRACTABLE;
+    return BPREADER_BNGRW_UNAVAILABLE;
+}
 
 static uint8_t bngrw_inv0[0x100];
 static uint8_t bngrw_inv1[8][0x100];
@@ -91,6 +273,9 @@ static bool bngrw_inverse_ready;
 static bool bngrw_init_inverse_tables(void) {
     if (bngrw_inverse_ready) {
         return true;
+    }
+    if (!bngrw_tables_ensure()) {
+        return false;
     }
 
     bool seen0[0x100] = {false};

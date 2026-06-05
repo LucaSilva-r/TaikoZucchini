@@ -702,6 +702,83 @@ static void apply_auth_stat_bypass(void) {
                           g_usb_sites.dongle_auth_stat_success));
 }
 
+/*
+ * Older builds (Kimidori/Sorairo/Murasaki) gate dongle/VU auth on a
+ * USBDeviceSecurity::authenticate() method that OPENS with a cellFsStat on the
+ * device node:
+ *
+ *   if (obj->state == 1) {
+ *     if (cellFsStat(device_path) == 0) {     // <-- fails: no USB drive on PS3
+ *         FUN_00675c34(...)  // read VID/PID/serial (mocked by fcntl_dispatch)
+ *         ... validate, obj[0xf]=0 on success, write serial into obj ...
+ *     } else { "... connect error"; obj[0xf] = error; }
+ *   }
+ *
+ * On RPCS3 /dev_usb000 is always present so the stat passes; on real PS3 with
+ * nothing plugged it fails and the game logs "connect error" and aborts. There
+ * is no green-style auth-stat success branch on these builds.
+ *
+ * Fix: force the device-present check to pass by making its `beq cr7` (taken
+ * when stat==0) UNCONDITIONAL. authenticate() then runs its real success path
+ * against the mocked getter (fcntl_dispatch) and writes the serial into the
+ * object as usual — unlike a blind entry stub, nothing is skipped. The opening
+ * cellFsStat gate is:  bl <stat> ; ld r2,0x28(r1) ; cmpwi cr7,r3,0 ; beq cr7
+ *
+ * Sites are the authenticate() entries (shared masked prologue), confirmed by
+ * the USB idVendor compare (0x0B9A dongle / 0x13FE VU) in the body.
+ */
+static void apply_authenticate_connect_fix(void) {
+    static const uint32_t prologue[] = {
+        0xF8210000u, /* stdu r1,-frame(r1) */
+        0x7C0802A6u, /* mflr r0            */
+        0xFB000000u, /* std  rNN,..(r1)    */
+        0xF8010000u, /* std  r0,..(r1)     */
+        0x80030000u, /* lwz  r0,0(r3)      ; obj->state */
+        0x7C001B78u, /* or   rNN,r3,r3     */
+        0xFBE10000u, /* std  r31,..(r1)    */
+        0x2F800001u, /* cmpwi cr7,r0,1     */
+    };
+    static const uint32_t prologue_mask[] = {
+        0xFFFF0000u, 0xFFFFFFFFu, 0xFF000000u, 0xFFFF0000u,
+        0xFFFFFFFFu, 0xFF00FFFFu, 0xFFFF0000u, 0xFFFFFFFFu,
+    };
+    const size_t prologue_n = sizeof(prologue) / 4;
+    int patched = 0;
+
+    for (uintptr_t p = CFG_SCAN_TEXT_START;
+         p + sizeof(prologue) <= CFG_SCAN_TEXT_END; p += 4) {
+        if (!masked_words_match(p, prologue, prologue_mask, prologue_n))
+            continue;
+
+        const uintptr_t body_end = p + 0x900u;
+        int is_auth = 0;
+        for (uintptr_t q = p; q < body_end && q + 4u <= CFG_SCAN_TEXT_END; q += 4) {
+            uint32_t w = pt_read32(T, q);
+            if (w == 0x2F800B9Au || w == 0x2F8013FEu) { is_auth = 1; break; }
+        }
+        if (!is_auth)
+            continue;
+
+        for (uintptr_t q = p; q < body_end && q + 16u <= CFG_SCAN_TEXT_END; q += 4) {
+            if ((pt_read32(T, q) & 0xFC000003u) != 0x48000001u) /* bl */
+                continue;
+            if (pt_read32(T, q + 4) != 0xE8410028u)             /* ld r2,0x28(r1) */
+                continue;
+            if (pt_read32(T, q + 8) != 0x2F830000u)             /* cmpwi cr7,r3,0 */
+                continue;
+            uint32_t br = pt_read32(T, q + 12);
+            if ((br & 0xFFFF0003u) != 0x419E0000u)              /* beq cr7,cont */
+                continue;
+            write32(q + 12, 0x48000000u | (br & 0xFFFCu));      /* -> b cont */
+            dbg_print_hex32("[patch] authenticate connect fix", (uint32_t)(q + 12));
+            patched++;
+            break;
+        }
+    }
+    if (!patched)
+        dbg_print("[patch] authenticate connect fix: no sites\n");
+}
+
 /* ------------------------------------------------------------------ */
 /* 3. cellFsFcntl helper dispatch (FUN_00939454)                      */
 /*    Replaces 184 bytes with a caller-aware mock.                    */
@@ -1473,9 +1550,15 @@ static void patches_apply_all_impl(void) {
         g_usb_sites.dongle_match && g_usb_sites.vu_probe &&
         g_usb_sites.vu_skip && g_usb_sites.vu_match)
         apply_probe_patches();
-    if (g_cfg.auth_stat_bypass &&
-        g_usb_sites.vu_auth_stat_branch && g_usb_sites.dongle_auth_stat_branch)
-        apply_auth_stat_bypass();
+    if (g_cfg.auth_stat_bypass) {
+        if (g_usb_sites.vu_auth_stat_branch && g_usb_sites.dongle_auth_stat_branch)
+            apply_auth_stat_bypass();
+        else
+            /* Older builds (Kimidori/Sorairo/Murasaki): no auth-stat branch.
+             * Force authenticate()'s opening cellFsStat device-present check to
+             * pass so an unplugged USB drive doesn't "connect error". */
+            apply_authenticate_connect_fix();
+    }
     if (g_cfg.fcntl_dispatch &&
         g_usb_sites.fcntl_dispatch && g_usb_sites.fcntl_dongle_threshold)
         apply_fcntl_dispatch();
