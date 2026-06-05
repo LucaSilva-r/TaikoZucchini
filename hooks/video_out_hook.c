@@ -423,7 +423,10 @@ int taiko_video_upscale_inject_blit(void *ctx, uint8_t id) {
 /* ------------------------------------------------------------------ */
 
 void taiko_video_upscale_install(void) {
+    dbg_print_hex32("[vout] upscale_to_native cfg", g_cfg.upscale_to_native);
+    dbg_print_hex32("[vout] upscale_blit cfg", g_cfg.upscale_blit);
     if (!g_cfg.upscale_to_native) {
+        dbg_print("[vout] upscale disabled by config\n");
         /* Always publish original OPDs so the FPT dispatcher keeps the
          * stock behaviour for builds where upscale is off. */
         publish_original_fpt(TAIKO_FPT_VIDEO_OUT_GET_STATE);
@@ -519,7 +522,6 @@ void taiko_video_upscale_install(void) {
     if (!taiko_fpt_publish(TAIKO_FPT_GCM_GET_DISPLAY_INFO,
                            (const void *)hk_get_display_info))
         dbg_print("[vout] optional getDisplayInfo hook unavailable\n");
-
     g_active = 1;
     dbg_print("[vout] upscale hooks installed\n");
 }
