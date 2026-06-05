@@ -38,6 +38,11 @@ static void capture_cb(const char code[21]) {
 }
 
 static void replay_card(const char *code20) {
+    if (!bpreader_serial_reader_enabled()) {
+        taiko_overlay_show_prompt("Card reader disabled");
+        return;
+    }
+
     char ac[21];
     /* Stored codes are 20 decimal digits; bpreader treats them as hex
      * (digits are valid hex), matching the QR decode path exactly. */
@@ -220,6 +225,7 @@ static void card_picker_thread(uint64_t arg) {
 
     for (;;) {
         int want = bpreader_hook_reader_accepting_card() &&
+                   bpreader_serial_reader_enabled() &&
                    !bpreader_serial_card_present();
         if (want) {
             if (g_cfg.saved_card_prompt &&

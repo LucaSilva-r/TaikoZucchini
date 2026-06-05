@@ -17,6 +17,7 @@
 
 #define OVERLAY_BOOT_WINDOW_US (60ULL * 1000ULL * 1000ULL)
 #define OVERLAY_TOAST_FRAMES   120
+#define OVERLAY_MESSAGE_BOX_FRAMES 600
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
 #define OVERLAY_MAP_SIZE       (8 * 1024 * 1024)
@@ -26,6 +27,8 @@
 #define OVERLAY_MAX_LINES      36
 #define OVERLAY_TEXT_CAP       96
 #define OVERLAY_VALUE_CAP      48
+#define OVERLAY_MESSAGE_CAP    320
+#define OVERLAY_MESSAGE_LINES  6
 #define OVERLAY_DESC_CAP       320   /* selected-row description (pre-wrap)  */
 #define OVERLAY_DESC_LINES     4     /* max wrapped description rows         */
 #define OVERLAY_MENU_ROW_H     26
@@ -114,6 +117,10 @@ static int g_overlay_mapped;
 static volatile int g_toast_frames;
 static volatile int g_toast_force;
 static char g_toast[OVERLAY_TEXT_CAP];
+
+static volatile int g_message_box_frames;
+static char g_message_box_title[OVERLAY_TEXT_CAP];
+static char g_message_box[OVERLAY_MESSAGE_CAP];
 
 static volatile int g_menu_active;
 static volatile int g_menu_cur = -1;
@@ -638,6 +645,97 @@ static int wrap_text(const char *src, int max_w, int max_lines,
     return out[0][0] ? line + 1 : 0;
 }
 
+static void maybe_draw_message_box(void *ctx, uint8_t id) {
+    int frames = g_message_box_frames;
+    if (frames <= 0)
+        return;
+    if (!boot_window_open()) {
+        g_message_box_frames = 0;
+        return;
+    }
+    if (!ensure_overlay_mapped())
+        return;
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end ||
+        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+        return;
+
+    const int pad = 22;
+    const int title_h = g_message_box_title[0] ? 34 : 0;
+    const int line_h = 24;
+
+    int box_w = (int)b.width * 3 / 4;
+    if (box_w > 780) box_w = 780;
+    if (box_w > (int)b.width - 48) box_w = (int)b.width - 48;
+    if (box_w < 300) box_w = 300;
+    int inner_w = box_w - 2 * pad;
+    if (inner_w <= 0)
+        return;
+
+    char lines[OVERLAY_MESSAGE_LINES][OVERLAY_TEXT_CAP];
+    int line_n = wrap_text(g_message_box, inner_w, OVERLAY_MESSAGE_LINES, lines);
+    if (line_n <= 0)
+        return;
+
+    int box_h = pad + title_h + line_n * line_h + pad;
+    if (box_h > (int)b.height - 48) box_h = (int)b.height - 48;
+    if (box_h < 64)
+        return;
+
+    int x = ((int)b.width - box_w) / 2;
+    int y = ((int)b.height - box_h) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    uint32_t vtx_io = 0;
+    int max_vtx = 0;
+    int vtx_count = 0;
+    overlay_vertex_t *vtx = text_begin(&vtx_io, &max_vtx);
+    if (!vtx)
+        return;
+
+    if (!append_rect(&cmd, &b, x, y, box_w, box_h, 1) ||
+        !append_rect(&cmd, &b, x, y, box_w, 3, 2))
+        return;
+
+    int text_y = y + pad;
+    if (g_message_box_title[0]) {
+        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  x + pad, text_y, TEXT_ACCENT,
+                                  g_message_box_title))
+            return;
+        if (!append_rect(&cmd, &b, x + pad, text_y + title_h - 8,
+                         inner_w, 1, 4))
+            return;
+        text_y += title_h;
+    }
+
+    for (int i = 0; i < line_n; i++) {
+        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  x + pad, text_y + i * line_h,
+                                  TEXT_WHITE, lines[i]))
+            return;
+    }
+
+    flush_dcache(vtx, (size_t)vtx_count * sizeof(*vtx));
+    append_text_batch(&cmd, &b, vtx_io, vtx_count);
+    if (finish_and_call(game, &cmd, cmd_io, cmd_buf))
+        g_message_box_frames = frames - 1;
+}
+
 static void maybe_draw_menu(void *ctx, uint8_t id) {
     if (!g_menu_active || !ensure_overlay_mapped())
         return;
@@ -800,6 +898,8 @@ static int hk_flip_command(void *ctx, uint8_t id) {
     }
     if (g_menu_active)
         maybe_draw_menu(ctx, id);
+    else if (g_message_box_frames > 0)
+        maybe_draw_message_box(ctx, id);
     else if (g_toast_frames > 0)
         maybe_draw_toast(ctx, id);
     if (taiko_video_upscale_active())
@@ -853,6 +953,16 @@ void taiko_overlay_show_message(const char *message) {
 
     copy_str(g_toast, sizeof g_toast, message);
     g_toast_frames = OVERLAY_TOAST_FRAMES;
+}
+
+void taiko_overlay_show_message_box(const char *title, const char *message) {
+    if (!message || !message[0] || !boot_window_open())
+        return;
+
+    copy_str(g_message_box_title, sizeof g_message_box_title, title);
+    copy_str(g_message_box, sizeof g_message_box, message);
+    g_toast_frames = 0;
+    g_message_box_frames = OVERLAY_MESSAGE_BOX_FRAMES;
 }
 
 void taiko_overlay_show_prompt(const char *message) {

@@ -211,9 +211,13 @@ static void handle_decode_result(int status, const uint8_t *payload, int payload
             return;
         }
 
-        bpreader_serial_set_access_code(access_code);
-        bpreader_serial_set_card_present(true);
-        dbg_print("[qr] access_code captured\n");
+        if (bpreader_serial_reader_enabled()) {
+            bpreader_serial_set_access_code(access_code);
+            bpreader_serial_set_card_present(true);
+            dbg_print("[qr] access_code captured\n");
+        } else {
+            dbg_print("[qr] access_code ignored; card reader disabled\n");
+        }
     }
 }
 

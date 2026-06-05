@@ -41,6 +41,15 @@
 #include "usio_backup.h"
 
 #define BP_VERBOSE_USIO 0
+#define BP_CARD_TRACE 0
+
+#if BP_CARD_TRACE
+static int g_trace_last_reader_led = -1;
+
+static bool bpreader_trace_cmd(uint8_t cmd) {
+    return cmd == 0x40 || cmd == 0xA0;
+}
+#endif
 
 enum {
     USB_STUB_COUNT = 9,
@@ -308,8 +317,18 @@ static void bpreader_feed(const uint8_t *rx, uint16_t rx_len) {
         if (g_bp_rx_len < frame_len)
             return;
 
+#if BP_CARD_TRACE
+        bool trace_cmd = false;
+#endif
         if (frame_len >= 7 && g_bp_rx[5] == 0xD4) {
             uint8_t cmd = g_bp_rx[6];
+#if BP_CARD_TRACE
+            trace_cmd = bpreader_trace_cmd(cmd);
+            if (trace_cmd) {
+                dbg_print_hex32("[bp-card] feed cmd", cmd);
+                dbg_print_hex32("[bp-card] feed frame_len", frame_len);
+            }
+#endif
             /* 0x0E = WriteGPIO. b7==0x01 means LED port; b8 holds the
              * LED bitmap. Bit 0x10 clear = card-reader LED ON, i.e.
              * game is waiting for a card. Bit 0x10 set = LED OFF, game
@@ -318,9 +337,17 @@ static void bpreader_feed(const uint8_t *rx, uint16_t rx_len) {
              * dance the game inconsistently runs. */
             if (cmd == 0x0E && frame_len >= 9 && g_bp_rx[7] == 0x01) {
                 bool led_on = (g_bp_rx[8] & 0x10) == 0;
+#if BP_CARD_TRACE
+                if (g_trace_last_reader_led != (int)led_on) {
+                    dbg_print_hex32("[bp-card] reader LED on", (uint32_t)led_on);
+                    g_trace_last_reader_led = (int)led_on;
+                }
+#endif
                 if (led_on) {
                     g_reader_accepting_card = 1;
-                    if (g_cfg.qr_card_reader && !bpreader_serial_card_present())
+                    if (g_cfg.qr_card_reader &&
+                        bpreader_serial_reader_enabled() &&
+                        !bpreader_serial_card_present())
                         camera_qr_request_scan();
                 } else {
                     g_reader_accepting_card = 0;
@@ -333,13 +360,19 @@ static void bpreader_feed(const uint8_t *rx, uint16_t rx_len) {
              * never raise the LED bit. */
             if (cmd == 0x4A) {
                 g_reader_accepting_card = 1;
-                if (g_cfg.qr_card_reader && !bpreader_serial_card_present())
+                if (g_cfg.qr_card_reader &&
+                    bpreader_serial_reader_enabled() &&
+                    !bpreader_serial_card_present())
                     camera_qr_request_scan();
             }
         }
 
         size_t tx_len = bpreader_serial_process(g_bp_rx, frame_len, tx, sizeof(tx));
         bpreader_queue_tx(tx, tx_len);
+#if BP_CARD_TRACE
+        if (trace_cmd)
+            dbg_print_hex32("[bp-card] queued tx_len", (uint32_t)tx_len);
+#endif
 #if BP_VERBOSE_USIO
         dbg_print_hex32("[bp] usio pn53x tx queued", (uint32_t)tx_len);
 #endif

@@ -3,6 +3,7 @@
 
 void taiko_overlay_hooks_install(void);
 void taiko_overlay_show_message(const char *message);
+void taiko_overlay_show_message_box(const char *title, const char *message);
 void taiko_overlay_show_update_available(const char *latest_version);
 
 /* Like taiko_overlay_show_message but renders even after the 60s boot
