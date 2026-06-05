@@ -779,6 +779,56 @@ static void apply_authenticate_connect_fix(void) {
         dbg_print("[patch] authenticate connect fix: no sites\n");
 }
 
+/*
+ * Momoiro's USBDeviceSecurity::init() enumerates /dev_usb%03d, cellFsStats each
+ * and counts devices whose VID/PID match. With nothing plugged the count is 0
+ * and it hard-fails BEFORE authenticate():
+ *
+ *   cmpwi  cr7,count,0 ; beq cr7,NoDevice   // -> obj[..]=0x80010016 "No Device"
+ *   cmplwi cr7,count,1 ; ble cr7,single     // ==1 -> set state, authenticate()
+ *   ... (>1 -> 0x80010017)
+ *
+ * NOP the `beq` so a zero count falls through to the single-device path, where
+ * authenticate() (made to pass by apply_authenticate_connect_fix) reports
+ * success. Self-targeting: when a device is actually present (count>=1) the beq
+ * is never taken, so this is a no-op on builds that already enumerate one.
+ *
+ * Match the idiom (same register in both compares) and confirm the beq target
+ * is the No-Device path by the 0x8001xxxx error-code load (lis rX,0x8001) near
+ * it, so unrelated zero/one comparisons are never touched.
+ */
+static void apply_init_no_device_bypass(void) {
+    int patched = 0;
+    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 16u <= CFG_SCAN_TEXT_END; p += 4) {
+        uint32_t w0 = pt_read32(T, p);
+        if ((w0 & 0xFFE0FFFFu) != 0x2F800000u) continue;   /* cmpwi  cr7,rA,0 */
+        uint32_t w1 = pt_read32(T, p + 4);
+        if ((w1 & 0xFFFF0003u) != 0x419E0000u) continue;   /* beq    cr7,ND   */
+        uint32_t w2 = pt_read32(T, p + 8);
+        if ((w2 & 0xFFE0FFFFu) != 0x2B800001u) continue;   /* cmplwi cr7,rA,1 */
+        uint32_t w3 = pt_read32(T, p + 12);
+        if ((w3 & 0xFFFF0003u) != 0x409D0000u) continue;   /* ble    cr7,sgl  */
+        if ((w0 & 0x001F0000u) != (w2 & 0x001F0000u)) continue; /* same count reg */
+
+        uintptr_t nd = p + 4 + (uintptr_t)(int32_t)(int16_t)(w1 & 0xFFFCu);
+        int is_no_device = 0;
+        for (uintptr_t q = nd; q < nd + 0x40u && q + 4u <= CFG_SCAN_TEXT_END; q += 4) {
+            /* lis rX,0x8001 (rA=0), any destination register */
+            if ((pt_read32(T, q) & 0xFC1FFFFFu) == 0x3C008001u) {
+                is_no_device = 1;
+                break;
+            }
+        }
+        if (!is_no_device) continue;
+
+        write32(p + 4, 0x60000000u); /* nop the beq -> count 0 routes to single */
+        dbg_print_hex32("[patch] init no-device bypass", (uint32_t)(p + 4));
+        patched++;
+    }
+    if (!patched)
+        dbg_print("[patch] init no-device bypass: no sites\n");
+}
+
 /* ------------------------------------------------------------------ */
 /* 3. cellFsFcntl helper dispatch (FUN_00939454)                      */
 /*    Replaces 184 bytes with a caller-aware mock.                    */
@@ -1551,13 +1601,18 @@ static void patches_apply_all_impl(void) {
         g_usb_sites.vu_skip && g_usb_sites.vu_match)
         apply_probe_patches();
     if (g_cfg.auth_stat_bypass) {
+        /* Green/White/Momoiro have a dedicated auth-stat success branch. */
         if (g_usb_sites.vu_auth_stat_branch && g_usb_sites.dongle_auth_stat_branch)
             apply_auth_stat_bypass();
-        else
-            /* Older builds (Kimidori/Sorairo/Murasaki): no auth-stat branch.
-             * Force authenticate()'s opening cellFsStat device-present check to
-             * pass so an unplugged USB drive doesn't "connect error". */
-            apply_authenticate_connect_fix();
+        /* All builds whose authenticate() opens with a cellFsStat device-present
+         * check: force it to pass so an unplugged USB drive doesn't
+         * "connect error". Self-validating (only patches functions with the USB
+         * VID compare), so it is safe to run regardless of the auth-stat path. */
+        apply_authenticate_connect_fix();
+        /* Momoiro-style init() that hard-fails "No Device" when the /dev_usb
+         * enumeration counts zero devices: route a zero count to the single-
+         * device path. No-op where a device is actually enumerated. */
+        apply_init_no_device_bypass();
     }
     if (g_cfg.fcntl_dispatch &&
         g_usb_sites.fcntl_dispatch && g_usb_sites.fcntl_dongle_threshold)
