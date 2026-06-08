@@ -21,6 +21,7 @@
 #include "online_diag.h"
 #include "data00000_redirect.h"
 #include "camera_diag.h"
+#include "hooks/smart_stub.h"
 #include "camera_qr.h"
 #include "bpreader_hook.h"
 #include "bpreader_serial.h"
@@ -619,6 +620,7 @@ int taiko_start(unsigned int args, void *argp) {
     taiko_overlay_hooks_install();
     taiko_version_check_start();
     camera_diag_hooks_install();
+    smart_stub_install();
     if (g_cfg.qr_card_reader)
         camera_qr_init();
     bpreader_hook_install();

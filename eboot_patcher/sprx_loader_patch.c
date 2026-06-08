@@ -194,6 +194,26 @@ static const fpt_stub_fnid_t FPT_STUB_FNIDS[] = {
     /* cellGcmSys (1 specific function) — required by upscale hook */
     { 0xe315a0b2u, TAIKO_FPT_GCM_GET_CONFIGURATION }, /* cellGcmGetConfiguration */
     { 0x0e6b0daeu, TAIKO_FPT_GCM_GET_DISPLAY_INFO  }, /* cellGcmGetDisplayInfo */
+
+    /* SmartAR (libsmart.sprx). Redirected to a return-0 stub so the camera
+     * service test doesn't hang and unresolved sceSmart* can't crash. FNIDs
+     * are stable across builds (same SmartAR library). */
+    { 0xf9a8ef67u, TAIKO_FPT_SMART_BASE + 0  }, /* sceSmartInit */
+    { 0x2f5cd187u, TAIKO_FPT_SMART_BASE + 1  }, /* sceSmartTargetTrackingStart */
+    { 0x1d617490u, TAIKO_FPT_SMART_BASE + 2  }, /* sceSmartTargetTrackingRun */
+    { 0x14e993ddu, TAIKO_FPT_SMART_BASE + 3  }, /* sceSmartTargetTrackingGetResults */
+    { 0x6a7495e5u, TAIKO_FPT_SMART_BASE + 4  }, /* sceSmartTargetTrackingStop */
+    { 0xead34fe9u, TAIKO_FPT_SMART_BASE + 5  }, /* sceSmartTargetTrackingReset */
+    { 0xc20ebf17u, TAIKO_FPT_SMART_BASE + 6  }, /* sceSmartTargetTrackingSetSearchPolicy */
+    { 0x2d5aa778u, TAIKO_FPT_SMART_BASE + 7  }, /* sceSmartCreateLearnedImageTarget */
+    { 0xa6f4f2a5u, TAIKO_FPT_SMART_BASE + 8  }, /* sceSmartTargetTrackingRegisterTarget */
+    { 0x993dfcdcu, TAIKO_FPT_SMART_BASE + 9  }, /* sceSmartTargetTrackingUnregisterTarget */
+    { 0x2650869bu, TAIKO_FPT_SMART_BASE + 10 }, /* sceSmartRelease */
+    { 0x66acd98bu, TAIKO_FPT_SMART_BASE + 11 }, /* sceSmartDestroyTarget */
+
+    /* sceNpDrmIsAvailable: DRM gate in green's PRX module loader that blocks on
+     * a re-signed libsmart. Redirect to the return-0 stub ("available"). */
+    { 0xad218fafu, TAIKO_FPT_NP_DRM_AVAIL }, /* sceNpDrmIsAvailable */
 };
 
 static int import_stub_matches_buf(const uint8_t *p) {
@@ -585,7 +605,11 @@ static int find_stub_by_fnid(self_ctx_t *ctx, elf64_phdr_t *phdrs,
             const uint8_t *d = ctx->buf + base + pos;
             if (d[0] != 0x2C || d[1] != 0x00) continue;
             uint16_t version = ((uint16_t)d[2] << 8) | d[3];
-            if (version != 0x0001u) continue;
+            /* Firmware import descriptors are version 0x0001; game-provided
+             * PRX stub libs (e.g. libSceSmart in libsmart.sprx) use 0x000a.
+             * Accept both so sceSmart* stubs get redirected to FPT stubs and
+             * the camera-service test stops hanging on a re-signed libsmart. */
+            if (version != 0x0001u && version != 0x000au) continue;
             uint16_t num_func = ((uint16_t)d[6] << 8) | d[7];
             if (num_func == 0 || num_func > 512) continue;
             uint32_t libname_va = load_be32(d + 0x10);

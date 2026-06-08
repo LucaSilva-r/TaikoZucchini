@@ -57,7 +57,19 @@ enum {
     TAIKO_FPT_GAME_LOCAL_ALLOC        = 85,
     TAIKO_FPT_FS_STAT                 = 86,
 
-    TAIKO_FPT_SLOT_COUNT = 87,
+    /* SmartAR (libsmart.sprx) import stubs, redirected to a return-0 stub so
+     * the camera-service test doesn't hang (and unresolved sceSmart* can't
+     * crash builds that don't load libsmart). 12 functions. */
+    TAIKO_FPT_SMART_BASE  = 87,
+    TAIKO_FPT_SMART_COUNT = 12,
+
+    /* sceNpDrmIsAvailable: green's module loader DRM-gates every PRX it loads
+     * (libsmart). For a re-signed (retail) libsmart the real DRM check blocks
+     * offline -> hang. Redirect to a return-0 ("available") stub so the loader
+     * proceeds to sys_prx_load_module. */
+    TAIKO_FPT_NP_DRM_AVAIL = 99,
+
+    TAIKO_FPT_SLOT_COUNT = 100,
 };
 
 typedef struct {
