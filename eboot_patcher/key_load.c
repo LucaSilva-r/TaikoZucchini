@@ -122,7 +122,17 @@ static char *trim(char *s) {
     return s;
 }
 
-static int parse_revision_zero(const char *s) {
+/* Which appldr key revision the active load should match. Set by the public
+ * entry points before parsing so finish_scetool_entry can filter. scetool
+ * keys files list the revision as 2 hex digits (e.g. 04). */
+static uint32_t g_target_revision = 0;
+/* Which appldr self_type the active load should match ("APP" or "NPDRM").
+ * NPDRM selfs use a DISTINCT appldr keyset (different erk/riv/priv) from APP
+ * selfs at the same key revision — using the wrong one means the loader can't
+ * decrypt the metadata (boot error 80010017). */
+static const char *g_target_self_type = "APP";
+
+static int parse_revision_eq(const char *s, uint32_t target) {
     uint32_t v = 0;
     int saw = 0;
 
@@ -138,7 +148,7 @@ static int parse_revision_zero(const char *s) {
         v = (v << 4) | (uint32_t)n;
         saw = 1;
     }
-    return saw && v == 0;
+    return saw && v == target;
 }
 
 typedef struct {
@@ -170,13 +180,25 @@ static int finish_scetool_entry(const scetool_entry_t *e, self_keyset_t *out,
             *found_klicensee = 1;
         }
     }
+    /* NPDRM control-info hash keys, used when building an NPDRM self. */
+    if (!out->have_np_tid && e->name && e->key &&
+        strcmp(e->name, "NP_tid") == 0) {
+        if (decode_hex_exact(e->key, out->np_tid, sizeof(out->np_tid)) == 0)
+            out->have_np_tid = 1;
+    }
+    if (!out->have_np_ci && e->name && e->key &&
+        strcmp(e->name, "NP_ci") == 0) {
+        if (decode_hex_exact(e->key, out->np_ci, sizeof(out->np_ci)) == 0)
+            out->have_np_ci = 1;
+    }
 
     if (*found_keyset)
         return 0;
     if (!e->type || !e->self_type || !e->revision)
         return 0;
-    if (!streq_ci(e->type, "SELF") || !streq_ci(e->self_type, "APP") ||
-        !parse_revision_zero(e->revision))
+    if (!streq_ci(e->type, "SELF") ||
+        !streq_ci(e->self_type, g_target_self_type) ||
+        !parse_revision_eq(e->revision, g_target_revision))
         return 0;
     if (!e->erk || !e->riv || !e->pub || !e->priv || !e->ctype)
         return -1;
@@ -257,7 +279,32 @@ static int load_scetool_keys(const char *keys_dir, self_keyset_t *out) {
     return found_keyset ? 0 : -20;
 }
 
-int key_load_aes(const char *keys_dir, self_keyset_t *out) {
+int key_load_aes_rev_type(const char *keys_dir, uint32_t revision,
+                          const char *self_type, self_keyset_t *out) {
+    int scetool_rc;
+    char path[256];
+    size_t got;
+
+    if (!keys_dir || !out || !self_type) return -1;
+
+    memset(out, 0, sizeof(*out));
+    g_target_revision = revision;
+    g_target_self_type = self_type;
+    scetool_rc = load_scetool_keys(keys_dir, out);
+    g_target_self_type = "APP";   /* restore default */
+    if (scetool_rc != 0)
+        return -2 + scetool_rc;
+
+    snprintf(path, sizeof(path), "%s/ldr_curves", keys_dir);
+    if (read_file(path, out->curves, sizeof(out->curves), &got) == 0 &&
+        got == sizeof(out->curves))
+        out->curves_loaded = 1;
+
+    return 0;
+}
+
+int key_load_aes_rev(const char *keys_dir, uint32_t revision,
+                     self_keyset_t *out) {
     int scetool_rc;
     char path[256];
     size_t got;
@@ -265,6 +312,7 @@ int key_load_aes(const char *keys_dir, self_keyset_t *out) {
     if (!keys_dir || !out) return -1;
 
     memset(out, 0, sizeof(*out));
+    g_target_revision = revision;
     scetool_rc = load_scetool_keys(keys_dir, out);
     if (scetool_rc != 0)
         return -2 + scetool_rc;
@@ -275,4 +323,10 @@ int key_load_aes(const char *keys_dir, self_keyset_t *out) {
         out->curves_loaded = 1;
 
     return 0;
+}
+
+int key_load_aes(const char *keys_dir, self_keyset_t *out) {
+    /* Backward-compatible default: appldr revision 0 (matches the legacy
+     * format-preserving DEX path). */
+    return key_load_aes_rev(keys_dir, 0, out);
 }

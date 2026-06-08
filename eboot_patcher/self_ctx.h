@@ -6,6 +6,15 @@
 
 #include "self_format.h"
 
+/* Block allocator for the large (multi-MB) ELF/SCE buffers. The PRX malloc
+ * heap is tiny (384K, see sprx_heap_size_real_hw), so these must come from
+ * sys_memory_allocate on-device. Host tools can pass malloc/free wrappers. */
+typedef struct {
+    void *(*alloc)(void *ctx, size_t len);
+    void  (*free)(void *ctx, void *p);
+    void  *ctx;
+} blk_alloc_t;
+
 typedef struct {
     /* Whole SCE buffer (mutated in place during decrypt). */
     uint8_t  *buf;
@@ -41,6 +50,12 @@ typedef struct {
     /* NPDRM klicensee — required for SELF_TYPE_NPDRM, ignored else. */
     uint8_t  klicensee[16];
     int      have_klicensee;
+    /* NPDRM control-info hash keys (scetool [NP_tid] / [NP_ci] erk). Needed
+     * to synthesize an NPDRM control info when *building* an NPDRM self. */
+    uint8_t  np_tid[16];
+    uint8_t  np_ci[16];
+    int      have_np_tid;
+    int      have_np_ci;
 } self_keyset_t;
 
 #endif

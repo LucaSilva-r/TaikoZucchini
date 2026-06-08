@@ -44,6 +44,11 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_host   = {0},
     .online_redirect_port   = 443,
 
+    /* Default to HEN (retail 3.XX STD) EBOOT signing: it boots on HEN-enabled
+     * CEX and also on DEX/CFW, so it is the universal target. Set
+     * hen_signing = 0 only to fall back to the legacy debug-keyed DEX output. */
+    .eboot_target_hen = 1,
+
     /* Sane defaults: only the three "go-online" gates are ON so
      * stock cabinets boot past the network check without operator
      * intervention. CI_F_* indices come from chassisinfo_schema.h. */
@@ -306,6 +311,11 @@ static void handle_eboot(const char *key, const char *value, void *u) {
             g_cfg.eboot_have_patcher_hash = 1;
         return;
     }
+    if (cfg_file_str_eq_ci(key, "hen_signing")) {
+        g_cfg.eboot_target_hen =
+            cfg_file_parse_bool(value, g_cfg.eboot_target_hen);
+        return;
+    }
     if (cfg_file_str_eq_ci(key, "patch_set_version")) {
         /* Legacy v2 key. Current builds use patcher_hash instead. */
         return;
@@ -527,6 +537,11 @@ static void write_cfg_file(const char *path) {
         emit_sha1_hex(fd, g_cfg.eboot_patched_hash);
         cfg_file_write_str(fd, "\n");
     }
+    cfg_file_write_str(fd,
+        "# hen_signing = 1 re-encodes the patched EBOOT as retail 3.XX STD\n"
+        "# (key revision 0x04) so it boots on HEN-enabled CEX consoles.\n");
+    cfg_file_write_str(fd, g_cfg.eboot_target_hen
+        ? "hen_signing = 1\n" : "hen_signing = 0\n");
     cfg_file_write_str(fd, "\n");
 
     pad_input_cfg_emit(fd);

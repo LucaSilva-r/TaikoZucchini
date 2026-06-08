@@ -96,6 +96,7 @@
 /* ------------------------------------------------------------------ */
 
 #define MBEDTLS_CIPHER_C
+#define MBEDTLS_CMAC_C                   /* AES-OMAC1 for NPDRM control-info hashes */
 #define MBEDTLS_CIPHER_MODE_CBC          /* TLS 1.2 still negotiates CBC */
 #define MBEDTLS_CIPHER_MODE_CTR          /* SELF metadata + body decrypt */
 #define MBEDTLS_CIPHER_PADDING_PKCS7

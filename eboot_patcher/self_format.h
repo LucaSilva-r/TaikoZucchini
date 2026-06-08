@@ -35,6 +35,43 @@
 #define NP_LICENSE_LOCAL          2u
 #define NP_LICENSE_FREE           3u
 
+/* Encoder constants (mirror scetool sce.h/self.h). */
+#define SCE_HEADER_TYPE_SELF_SUB  3u    /* self_header_t.header_type */
+#define SELF_TYPE_LV0             1u
+#define SELF_TYPE_LV1             2u
+#define SELF_TYPE_LV2            34u
+
+#define CONTROL_INFO_TYPE_FLAGS   1u
+#define CONTROL_INFO_TYPE_DIGEST  2u
+
+#define OPT_HEADER_TYPE_CAP_FLAGS 1u
+
+#define METADATA_SECTION_TYPE_SHDR 1u
+#define METADATA_SECTION_TYPE_PHDR 2u
+#define METADATA_SECTION_HASHED    2u
+#define METADATA_SECTION_NOT_COMPRESSED 1u
+
+#define SECTION_INFO_COMPRESSED     2u
+#define SECTION_INFO_NOT_COMPRESSED 1u
+
+#define SCE_VERSION_NOT_PRESENT   0u
+
+/* ELF program-header types whose segments are stored as encrypted SCE data
+ * sections (LOAD + PRX reloc tables). */
+#define PT_PS3_PRX_RELOC  0x700000A4u
+#define PT_PS3_PRX_UNK_A8 0x700000A8u
+
+/* Capability flags (scetool sce.h). APP default = SYSDBG|RETAIL|DEBUG|REFTOOL|0x3. */
+#define CAP_FLAG_REFTOOL 0x08u
+#define CAP_FLAG_DEBUG   0x10u
+#define CAP_FLAG_RETAIL  0x20u
+#define CAP_FLAG_SYSDBG  0x40u
+#define CAP_FLAG_APP_DEFAULT (CAP_FLAG_SYSDBG | CAP_FLAG_RETAIL | \
+                              CAP_FLAG_DEBUG | CAP_FLAG_REFTOOL | 0x3u) /* 0x7B */
+/* NPDRM has no SYSDBG bit (scetool _set_cap_flags). */
+#define CAP_FLAG_NPDRM_DEFAULT (CAP_FLAG_RETAIL | CAP_FLAG_DEBUG | \
+                                CAP_FLAG_REFTOOL | 0x3u)               /* 0x3B */
+
 typedef struct {
     uint32_t magic;
     uint32_t version;
@@ -141,6 +178,49 @@ typedef struct {
     uint32_t size;
     uint64_t next;
 } __attribute__((packed)) control_info_t;
+
+/* SCE version sub-header (self_header_t.sce_version_offset). */
+typedef struct {
+    uint32_t header_type;     /* 1 */
+    uint32_t present;         /* SCE_VERSION_NOT_PRESENT */
+    uint32_t size;            /* 0x10 */
+    uint32_t unknown_3;       /* 0 */
+} __attribute__((packed)) sce_version_t;
+
+/* ECDSA signature trailer: 21-byte R, 21-byte S, 6 pad = 0x30. */
+typedef struct {
+    uint8_t r[21];
+    uint8_t s[21];
+    uint8_t padding[6];
+} __attribute__((packed)) signature_t;
+
+/* Optional header (after the keys table). */
+typedef struct {
+    uint32_t type;
+    uint32_t size;
+    uint64_t next;
+} __attribute__((packed)) opt_header_t;
+
+/* CONTROL_INFO_TYPE_FLAGS payload. */
+typedef struct {
+    uint8_t data[0x20];
+} __attribute__((packed)) ci_data_flags_t;
+
+/* CONTROL_INFO_TYPE_DIGEST payload (0x40 variant). */
+typedef struct {
+    uint8_t  digest1[20];
+    uint8_t  digest2[20];
+    uint64_t fw_version;
+} __attribute__((packed)) ci_data_digest_40_t;
+
+/* OPT_HEADER_TYPE_CAP_FLAGS payload. */
+typedef struct {
+    uint64_t unk3;            /* 0 */
+    uint64_t unk4;            /* 0 */
+    uint64_t flags;
+    uint32_t unk6;
+    uint32_t unk7;
+} __attribute__((packed)) oh_data_cap_flags_t;
 
 typedef struct {
     uint32_t magic;            /* "NPD\0" */

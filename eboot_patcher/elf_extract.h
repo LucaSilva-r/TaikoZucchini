@@ -20,7 +20,10 @@
  * Caller owns *out_elf and *out_segs (allocated via malloc).
  *
  * Returns 0 on success. */
+/* blk allocates the (large) flat ELF buffer; *out_elf must be freed via
+ * blk->free. The small seg_map array uses the regular heap. */
 int elf_extract(self_ctx_t *ctx,
+                const blk_alloc_t *blk,
                 uint8_t  **out_elf,
                 size_t    *out_elf_len,
                 seg_map_t **out_segs,

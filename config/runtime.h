@@ -72,6 +72,12 @@ typedef struct {
     int           eboot_have_patched_hash;
     int           eboot_have_patcher_hash;
 
+    /* When set, the EBOOT patcher re-encodes the patched game EBOOT as a
+     * retail "3.XX STD" self (key revision 0x04) so it boots on HEN-enabled
+     * CEX consoles, instead of the legacy format-preserving DEX output.
+     * Config key: [patch] hen_signing = 1. */
+    int           eboot_target_hen;
+
     /* Dongle serial as 12 ASCII digits + NUL. Loaded from
      * [identity] dongle_serial in taiko_config.cfg. Empty string
      * means "use compile-time CFG_DONGLE_SERIAL fallback". */

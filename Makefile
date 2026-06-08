@@ -88,7 +88,7 @@ SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_i
            eboot_patcher/elf_extract.c eboot_patcher/key_load.c \
            eboot_patcher/sce_bn.c eboot_patcher/sce_ecdsa.c \
            eboot_patcher/sce_curve.c eboot_patcher/sce_segmap.c \
-           eboot_patcher/sprx_loader_patch.c \
+           eboot_patcher/sprx_loader_patch.c eboot_patcher/self_build.c \
            eboot_patcher/sce_rand.c eboot_patcher/eboot_flow.c \
            storage/data00000_redirect.c \
            storage/usio_backup.c \
@@ -135,7 +135,7 @@ SPU_QR_LDLIBS := -lm
 # this toolchain.
 MBEDTLS_SRC_NAMES := \
 	aes.c asn1parse.c asn1write.c base64.c bignum.c bignum_core.c bignum_mod.c \
-	bignum_mod_raw.c chacha20.c chachapoly.c cipher.c cipher_wrap.c \
+	bignum_mod_raw.c chacha20.c chachapoly.c cipher.c cipher_wrap.c cmac.c \
 	constant_time.c ctr_drbg.c ecdh.c ecdsa.c ecp.c ecp_curves.c \
 	ecp_curves_new.c entropy.c entropy_poll.c error.c gcm.c hmac_drbg.c \
 	md.c oid.c pem.c pk.c pk_ecc.c pk_wrap.c pkparse.c platform.c \

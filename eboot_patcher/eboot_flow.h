@@ -22,6 +22,9 @@ typedef struct {
     const char *bootstrap_path;  /* in : current bootstrap EBOOT.BIN; renamed to EBOOT_BOOTSTRAP.BIN */
     const char *eboot_path;      /* in : final destination EBOOT.BIN */
     const char *keys_dir;        /* in : /dev_hdd0/plugins/<dir>/keys */
+    int target_hen;              /* in : 1 = re-encode as retail 3.XX STD for
+                                  *      HEN-enabled CEX; 0 = legacy
+                                  *      format-preserving DEX output */
     eboot_progress_cb cb;        /* opt: phase callback */
     void *cb_ctx;
     uint8_t out_hash[20];        /* out: SHA1 of resulting EBOOT.BIN */

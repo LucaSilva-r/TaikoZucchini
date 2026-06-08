@@ -35,6 +35,13 @@ static int drbg_rand(void *ctx, uint8_t *buf, uint32_t len) {
     return mbedtls_ctr_drbg_random(&g_drbg, buf, len);
 }
 
+int sce_rand_bytes(void *ctx, uint8_t *out, size_t len) {
+    (void)ctx;
+    if (!g_init)
+        return -1;
+    return mbedtls_ctr_drbg_random(&g_drbg, out, len);
+}
+
 int sce_rand_init(void) {
     if (g_init) {
         sce_ecdsa_set_rand(drbg_rand, NULL);

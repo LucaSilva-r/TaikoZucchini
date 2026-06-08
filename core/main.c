@@ -337,6 +337,7 @@ static void fill_patch_args(eboot_flow_args_t *a, const char *orig,
     a->bootstrap_path = boot;
     a->eboot_path     = boot;
     a->keys_dir       = keys;
+    a->target_hen     = g_cfg.eboot_target_hen;
     a->cb             = log_phase;
 }
 
