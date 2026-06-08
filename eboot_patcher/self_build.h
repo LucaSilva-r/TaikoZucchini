@@ -39,6 +39,12 @@ typedef struct {
     uint32_t np_app_type;        /* 1 == EXEC */
     const char *np_content_id;   /* <= 0x30 chars, zero-padded */
     const char *np_real_fname;   /* on-disk name, e.g. "EBOOT.BIN" */
+
+    /* Emit the ELF section-header table as a trailing SHDR section (keeps
+     * e_shoff valid). Needed for the XMB-launched NPDRM EBOOT (HEN rejects it
+     * otherwise, 80010007); not needed for PRX modules (sys_prx_load_module
+     * loads them without it), where it is cleared so e_shoff reads 0. */
+    int add_shdrs;
 } self_build_cfg_t;
 
 /*

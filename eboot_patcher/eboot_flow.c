@@ -21,6 +21,7 @@
 #include "self_build.h"
 #include "sprx_loader_patch.h"
 #include "patches/patches.h"
+#include "debug.h"
 
 /* HEN target: fakesigned NPDRM EBOOT, key revision 0x04 (fw 3.40), free
  * license. An HDD-game EBOOT.BIN launched from XMB must be NPDRM (a plain APP
@@ -38,6 +39,28 @@ static const self_build_cfg_t HEN_STD_CFG = {
     1u,                    /* np_app_type EXEC */
     "UP0001-SCEEXE000_00-0000000000000000", /* np_content_id */
     "EBOOT.BIN",           /* np_real_fname    */
+    1,                     /* add_shdrs (HEN-launched NPDRM EBOOT needs it) */
+};
+
+/* Bundled PRX modules (libsmart.sprx) are debug-signed and rejected by HEN,
+ * leaving their imports (sceSmart*) unresolved -> the game crashes/stalls.
+ * Re-sign them as retail APP STD (key rev 0x04), like the plugin sprx, which
+ * sys_prx_load_module accepts on HEN. No shdrs / NPDRM needed for a module. */
+static const self_build_cfg_t HEN_MODULE_CFG = {
+    0x1010000001000003ull, /* auth_id     */
+    0x01000002u,           /* vendor_id   */
+    SELF_TYPE_APP,         /* self_type   */
+    0x0001000000000000ull, /* app_version */
+    (uint16_t)HEN_ENCRYPT_KEY_REVISION,
+    0u, 0u, 0u, NULL, NULL,/* NPDRM fields unused */
+    0,                     /* add_shdrs (modules load without section headers) */
+};
+
+/* Relative paths under USRDIR where a bundled libsmart.sprx is found across
+ * the Taiko builds. */
+static const char *const HEN_MODULE_RELPATHS[] = {
+    "data/libsmart/libsmart.sprx",
+    "data/module/libsmart.sprx",
 };
 
 #define REPORT(args, phase, rc) do { \
@@ -243,6 +266,88 @@ static void sm_blk_free(void *ctx, void *p) {
     if (p) sys_memory_free((sys_addr_t)(uintptr_t)p);
 }
 
+/* Re-sign one debug-signed bundled PRX in place as retail APP STD. Idempotent:
+ * skips files that are missing, not a SELF, or already non-debug. The module's
+ * body is cleartext (debug fself), so no decrypt keyset is needed. */
+static int hen_resign_module(const char *path, const self_keyset_t *ks_app) {
+    static const blk_alloc_t SM_BLK = { sm_blk_alloc, sm_blk_free, NULL };
+    uint8_t   *buf = NULL;  size_t buf_len = 0, orig = 0;
+    uint8_t   *flat = NULL; size_t flat_len = 0;
+    seg_map_t *segs = NULL; size_t nseg = 0;
+    uint8_t   *sbuf = NULL; size_t sbuf_len = 0;
+    self_ctx_t ctx, nctx;
+    char tmp[256];
+    int rc, ok = 0;
+
+    if (read_whole_file(path, &buf, &buf_len, &orig) != 0)
+        return 0;   /* not present on this build -> nothing to do */
+    if (self_parse(&ctx, buf, buf_len) != 0) { ok = 0; goto out; }
+    if (ctx.sceh->key_revision != KEY_REVISION_DEBUG) { ok = 0; goto out; } /* already signed */
+
+    ctx.decrypted = 1;  /* debug module: section bodies are cleartext */
+    if ((rc = elf_extract(&ctx, &SM_BLK, &flat, &flat_len, &segs, &nseg)) != 0) {
+        ok = -900 + rc; goto out;
+    }
+    self_build_fix_elf_sdk(flat, flat_len);
+    if ((rc = self_build_std(flat, flat_len, &HEN_MODULE_CFG, ks_app,
+                             sce_rand_bytes, NULL, &SM_BLK,
+                             &sbuf, &sbuf_len)) != 0) {
+        ok = -920 + rc; goto out;
+    }
+    if ((rc = self_parse(&nctx, sbuf, sbuf_len)) != 0) { ok = -940 + rc; goto out; }
+    nctx.keys = (uint8_t *)nctx.metash +
+                nctx.metah->section_count * sizeof(metadata_section_header_t);
+    nctx.decrypted = 1;
+    if ((rc = self_encrypt(&nctx, ks_app)) != 0) { ok = -960 + rc; goto out; }
+
+    /* Replace in place. cellFsRename won't overwrite an existing destination
+     * (CELL_EEXIST), so unlink the original first. */
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    if ((rc = write_whole_file(tmp, sbuf, sbuf_len)) != 0) { ok = -980 + rc; goto out; }
+    cellFsUnlink(path);
+    if (cellFsRename(tmp, path) != CELL_FS_SUCCEEDED) { cellFsUnlink(tmp); ok = -985; goto out; }
+
+out:
+    free(segs);
+    sm_blk_free(NULL, flat);
+    sm_blk_free(NULL, sbuf);
+    if (buf) sys_memory_free((sys_addr_t)(uintptr_t)buf);
+    return ok;
+}
+
+/* Locate + re-sign the bundled libsmart.sprx (USRDIR is the dir holding
+ * EBOOT_ORIGINAL.BIN). Returns 0 if all present modules were handled. */
+static int hen_resign_bundled_modules(eboot_flow_args_t *args) {
+    self_keyset_t ks_app;
+    char usrdir[256];
+    int rc;
+
+    const char *slash = strrchr(args->original_path, '/');
+    if (!slash) return 0;
+    size_t dl = (size_t)(slash - args->original_path);
+    if (dl + 1 >= sizeof(usrdir)) return 0;
+    memcpy(usrdir, args->original_path, dl);
+    usrdir[dl] = 0;
+
+    if ((rc = key_load_aes_rev_type(args->keys_dir, HEN_ENCRYPT_KEY_REVISION,
+                                    "APP", &ks_app)) != 0)
+        return -300 + rc;
+    if (!ks_app.have_priv || !ks_app.curves_loaded) return -301;
+    if (sce_curves_load(ks_app.curves, sizeof(ks_app.curves)) != 0) return -302;
+
+    for (size_t i = 0; i < sizeof(HEN_MODULE_RELPATHS) /
+                           sizeof(HEN_MODULE_RELPATHS[0]); i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s/%s", usrdir, HEN_MODULE_RELPATHS[i]);
+        rc = hen_resign_module(path, &ks_app);
+        if (rc != 0) {
+            dbg_print_hex32("[hen] module resign rc", (uint32_t)rc);
+            return rc;
+        }
+    }
+    return 0;
+}
+
 static int hen_encode_and_write(eboot_flow_args_t *args, self_ctx_t *ctx,
                                 self_keyset_t *ks_enc) {
     static const blk_alloc_t SM_BLK = { sm_blk_alloc, sm_blk_free, NULL };
@@ -269,6 +374,15 @@ static int hen_encode_and_write(eboot_flow_args_t *args, self_ctx_t *ctx,
                 nctx.metah->section_count * sizeof(metadata_section_header_t);
     nctx.decrypted = 1;
     if ((rc = self_encrypt(&nctx, ks_enc)) != 0) { ok = -960 + rc; goto out; }
+
+    /* Release the EBOOT flat ELF before the module pass to cap peak memory
+     * (the module resign allocates its own multi-MB buffers). */
+    sm_blk_free(NULL, flat); flat = NULL;
+    free(xsegs); xsegs = NULL;
+
+    /* Re-sign bundled PRX modules (libsmart) before committing the EBOOT, so a
+     * module failure doesn't leave a swapped EBOOT that crashes at load. */
+    if ((rc = hen_resign_bundled_modules(args)) != 0) { ok = rc; goto out; }
 
     REPORT(args, EBOOT_PHASE_WRITING, 0);
     ok = write_and_swap(args, sbuf, sbuf_len);

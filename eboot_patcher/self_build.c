@@ -166,9 +166,10 @@ int self_build_std(const uint8_t *elf, size_t elf_len,
     uint64_t shoff   = ehdr->e_shoff;
     uint64_t shsize  = (uint64_t)ehdr->e_shnum * ehdr->e_shentsize;
     int have_shdrs   = (shoff != 0 && shsize != 0 && shoff + shsize <= elf_len);
+    int want_shdrs   = (cfg->add_shdrs && have_shdrs);
 
     const uint32_t si_cnt        = phnum;   /* section_info per phdr */
-    const uint32_t section_count = inc_cnt + (have_shdrs ? 1u : 0u);
+    const uint32_t section_count = inc_cnt + (want_shdrs ? 1u : 0u);
 
     /* Control info list: FLAGS (0x30) + DIGEST_40 (0x40) [+ NPDRM (0x90)]. */
     const uint32_t ci_flags_size  = sizeof(control_info_t) + sizeof(ci_data_flags_t);
@@ -181,8 +182,8 @@ int self_build_std(const uint8_t *elf, size_t elf_len,
 
     /* Keys table: each encrypted phdr section = 8 slots (0x80); the
      * non-encrypted SHDR section = 6 HMAC slots (0x60). */
-    const uint32_t key_count = inc_cnt * 8u + (have_shdrs ? 6u : 0u);
-    const uint32_t keys_len  = inc_cnt * 0x80u + (have_shdrs ? 0x60u : 0u);
+    const uint32_t key_count = inc_cnt * 8u + (want_shdrs ? 6u : 0u);
+    const uint32_t keys_len  = inc_cnt * 0x80u + (want_shdrs ? 0x60u : 0u);
 
     const uint32_t ehsize = (uint32_t)sizeof(elf64_ehdr_t);
     const uint32_t phsize = phnum * (uint32_t)sizeof(elf64_phdr_t);
@@ -215,7 +216,7 @@ int self_build_std(const uint8_t *elf, size_t elf_len,
         sec_src[k] = inc[k].elf_offset;
         sec_sz[k]  = inc[k].file_size;
     }
-    if (have_shdrs) {
+    if (want_shdrs) {
         sec_src[inc_cnt] = shoff;
         sec_sz[inc_cnt]  = shsize;
     }
@@ -252,7 +253,7 @@ int self_build_std(const uint8_t *elf, size_t elf_len,
     selfh->app_info_offset    = off_ai;
     selfh->elf_offset         = off_ehdr;
     selfh->phdr_offset        = off_phdr;
-    selfh->shdr_offset        = have_shdrs ? data_off[inc_cnt] : 0;
+    selfh->shdr_offset        = want_shdrs ? data_off[inc_cnt] : 0;
     selfh->section_info_offset= off_si;
     selfh->sce_version_offset = off_sv;
     selfh->control_info_offset= off_cis;
@@ -270,9 +271,16 @@ int self_build_std(const uint8_t *elf, size_t elf_len,
     /* --- ELF header + program headers (copied verbatim, already BE) --- */
     memcpy(buf + off_ehdr, elf, ehsize);
     memcpy(buf + off_phdr, elf + phoff, phsize);
-    /* e_shoff/e_shnum are kept as-is: the section headers are stored in the
-     * SHDR data section (selfh->shdr_offset) when have_shdrs. If the input ELF
-     * truly has no section headers, the ehdr already reports e_shnum == 0. */
+    /* When emitting the SHDR section, e_shoff/e_shnum stay valid (the headers
+     * live at selfh->shdr_offset). Otherwise clear them so a dangling e_shoff
+     * with no stored section headers can't make the loader reject the program. */
+    if (!want_shdrs) {
+        elf64_ehdr_t *out_ehdr = (elf64_ehdr_t *)(buf + off_ehdr);
+        out_ehdr->e_shoff     = 0;
+        out_ehdr->e_shnum     = 0;
+        out_ehdr->e_shentsize = 0;
+        out_ehdr->e_shstrndx  = 0;
+    }
 
     /* --- Section info (one per phdr) --- */
     section_info_t *si = (section_info_t *)(buf + off_si);
@@ -363,7 +371,7 @@ int self_build_std(const uint8_t *elf, size_t elf_len,
         m->hashed      = METADATA_SECTION_HASHED;
         m->compressed  = METADATA_SECTION_NOT_COMPRESSED;
 
-        if (have_shdrs && k == inc_cnt) {
+        if (want_shdrs && k == inc_cnt) {
             /* Trailing SHDR section: not encrypted, 6 HMAC slots only
              * (scetool sce_set_metash SHDR uses index = idx + 1). */
             m->type      = METADATA_SECTION_TYPE_SHDR;
