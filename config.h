@@ -1,6 +1,15 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+/* Compile-time signing target. 1 = retail "3.XX STD" (HEN CEX / DEX / CFW),
+ * 0 = debug 0x8000 (arcade GEX / DEX / CFW). Set per build via -DHEN_BUILD;
+ * the build script compiles the sprx once per flavor. Drives both the
+ * on-device EBOOT signing (eboot_flow target_hen) and the in-game updater's
+ * release-asset selection (network/version_check.c). Default 1. */
+#ifndef HEN_BUILD
+#define HEN_BUILD 1
+#endif
+
 #include "config/features.h"
 #include "config/identity.h"
 #include "config/paths.h"

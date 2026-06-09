@@ -15,6 +15,7 @@
 #include <sys/timer.h>
 
 #include "config/version.h"
+#include "config.h"
 #include "debug.h"
 #include "http_client.h"
 #include "kb_input.h"
@@ -133,13 +134,22 @@ static int extract_json_string_after(const unsigned char *body, size_t len,
     return 0;
 }
 
+/* The GitHub release ships firmware-specific assets (zucchini-gex.sprx /
+ * EBOOT-gex.BIN for arcade GEX, zucchini-hen.sprx / EBOOT-hen.BIN for retail
+ * CEX/HEN). They are NOT interchangeable — GEX rejects retail selfs (EPERM)
+ * and retail consoles reject debug selfs. Pick the flavor matching the same
+ * signing this install patches with (hen_signing). */
+static const char *update_flavor_token(void) {
+    return HEN_BUILD ? "hen" : "gex";
+}
+
 static int looks_like_sprx_asset(const char *s) {
-    return str_has(s, ".sprx") || str_has(s, "zucchini");
+    return str_has(s, ".sprx") && str_has(s, update_flavor_token());
 }
 
 static int looks_like_eboot_asset(const char *s) {
-    return str_has(s, "EBOOT.BIN") || str_has(s, "eboot.bin") ||
-           str_has(s, "EBOOT") || str_has(s, "eboot");
+    return (str_has(s, "EBOOT") || str_has(s, "eboot")) &&
+           str_has(s, update_flavor_token());
 }
 
 static int extract_asset_urls(const unsigned char *body, size_t len,

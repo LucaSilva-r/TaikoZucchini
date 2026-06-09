@@ -49,8 +49,13 @@ INCLUDES := -I$(CELL_SDK)/target/ppu/include \
             -I$(MBEDTLS_DIR)/library \
             -I$(QUIRC_DIR)/lib
 
+# Signing target baked into the sprx: 1 = retail STD (HEN), 0 = debug (GEX).
+# build_sprx.sh compiles the sprx once per flavor.
+HEN_BUILD ?= 1
+
 CFLAGS  := -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
            -mprx -fno-builtin -ffunction-sections -fdata-sections \
+           -DHEN_BUILD=$(HEN_BUILD) \
            $(INCLUDES)
 
 # -mprx + -zgenprx + -zgenstub tell the toolchain to emit the PRX-shape
@@ -266,4 +271,7 @@ clean:
 	$(MAKE) -C bootstrap_eboot clean
 	$(MAKE) -C ftp_eboot clean
 
-.PHONY: all bootstrap ftp-eboot clean install
+clean-prx:
+	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+
+.PHONY: all bootstrap ftp-eboot clean clean-prx install
