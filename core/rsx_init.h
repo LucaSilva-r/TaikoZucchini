@@ -19,4 +19,7 @@ void rsx_shutdown(void);
 int  rsx_get_back_buffer(void **addr, uint32_t *pitch,
                          uint32_t *w, uint32_t *h, uint32_t *bpp);
 
+int  rsx_get_back_buffer_info(void **addr, uint32_t *offset, uint32_t *pitch,
+                              uint32_t *w, uint32_t *h, uint32_t *bpp);
+
 #endif

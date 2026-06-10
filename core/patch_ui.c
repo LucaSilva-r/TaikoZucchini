@@ -34,6 +34,7 @@
 #define LOG_Y 657
 #define LOG_W 1680
 #define LOG_ROW_H 33
+#define PATCH_UI_FRAME_US (16 * 1000)
 
 static int g_ui_open;
 static int g_done;
@@ -237,7 +238,7 @@ static void render_thread(uint64_t arg) {
                 g_prog_current = 100;
         }
         render_frame();
-        sys_timer_usleep(100 * 1000);
+        sys_timer_usleep(PATCH_UI_FRAME_US);
     }
     sys_ppu_thread_exit(0);
 }
@@ -291,10 +292,10 @@ static void finish_common(int error, int rc, int manual) {
         g_prog_target = 100;
 
     int wait_ms = error ? 180000 : 3500;
-    for (int elapsed = 0; elapsed < wait_ms; elapsed += 100) {
+    for (int elapsed = 0; elapsed < wait_ms; elapsed += 16) {
         if (!error && g_prog_current < 100)
             g_prog_current++;
-        sys_timer_usleep(100 * 1000);
+        sys_timer_usleep(PATCH_UI_FRAME_US);
     }
 
     g_ui_open = 0;

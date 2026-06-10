@@ -159,9 +159,15 @@ void rsx_shutdown(void) {
 
 int rsx_get_back_buffer(void **addr, uint32_t *pitch,
                         uint32_t *w, uint32_t *h, uint32_t *bpp) {
+    return rsx_get_back_buffer_info(addr, NULL, pitch, w, h, bpp);
+}
+
+int rsx_get_back_buffer_info(void **addr, uint32_t *offset, uint32_t *pitch,
+                             uint32_t *w, uint32_t *h, uint32_t *bpp) {
     if (!g_inited || !g_local_base) return 0;
     uint8_t back = g_cur_fb ^ 1;
     if (addr)  *addr  = (uint8_t *)g_local_base + g_fb_off[back];
+    if (offset) *offset = g_fb_off[back];
     if (pitch) *pitch = g_fb_pitch;
     if (w)     *w     = g_fb_w;
     if (h)     *h     = g_fb_h;
