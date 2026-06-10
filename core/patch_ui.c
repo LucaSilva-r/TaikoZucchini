@@ -7,6 +7,8 @@
 
 #include <sys/timer.h>
 #include <sys/ppu_thread.h>
+#include <sys/process.h>
+#include <sysutil/sysutil_common.h>
 
 #include "debug.h"
 #include "diag_log.h"
@@ -36,7 +38,8 @@
 #define LOG_ROW_H 33
 #define PATCH_UI_FRAME_US (16 * 1000)
 
-static int g_ui_open;
+static volatile int g_ui_open;
+static int g_render_started;
 static int g_done;
 static int g_error;
 static int g_final_rc;
@@ -44,6 +47,16 @@ static int g_prog_current;
 static int g_prog_target;
 static eboot_phase_t g_phase;
 static sys_ppu_thread_t g_render_tid;
+static volatile int g_exit_requested;
+static int g_sysutil_callback_registered;
+
+static void patch_ui_sysutil_callback(uint64_t status, uint64_t param,
+                                      void *userdata) {
+    (void)param;
+    (void)userdata;
+    if (status == CELL_SYSUTIL_REQUEST_EXITGAME)
+        g_exit_requested = 1;
+}
 
 static int phase_weight(eboot_phase_t p) {
     switch (p) {
@@ -117,7 +130,7 @@ static void draw_logs(void) {
     char lines[TAIKO_DIAG_LOG_LINES][TAIKO_DIAG_LOG_LINE_CAP];
     int n = diag_log_snapshot(lines, TAIKO_DIAG_LOG_LINES);
     int rows = g_error ? 12 : LOG_ROWS;
-    int y = g_error ? 540 : LOG_Y;
+    int y = g_error ? 588 : LOG_Y;
     int w = g_error ? 840 : LOG_W;
     int first = n > rows ? n - rows : 0;
 
@@ -207,6 +220,8 @@ static void render_frame(void) {
         menu_draw_text(&menu_font_30_font, 120, 384, COLOR_ERR, rc);
         menu_draw_text(&menu_font_30_font, 120, 432, COLOR_TEXT,
                        "The log tail is embedded in the QR code.");
+        menu_draw_text(&menu_font_30_font, 120, 480, COLOR_DIM,
+                       "You can exit to XMB after photographing the QR code.");
         draw_qr_error();
     } else if (g_done) {
         menu_draw_text(&menu_font_30_font, 120, 384, COLOR_BAR,
@@ -249,6 +264,7 @@ void patch_ui_open(void) {
     g_prog_current = 0;
     g_prog_target = 0;
     g_phase = EBOOT_PHASE_INIT;
+    g_exit_requested = 0;
     g_ui_open = 1;
 
     int rc = sys_ppu_thread_create(&g_render_tid, render_thread, 0,
@@ -258,6 +274,7 @@ void patch_ui_open(void) {
         g_ui_open = 0;
         return;
     }
+    g_render_started = 1;
 }
 
 void patch_ui_phase(eboot_phase_t phase, int rc) {
@@ -283,16 +300,16 @@ static void finish_common(int error, int rc, int manual) {
     if (!error)
         g_prog_target = 100;
 
-    int wait_ms = error ? 180000 : 3500;
-    for (int elapsed = 0; elapsed < wait_ms; elapsed += 16) {
-        if (!error && g_prog_current < 100)
+    if (error)
+        return;
+
+    for (int elapsed = 0; elapsed < 3500; elapsed += 16) {
+        if (g_prog_current < 100)
             g_prog_current++;
         sys_timer_usleep(PATCH_UI_FRAME_US);
     }
 
-    g_ui_open = 0;
-    uint64_t st = 0;
-    sys_ppu_thread_join(g_render_tid, &st);
+    patch_ui_close();
 }
 
 void patch_ui_finish_ok(void) {
@@ -305,4 +322,46 @@ void patch_ui_finish_ok_manual(void) {
 
 void patch_ui_finish_error(int rc) {
     finish_common(1, rc, 1);
+    patch_ui_wait_for_exit_request();
+}
+
+void patch_ui_wait_for_exit_request(void) {
+    if (!g_ui_open)
+        return;
+
+    g_exit_requested = 0;
+    int cb_rc = cellSysutilRegisterCallback(0, patch_ui_sysutil_callback, NULL);
+    if (cb_rc == 0) {
+        g_sysutil_callback_registered = 1;
+    } else {
+        dbg_print_hex32("[ui] sysutil callback register rc", (uint32_t)cb_rc);
+    }
+
+    while (g_ui_open) {
+        cellSysutilCheckCallback();
+        if (g_exit_requested) {
+            dbg_print("[ui] exit-game request received on patch error screen\n");
+            patch_ui_close();
+            sys_process_exit(0);
+        }
+        sys_timer_usleep(PATCH_UI_FRAME_US);
+    }
+}
+
+void patch_ui_close(void) {
+    if (!g_ui_open && !g_render_started)
+        return;
+
+    if (g_sysutil_callback_registered) {
+        cellSysutilUnregisterCallback(0);
+        g_sysutil_callback_registered = 0;
+    }
+
+    g_ui_open = 0;
+    if (g_render_started) {
+        uint64_t st = 0;
+        sys_ppu_thread_join(g_render_tid, &st);
+        g_render_started = 0;
+    }
+    rsx_shutdown();
 }

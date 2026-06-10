@@ -16,5 +16,7 @@ void patch_ui_finish_ok(void);
  * via exitspawn2 — see the runtime repatch path in main.c). */
 void patch_ui_finish_ok_manual(void);
 void patch_ui_finish_error(int rc);
+void patch_ui_wait_for_exit_request(void);
+void patch_ui_close(void);
 
 #endif

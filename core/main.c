@@ -468,6 +468,8 @@ static int eboot_already_patched(void) {
     return 0;
 }
 
+/* Returns 1 if repatch completed, -1 if the repatch flow ran but failed,
+ * and 0 if no repatch was needed or possible. */
 static int maybe_repatch_from_original(void) {
     unsigned char patcher_hash[20];
     if (hash_current_patcher(patcher_hash) != 0)
@@ -504,12 +506,12 @@ static int maybe_repatch_from_original(void) {
 
     patch_ui_open();
     if (maybe_force_patch_fail_for_qr_test("runtime-repatch"))
-        return 0;
+        return -1;
     int rc = eboot_flow_run(&a);
     dbg_print_hex32("[eboot] repatch flow rc", (uint32_t)rc);
     if (rc != 0) {
         patch_ui_finish_error(rc);
-        return 0;
+        return -1;
     }
 
     remember_patch_success(&a, patcher_hash, 1);
@@ -659,7 +661,8 @@ int taiko_start(unsigned int args, void *argp) {
     menu_maybe_open();
     dbg_print("[patch] DATA00000 runtime hook marker\n");
     apply_runtime_data00000_patch();
-    if (maybe_repatch_from_original()) {
+    int repatch_rc = maybe_repatch_from_original();
+    if (repatch_rc > 0) {
         /* menu_action_reboot_game now exits to XMB (exitspawn2 crashes the
          * RPCS3 respawn from the full game EBOOT — see menu_actions.c). The
          * freshly repatched EBOOT.BIN applies on the next manual launch. */
@@ -669,6 +672,8 @@ int taiko_start(unsigned int args, void *argp) {
         sys_process_exit(0);
         return SYS_PRX_RESIDENT;
     }
+    if (repatch_rc < 0)
+        return SYS_PRX_RESIDENT;
     data00000_redirect_install();
     http_hooks_install();
     /* Raw HTTP does not go through cellHttp. DNS marks those EBOOT-side
@@ -720,6 +725,7 @@ int taiko_start(unsigned int args, void *argp) {
 }
 
 int taiko_stop(void) {
+    patch_ui_close();
     if (g_cfg.online_diag)
         online_diag_stop();
     return SYS_PRX_STOP_OK;
