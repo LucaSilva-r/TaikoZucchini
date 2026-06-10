@@ -109,6 +109,8 @@ def bake(size_px: int, out_name: str, sym_prefix: str):
 def main():
     bake(20, "menu_font_20.h", "menu_font_20")
     bake(28, "menu_font_28.h", "menu_font_28")
+    bake(30, "menu_font_30.h", "menu_font_30")
+    bake(42, "menu_font_42.h", "menu_font_42")
 
 
 if __name__ == "__main__":

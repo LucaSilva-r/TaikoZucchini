@@ -235,31 +235,78 @@ static int write_whole_file(const char *path, const unsigned char *buf,
     uint64_t wrote = 0;
     int rc;
 
-    if (cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
-                   &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+    rc = cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                    &fd, NULL, 0);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print("[version] write open failed: ");
+        dbg_print(path);
+        dbg_print("\n");
+        dbg_print_hex32("[version] cellFsOpen rc", (uint32_t)rc);
         return -1;
+    }
     rc = cellFsWrite(fd, buf, len, &wrote);
     cellFsClose(fd);
-    return (rc == CELL_FS_SUCCEEDED && wrote == len) ? 0 : -2;
+    if (rc != CELL_FS_SUCCEEDED || wrote != len) {
+        dbg_print("[version] write failed: ");
+        dbg_print(path);
+        dbg_print("\n");
+        dbg_print_hex32("[version] cellFsWrite rc", (uint32_t)rc);
+        dbg_print_hex32("[version] write wanted lo", (uint32_t)len);
+        dbg_print_hex32("[version] write got lo", (uint32_t)wrote);
+        return -2;
+    }
+    return 0;
 }
 
 static int replace_file_with_buffer(const char *path, const char *tmp_path,
                                     const unsigned char *buf, size_t len) {
+    char backup_path[256];
     int rc;
 
     if (!path || !tmp_path || !buf || len == 0)
         return -1;
+    if (snprintf(backup_path, sizeof(backup_path), "%s.bak", tmp_path) >=
+        (int)sizeof(backup_path))
+        return -1;
     cellFsUnlink(tmp_path);
+    cellFsUnlink(backup_path);
     rc = write_whole_file(tmp_path, buf, len);
     if (rc != 0) {
         cellFsUnlink(tmp_path);
         return -2;
     }
-    cellFsUnlink(path);
-    if (cellFsRename(tmp_path, path) != CELL_FS_SUCCEEDED) {
+    rc = cellFsRename(path, backup_path);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print("[version] backup rename failed: ");
+        dbg_print(path);
+        dbg_print(" -> ");
+        dbg_print(backup_path);
+        dbg_print("\n");
+        dbg_print_hex32("[version] cellFsRename rc", (uint32_t)rc);
         cellFsUnlink(tmp_path);
         return -3;
     }
+    rc = cellFsRename(tmp_path, path);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print("[version] rename failed: ");
+        dbg_print(tmp_path);
+        dbg_print(" -> ");
+        dbg_print(path);
+        dbg_print("\n");
+        dbg_print_hex32("[version] cellFsRename rc", (uint32_t)rc);
+        rc = cellFsRename(backup_path, path);
+        if (rc != CELL_FS_SUCCEEDED) {
+            dbg_print("[version] restore failed: ");
+            dbg_print(backup_path);
+            dbg_print(" -> ");
+            dbg_print(path);
+            dbg_print("\n");
+            dbg_print_hex32("[version] cellFsRename rc", (uint32_t)rc);
+        }
+        cellFsUnlink(tmp_path);
+        return -4;
+    }
+    cellFsUnlink(backup_path);
     return 0;
 }
 

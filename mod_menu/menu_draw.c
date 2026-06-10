@@ -12,8 +12,8 @@ static uint32_t g_fb_w   = 0;
 static uint32_t g_fb_h   = 0;
 static uint32_t g_fb_bpp = 4;
 
-#define MENU_VIRTUAL_W 1280
-#define MENU_VIRTUAL_H 720
+#define MENU_VIRTUAL_W 1920
+#define MENU_VIRTUAL_H 1080
 
 static uint32_t g_scale_fp = 1u << 16;
 static int g_origin_x = 0;

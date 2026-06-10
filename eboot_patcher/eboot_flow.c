@@ -146,13 +146,28 @@ static size_t compute_eboot_output_size(const self_ctx_t *ctx,
 
 static int write_whole_file(const char *path, const uint8_t *buf, size_t len) {
     int fd = -1;
-    if (cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
-                   &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+    int rc = cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                        &fd, NULL, 0);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print("[eboot] write open failed: ");
+        dbg_print(path);
+        dbg_print("\n");
+        dbg_print_hex32("[eboot] cellFsOpen rc", (uint32_t)rc);
         return -1;
+    }
     uint64_t wrote = 0;
-    int rc = cellFsWrite(fd, buf, len, &wrote);
+    rc = cellFsWrite(fd, buf, len, &wrote);
     cellFsClose(fd);
-    return (rc == CELL_FS_SUCCEEDED && wrote == len) ? 0 : -2;
+    if (rc != CELL_FS_SUCCEEDED || wrote != len) {
+        dbg_print("[eboot] write failed: ");
+        dbg_print(path);
+        dbg_print("\n");
+        dbg_print_hex32("[eboot] cellFsWrite rc", (uint32_t)rc);
+        dbg_print_hex32("[eboot] write wanted lo", (uint32_t)len);
+        dbg_print_hex32("[eboot] write got lo", (uint32_t)wrote);
+        return -2;
+    }
+    return 0;
 }
 
 static int make_sibling_path(char *out, size_t out_len,
@@ -236,13 +251,45 @@ static int write_and_swap(eboot_flow_args_t *args, const uint8_t *buf,
 
     REPORT(args, EBOOT_PHASE_SWAPPING, 0);
     snprintf(tmp, sizeof(tmp), "%s.bootstrap", args->eboot_path);
-    cellFsUnlink(tmp);
-    if (cellFsRename(args->bootstrap_path, tmp) != CELL_FS_SUCCEEDED)
+    rc = cellFsUnlink(tmp);
+    if (rc != CELL_FS_SUCCEEDED && rc != CELL_FS_ENOENT) {
+        dbg_print("[eboot] unlink old bootstrap failed: ");
+        dbg_print(tmp);
+        dbg_print("\n");
+        dbg_print_hex32("[eboot] cellFsUnlink rc", (uint32_t)rc);
+    }
+    rc = cellFsRename(args->bootstrap_path, tmp);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print("[eboot] rename bootstrap failed: ");
+        dbg_print(args->bootstrap_path);
+        dbg_print(" -> ");
+        dbg_print(tmp);
+        dbg_print("\n");
+        dbg_print_hex32("[eboot] cellFsRename rc", (uint32_t)rc);
         return -799;
+    }
 
     snprintf(tmp, sizeof(tmp), "%s.new", args->eboot_path);
-    if (cellFsRename(tmp, args->eboot_path) != CELL_FS_SUCCEEDED)
+    rc = cellFsRename(tmp, args->eboot_path);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print("[eboot] rename patched EBOOT failed: ");
+        dbg_print(tmp);
+        dbg_print(" -> ");
+        dbg_print(args->eboot_path);
+        dbg_print("\n");
+        dbg_print_hex32("[eboot] cellFsRename rc", (uint32_t)rc);
+        snprintf(tmp, sizeof(tmp), "%s.bootstrap", args->eboot_path);
+        rc = cellFsRename(tmp, args->bootstrap_path);
+        if (rc != CELL_FS_SUCCEEDED) {
+            dbg_print("[eboot] restore bootstrap failed: ");
+            dbg_print(tmp);
+            dbg_print(" -> ");
+            dbg_print(args->bootstrap_path);
+            dbg_print("\n");
+            dbg_print_hex32("[eboot] cellFsRename rc", (uint32_t)rc);
+        }
         return -800;
+    }
     return 0;
 }
 

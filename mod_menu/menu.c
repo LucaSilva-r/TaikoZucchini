@@ -17,8 +17,8 @@
 #include "menu_draw.h"
 #include "menu_pad.h"
 #include "menu_actions.h"
-#include "menu_font_20.h"
-#include "menu_font_28.h"
+#include "menu_font_30.h"
+#include "menu_font_42.h"
 #include "menu_osk.h"
 #include "ftp_server.h"
 #include "storage/chassisinfo_schema.h"
@@ -43,10 +43,10 @@
 #define ENTRY_HOLD_FRAMES  90    /* pad combo hold: ~1.5 s @ 60 Hz */
 #define ENTRY_WINDOW_FRAMES 120  /* total entry window: ~2 s — long enough
                                     to spam F2 a few times in a row */
-#define LIST_X             80
-#define LIST_Y             100
-#define LIST_W             1120
-#define ROW_H              30
+#define LIST_X             120
+#define LIST_Y             150
+#define LIST_W             1680
+#define ROW_H              45
 #define MAX_VISIBLE_ROWS   16
 
 /* Toggle field IDs — one per editable bool in g_cfg. */
@@ -481,17 +481,17 @@ static void draw_frame(void) {
     menu_draw_clear(COLOR_BG);
 
     /* Title */
-    menu_draw_text(&menu_font_28_font, 80, 30, COLOR_TITLE,
+    menu_draw_text(&menu_font_42_font, 120, 45, COLOR_TITLE,
                    "Taiko Zucchini - Mod Config");
     {
         char ftp_line[128];
         build_ftp_line(ftp_line, sizeof ftp_line);
-        int tw = menu_text_width(&menu_font_20_font, ftp_line);
+        int tw = menu_text_width(&menu_font_30_font, ftp_line);
         uint32_t c = ftp_server_is_running() ? COLOR_ON : COLOR_DIM;
-        menu_draw_text(&menu_font_20_font,
-                       LIST_X + LIST_W - tw, 40, c, ftp_line);
+        menu_draw_text(&menu_font_30_font,
+                       LIST_X + LIST_W - tw, 60, c, ftp_line);
     }
-    menu_draw_rect(80, 78, 1120, 2, COLOR_BORDER);
+    menu_draw_rect(120, 117, 1680, 3, COLOR_BORDER);
 
     /* List (filtered view) */
     if (!g_view_ready) rebuild_view();
@@ -505,40 +505,40 @@ static void draw_frame(void) {
         int ry = LIST_Y + row * ROW_H;
 
         if (it->kind == ITEM_SECTION) {
-            menu_draw_text(&menu_font_20_font, rx, ry + 4,
+            menu_draw_text(&menu_font_30_font, rx, ry + 6,
                            COLOR_SECTION, it->label);
-            menu_draw_rect(rx + 200, ry + ROW_H / 2 + 2,
-                           LIST_W - 220, 1, COLOR_BORDER);
+            menu_draw_rect(rx + 300, ry + ROW_H / 2 + 3,
+                           LIST_W - 330, 2, COLOR_BORDER);
             continue;
         }
 
         int selected = (idx == g_sel);
         if (selected) {
-            menu_draw_rect(rx - 8, ry, LIST_W + 16, ROW_H, COLOR_SEL_BG);
+            menu_draw_rect(rx - 12, ry, LIST_W + 24, ROW_H, COLOR_SEL_BG);
         }
         uint32_t label_color = selected ? COLOR_SEL_TEXT : COLOR_TEXT;
-        menu_draw_text(&menu_font_20_font, rx, ry + 4, label_color, it->label);
+        menu_draw_text(&menu_font_30_font, rx, ry + 6, label_color, it->label);
 
         if (it->kind == ITEM_TOGGLE) {
             int on = field_get(it->field);
             const char *s = on ? "ON" : "OFF";
             uint32_t c = on ? COLOR_ON : COLOR_OFF;
-            int tw = menu_text_width(&menu_font_20_font, s);
-            menu_draw_text(&menu_font_20_font,
-                           rx + LIST_W - tw - 16, ry + 4, c, s);
+            int tw = menu_text_width(&menu_font_30_font, s);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, c, s);
         } else if (it->kind == ITEM_ACTION) {
             const char *s = ">";
-            int tw = menu_text_width(&menu_font_20_font, s);
-            menu_draw_text(&menu_font_20_font,
-                           rx + LIST_W - tw - 16, ry + 4, COLOR_DIM, s);
+            int tw = menu_text_width(&menu_font_30_font, s);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, COLOR_DIM, s);
         } else if (it->kind == ITEM_HOST_EDIT) {
             const char *s = g_cfg.online_redirect_host[0]
                               ? g_cfg.online_redirect_host
                               : "(unset)";
             uint32_t c = g_cfg.online_redirect_host[0] ? COLOR_TEXT : COLOR_DIM;
-            int tw = menu_text_width(&menu_font_20_font, s);
-            menu_draw_text(&menu_font_20_font,
-                           rx + LIST_W - tw - 16, ry + 4, c, s);
+            int tw = menu_text_width(&menu_font_30_font, s);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, c, s);
         } else if (it->kind == ITEM_PORT_EDIT) {
             /* snprintf-free uint16 -> decimal (snprintf pulls TLS, banned in PRX). */
             char buf[8];
@@ -551,37 +551,37 @@ static void draw_frame(void) {
                 while (t > 0) buf[n++] = tmp[--t];
             }
             buf[n] = 0;
-            int tw = menu_text_width(&menu_font_20_font, buf);
-            menu_draw_text(&menu_font_20_font,
-                           rx + LIST_W - tw - 16, ry + 4, COLOR_TEXT, buf);
+            int tw = menu_text_width(&menu_font_30_font, buf);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, buf);
         }
     }
 
     /* Scroll indicator (right side dashes). */
     if (g_view_count > MAX_VISIBLE_ROWS) {
         if (g_scroll > 0)
-            menu_draw_text(&menu_font_20_font, LIST_X + LIST_W + 24,
+            menu_draw_text(&menu_font_30_font, LIST_X + LIST_W + 36,
                            LIST_Y, COLOR_DIM, "^");
         if (g_scroll + MAX_VISIBLE_ROWS < g_view_count)
-            menu_draw_text(&menu_font_20_font, LIST_X + LIST_W + 24,
+            menu_draw_text(&menu_font_30_font, LIST_X + LIST_W + 36,
                            LIST_Y + (MAX_VISIBLE_ROWS - 1) * ROW_H,
                            COLOR_DIM, "v");
     }
 
     /* Footer */
-    menu_draw_rect(80, 600, 1120, 2, COLOR_BORDER);
+    menu_draw_rect(120, 900, 1680, 3, COLOR_BORDER);
 
     {
         const char *desc = g_items[g_sel].desc;
         if (!desc || !desc[0]) desc = "Select an option to see what it changes.";
-        menu_draw_text(&menu_font_20_font, 80, 612, COLOR_TEXT, desc);
+        menu_draw_text(&menu_font_30_font, 120, 918, COLOR_TEXT, desc);
     }
 
-    menu_draw_text(&menu_font_20_font, 80, 644, COLOR_DIM,
+    menu_draw_text(&menu_font_30_font, 120, 966, COLOR_DIM,
                    "DPAD / ARROWS: nav   CROSS / ENTER: toggle or run   "
                    "CIRCLE / ESC: discard & reboot   START / F10: save & reboot");
     if (g_status) {
-        menu_draw_text(&menu_font_20_font, 80, 676, COLOR_TITLE, g_status);
+        menu_draw_text(&menu_font_30_font, 120, 1014, COLOR_TITLE, g_status);
     }
 }
 
@@ -610,8 +610,48 @@ static void run_action(action_id_t a) {
     }
 }
 
+typedef struct {
+    uint32_t dir;
+    int frames;
+} scroll_repeat_t;
+
+#define SCROLL_REPEAT_DELAY_FRAMES     16
+#define SCROLL_REPEAT_INTERVAL_FRAMES   3
+
+static uint32_t scroll_repeat_tick(scroll_repeat_t *r, uint32_t edge) {
+    uint32_t edge_dir = edge & (MENU_BTN_UP | MENU_BTN_DOWN);
+    uint32_t held_dir = menu_pad_held() & (MENU_BTN_UP | MENU_BTN_DOWN);
+
+    if (edge_dir) {
+        r->dir = (edge_dir & MENU_BTN_UP) ? MENU_BTN_UP : MENU_BTN_DOWN;
+        r->frames = 0;
+        return 0;
+    }
+
+    if (held_dir != MENU_BTN_UP && held_dir != MENU_BTN_DOWN) {
+        r->dir = 0;
+        r->frames = 0;
+        return 0;
+    }
+
+    if (held_dir != r->dir) {
+        r->dir = held_dir;
+        r->frames = 0;
+        return 0;
+    }
+
+    r->frames++;
+    if (r->frames < SCROLL_REPEAT_DELAY_FRAMES)
+        return 0;
+    if ((r->frames - SCROLL_REPEAT_DELAY_FRAMES) %
+        SCROLL_REPEAT_INTERVAL_FRAMES)
+        return 0;
+    return r->dir;
+}
+
 static void menu_loop(void) {
     g_status = NULL;
+    scroll_repeat_t repeat = { 0, 0 };
 
     /* Snapshot pre-menu state. CIRCLE exits without saving and must not
      * leak mutations into the boot flow, since the bootstrap path calls
@@ -631,12 +671,14 @@ static void menu_loop(void) {
 
     for (;;) {
         uint32_t edge = menu_pad_pressed();
+        uint32_t nav = (edge & (MENU_BTN_UP | MENU_BTN_DOWN)) |
+                       scroll_repeat_tick(&repeat, edge);
 
-        if (edge & MENU_BTN_UP) {
+        if (nav & MENU_BTN_UP) {
             g_sel = next_selectable(g_sel, -1);
             ensure_visible();
         }
-        if (edge & MENU_BTN_DOWN) {
+        if (nav & MENU_BTN_DOWN) {
             g_sel = next_selectable(g_sel, 1);
             ensure_visible();
         }
@@ -1157,6 +1199,7 @@ static void menu_ingame_run(void) {
     /* F5 is held right now (it just fired the open edge). Treat it as
      * already-high so the close detector waits for a release first. */
     int f5_prev = 1;
+    scroll_repeat_t repeat = { 0, 0 };
 
     for (;;) {
         ig_kb_pump();   /* keep keyboard fresh while the menu is open */
@@ -1165,10 +1208,12 @@ static void menu_ingame_run(void) {
         f5_prev = f5;
 
         uint32_t edge = menu_pad_pressed();
+        uint32_t nav = (edge & (MENU_BTN_UP | MENU_BTN_DOWN)) |
+                       scroll_repeat_tick(&repeat, edge);
         int close = 0;
 
-        if (edge & MENU_BTN_UP)   { g_ig_sel = ig_move(g_ig_sel, -1); ig_ensure_visible(); }
-        if (edge & MENU_BTN_DOWN) { g_ig_sel = ig_move(g_ig_sel,  1); ig_ensure_visible(); }
+        if (nav & MENU_BTN_UP)   { g_ig_sel = ig_move(g_ig_sel, -1); ig_ensure_visible(); }
+        if (nav & MENU_BTN_DOWN) { g_ig_sel = ig_move(g_ig_sel,  1); ig_ensure_visible(); }
 
         if (edge & (MENU_BTN_CROSS | MENU_BTN_LEFT | MENU_BTN_RIGHT))
             ig_activate(g_ig_rows[g_ig_sel], edge, &close);

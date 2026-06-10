@@ -2,33 +2,48 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
+#include <stdio.h>
 
-#include <cell/sysmodule.h>
 #include <sys/timer.h>
 #include <sys/ppu_thread.h>
-#include <sysutil/sysutil_common.h>
-#include <sysutil/sysutil_msgdialog.h>
 
 #include "debug.h"
+#include "diag_log.h"
+#include "qr_encode.h"
 #include "rsx_init.h"
+#include "menu_draw.h"
+#include "menu_font_30.h"
+#include "menu_font_42.h"
 
-static int g_ui_open = 0;
+#define COLOR_BG        MENU_RGB(0x08, 0x0a, 0x0d)
+#define COLOR_PANEL     MENU_RGB(0x13, 0x18, 0x1d)
+#define COLOR_PANEL2    MENU_RGB(0x1b, 0x22, 0x28)
+#define COLOR_BORDER    MENU_RGB(0x47, 0x55, 0x60)
+#define COLOR_TITLE     MENU_RGB(0xff, 0xb0, 0x30)
+#define COLOR_TEXT      MENU_RGB(0xe6, 0xea, 0xee)
+#define COLOR_DIM       MENU_RGB(0x8a, 0x94, 0x9d)
+#define COLOR_BAR_BG    MENU_RGB(0x29, 0x31, 0x38)
+#define COLOR_BAR       MENU_RGB(0x44, 0xc2, 0x7b)
+#define COLOR_ERR       MENU_RGB(0xff, 0x66, 0x5c)
+#define COLOR_QR_WHITE  MENU_RGB(0xff, 0xff, 0xff)
+#define COLOR_QR_BLACK  MENU_RGB(0x00, 0x00, 0x00)
 
-/* Progress smoother: msgDialog only exposes ProgressBarInc with an
- * integer delta, so we keep our own 0..100 counter and tick toward a
- * per-phase target on a background thread. Without this, the bar
- * jumps in chunks at phase boundaries (10%, 50%, 90%...) and stalls
- * during heavy phases. */
-static volatile int g_prog_current = 0;
-static volatile int g_prog_target  = 0;
-static volatile int g_ticker_run   = 0;
-static sys_ppu_thread_t g_ticker_tid = 0;
+#define LOG_ROWS 10
+#define LOG_X 120
+#define LOG_Y 657
+#define LOG_W 1680
+#define LOG_ROW_H 33
 
-static void sysutil_callback(uint64_t status, uint64_t param, void *userdata) {
-    (void)status; (void)param; (void)userdata;
-}
+static int g_ui_open;
+static int g_done;
+static int g_error;
+static int g_final_rc;
+static int g_prog_current;
+static int g_prog_target;
+static eboot_phase_t g_phase;
+static sys_ppu_thread_t g_render_tid;
 
-/* Phase weights (sum to 100). Tweak if any phase ends up disproportionate. */
 static int phase_weight(eboot_phase_t p) {
     switch (p) {
         case EBOOT_PHASE_INIT:       return 0;
@@ -46,155 +61,255 @@ static int phase_weight(eboot_phase_t p) {
 
 static const char *phase_label(eboot_phase_t p) {
     switch (p) {
-        case EBOOT_PHASE_INIT:       return "Preparing";
+        case EBOOT_PHASE_INIT:       return "Preparing patch flow";
         case EBOOT_PHASE_READING:    return "Reading EBOOT_ORIGINAL.BIN";
-        case EBOOT_PHASE_DECRYPTING: return "Decrypting";
-        case EBOOT_PHASE_PATCHING:   return "Applying patches";
-        case EBOOT_PHASE_ENCRYPTING: return "Re-encrypting";
+        case EBOOT_PHASE_DECRYPTING: return "Decrypting original EBOOT";
+        case EBOOT_PHASE_PATCHING:   return "Applying game patches";
+        case EBOOT_PHASE_ENCRYPTING: return "Signing and encrypting output";
         case EBOOT_PHASE_WRITING:    return "Writing patched EBOOT.BIN";
-        case EBOOT_PHASE_SWAPPING:   return "Finalizing";
-        case EBOOT_PHASE_DONE:       return "Done";
-        case EBOOT_PHASE_ERROR:      return "Error";
+        case EBOOT_PHASE_SWAPPING:   return "Finalizing file swap";
+        case EBOOT_PHASE_DONE:       return "Patch complete";
+        case EBOOT_PHASE_ERROR:      return "Patch failed";
     }
-    return "...";
+    return "Working";
 }
 
-/* Drain sysutil callbacks + present a frame. The dialog is composited
- * onto our display buffer by the system on the sysutil callback queue;
- * without the flip + pump loop, the screen never updates. */
-static void pump(int ms) {
-    for (int i = 0; i < ms / 16 + 1; i++) {
-        cellSysutilCheckCallback();
-        rsx_present();
-        sys_timer_usleep(16 * 1000);
-    }
-}
-
-/* Tick the progress bar one step closer to the current phase target.
- * Runs every ~150 ms while the dialog is up. msgDialogProgressBarInc
- * takes a *delta*, not an absolute, so we track g_prog_current locally
- * and only emit deltas that move toward g_prog_target. */
-static void ticker_entry(uint64_t arg) {
-    (void)arg;
-    while (g_ticker_run) {
-        int cur = g_prog_current;
-        int tgt = g_prog_target;
-        if (cur < tgt && cur < 100) {
-            int step = (tgt - cur > 4) ? 2 : 1;
-            cellMsgDialogProgressBarInc(
-                CELL_MSGDIALOG_PROGRESSBAR_INDEX_SINGLE, (uint32_t)step);
-            g_prog_current = cur + step;
+static void draw_text_fit(const menu_font_t *font, int x, int y,
+                          int max_w, uint32_t color, const char *s) {
+    char buf[TAIKO_DIAG_LOG_LINE_CAP];
+    int n = 0;
+    if (!s)
+        s = "";
+    while (s[n] && n < (int)sizeof(buf) - 1) {
+        buf[n] = s[n];
+        buf[n + 1] = 0;
+        if (menu_text_width(font, buf) > max_w) {
+            buf[n] = 0;
+            break;
         }
-        sys_timer_usleep(150 * 1000);
+        n++;
+    }
+    menu_draw_text(font, x, y, color, buf);
+}
+
+static void draw_progress_bar(void) {
+    int x = 120;
+    int y = 294;
+    int w = 1680;
+    int h = 51;
+    int fill = (w - 8) * g_prog_current / 100;
+
+    menu_draw_rect(x, y, w, h, COLOR_BAR_BG);
+    menu_draw_rect_outline(x, y, w, h, COLOR_BORDER);
+    if (fill > 0)
+        menu_draw_rect(x + 4, y + 4, fill, h - 8, g_error ? COLOR_ERR : COLOR_BAR);
+
+    char pct[16];
+    snprintf(pct, sizeof(pct), "%d%%", g_prog_current);
+    int tw = menu_text_width(&menu_font_30_font, pct);
+    menu_draw_text(&menu_font_30_font, x + w - tw, y - 45, COLOR_DIM, pct);
+}
+
+static void draw_logs(void) {
+    char lines[TAIKO_DIAG_LOG_LINES][TAIKO_DIAG_LOG_LINE_CAP];
+    int n = diag_log_snapshot(lines, TAIKO_DIAG_LOG_LINES);
+    int rows = g_error ? 12 : LOG_ROWS;
+    int y = g_error ? 540 : LOG_Y;
+    int w = g_error ? 840 : LOG_W;
+    int first = n > rows ? n - rows : 0;
+
+    menu_draw_text(&menu_font_30_font, LOG_X, y - 48, COLOR_TITLE,
+                   "Patch log");
+    menu_draw_rect(LOG_X, y - 8, w, rows * LOG_ROW_H + 24, COLOR_PANEL);
+    menu_draw_rect_outline(LOG_X, y - 8, w, rows * LOG_ROW_H + 24,
+                           COLOR_BORDER);
+
+    for (int i = 0; i < rows; i++) {
+        int src = first + i;
+        if (src >= n)
+            break;
+        uint32_t color = COLOR_TEXT;
+        if (strstr(lines[src], "failed") || strstr(lines[src], "FAILED") ||
+            strstr(lines[src], "error") || strstr(lines[src], "Error"))
+            color = COLOR_ERR;
+        draw_text_fit(&menu_font_30_font, LOG_X + 27, y + i * LOG_ROW_H,
+                      w - 54, color, lines[src]);
+    }
+}
+
+static size_t build_error_payload(char *out, size_t cap) {
+    if (!out || cap == 0)
+        return 0;
+
+    char logs[TAIKO_QR_MAX_TEXT + 1];
+    diag_log_tail_text(logs, sizeof(logs));
+    int n = snprintf(out, cap, "TaikoZucchini patch failed rc=%d\n", g_final_rc);
+    if (n < 0)
+        n = 0;
+    if ((size_t)n >= cap)
+        n = (int)cap - 1;
+    size_t used = (size_t)n;
+
+    const char *src = logs;
+    size_t l = 0;
+    while (src[l])
+        l++;
+    if (used + l >= cap)
+        l = cap - used - 1;
+    memcpy(out + used, src, l);
+    used += l;
+    out[used] = 0;
+    return used;
+}
+
+static void draw_qr_error(void) {
+    char payload[TAIKO_QR_MAX_TEXT + 1];
+    taiko_qr_t qr;
+    size_t len = build_error_payload(payload, sizeof(payload));
+    if (taiko_qr_encode_text(payload, len, &qr) != 0)
+        return;
+
+    const int quiet = 4;
+    const int scale = 12;
+    const int qr_px = (TAIKO_QR_SIZE + quiet * 2) * scale;
+    const int x0 = 1920 - 120 - qr_px;
+    const int y0 = 141;
+
+    menu_draw_rect(x0 - 24, y0 - 72, qr_px + 48, qr_px + 114, COLOR_PANEL2);
+    menu_draw_rect_outline(x0 - 24, y0 - 72, qr_px + 48, qr_px + 114,
+                           COLOR_ERR);
+    menu_draw_text(&menu_font_30_font, x0, y0 - 51, COLOR_ERR,
+                   "Photograph this QR and send it with your report");
+
+    menu_draw_rect(x0, y0, qr_px, qr_px, COLOR_QR_WHITE);
+    for (int y = 0; y < TAIKO_QR_SIZE; y++) {
+        for (int x = 0; x < TAIKO_QR_SIZE; x++) {
+            if (!qr.module[y * TAIKO_QR_SIZE + x])
+                continue;
+            menu_draw_rect(x0 + (x + quiet) * scale,
+                           y0 + (y + quiet) * scale,
+                           scale, scale, COLOR_QR_BLACK);
+        }
+    }
+}
+
+static void render_frame(void) {
+    if (!menu_draw_begin())
+        return;
+
+    menu_draw_clear(COLOR_BG);
+    menu_draw_text(&menu_font_42_font, 120, 63, COLOR_TITLE, "Taiko Zucchini");
+    menu_draw_text(&menu_font_30_font, 120, 126, COLOR_DIM,
+                   g_error ? "Patching stopped before a valid EBOOT could be installed."
+                           : "Patching EBOOT - do not power off.");
+    menu_draw_rect(120, 180, 1680, 3, COLOR_BORDER);
+
+    menu_draw_text(&menu_font_42_font, 120, 219,
+                   g_error ? COLOR_ERR : COLOR_TEXT, phase_label(g_phase));
+    draw_progress_bar();
+
+    if (g_error) {
+        char rc[48];
+        snprintf(rc, sizeof(rc), "Return code: %d", g_final_rc);
+        menu_draw_text(&menu_font_30_font, 120, 384, COLOR_ERR, rc);
+        menu_draw_text(&menu_font_30_font, 120, 432, COLOR_TEXT,
+                       "The log tail is embedded in the QR code.");
+        draw_qr_error();
+    } else if (g_done) {
+        menu_draw_text(&menu_font_30_font, 120, 384, COLOR_BAR,
+                       "Patch complete. Exiting so the next launch uses the patched EBOOT.");
+    } else {
+        menu_draw_text(&menu_font_30_font, 120, 384, COLOR_TEXT,
+                       "This may take a few minutes on hardware.");
+    }
+
+    draw_logs();
+    menu_draw_end();
+}
+
+static void render_thread(uint64_t arg) {
+    (void)arg;
+    while (g_ui_open) {
+        if (g_prog_current < g_prog_target && g_prog_current < 100) {
+            int step = (g_prog_target - g_prog_current > 4) ? 2 : 1;
+            g_prog_current += step;
+            if (g_prog_current > 100)
+                g_prog_current = 100;
+        }
+        render_frame();
+        sys_timer_usleep(100 * 1000);
     }
     sys_ppu_thread_exit(0);
 }
 
 void patch_ui_open(void) {
-    if (g_ui_open) return;
-
-    /* Ensure libsysutil is resident. Bootstrap context: not guaranteed. */
-    if (cellSysmoduleLoadModule(CELL_SYSMODULE_SYSUTIL) < 0) {
-        dbg_print("[ui] sysutil load failed; skipping dialog\n");
+    if (g_ui_open)
         return;
-    }
-
-    /* Bring up RSX so the system overlay has a framebuffer to composite
-     * onto. Without this, msgDialog plays its sound but never appears. */
     if (rsx_minimal_init() < 0) {
-        dbg_print("[ui] rsx init failed; skipping dialog\n");
+        dbg_print("[ui] rsx init failed; patch screen unavailable\n");
         return;
     }
 
-    /* sysutil emits "no callback registered" warnings on every
-     * cellSysutilCheckCallback if no slot is bound. Register a no-op
-     * to silence the spam. */
-    cellSysutilRegisterCallback(0, sysutil_callback, NULL);
-
-    unsigned int type =
-        CELL_MSGDIALOG_TYPE_SE_TYPE_NORMAL    |
-        CELL_MSGDIALOG_TYPE_BG_VISIBLE        |
-        CELL_MSGDIALOG_TYPE_BUTTON_TYPE_NONE  |
-        CELL_MSGDIALOG_TYPE_DISABLE_CANCEL_ON |
-        CELL_MSGDIALOG_TYPE_PROGRESSBAR_SINGLE;
-
-    int rc = cellMsgDialogOpen2(
-        type,
-        "Taiko Zucchini\n"
-        "Patching EBOOT — do not power off.",
-        NULL, NULL, NULL);
-    if (rc < 0) {
-        dbg_print_hex32("[ui] dialog open rc", (uint32_t)rc);
-        return;
-    }
-    g_ui_open = 1;
+    g_done = 0;
+    g_error = 0;
+    g_final_rc = 0;
     g_prog_current = 0;
-    g_prog_target  = 0;
-    g_ticker_run   = 1;
-    sys_ppu_thread_create(&g_ticker_tid, ticker_entry, 0,
-                          1500, 16 * 1024, 0, "taiko_ui_ticker");
-    pump(50);
+    g_prog_target = 0;
+    g_phase = EBOOT_PHASE_INIT;
+    g_ui_open = 1;
+
+    int rc = sys_ppu_thread_create(&g_render_tid, render_thread, 0,
+                                   1500, 32 * 1024, 0, "taiko_patch_ui");
+    if (rc != 0) {
+        dbg_print_hex32("[ui] render thread create rc", (uint32_t)rc);
+        g_ui_open = 0;
+        return;
+    }
 }
 
 void patch_ui_phase(eboot_phase_t phase, int rc) {
-    if (!g_ui_open) return;
-    if (rc != 0) return;  /* finish_error handles the rc!=0 case */
-
-    cellMsgDialogProgressBarSetMsg(
-        CELL_MSGDIALOG_PROGRESSBAR_INDEX_SINGLE, phase_label(phase));
+    if (!g_ui_open || rc != 0)
+        return;
+    g_phase = phase;
     int delta = phase_weight(phase);
     if (delta > 0) {
         int tgt = g_prog_target + delta;
-        if (tgt > 100) tgt = 100;
-        g_prog_target = tgt;
+        g_prog_target = tgt > 100 ? 100 : tgt;
     }
-    pump(30);
 }
 
-static void wait_ok_callback(int buttonType, void *userData) {
-    (void)buttonType; (void)userData;
-}
-
-static void show_final(const char *msg) {
-    if (g_ticker_run) {
-        g_ticker_run = 0;
-        uint64_t st = 0;
-        sys_ppu_thread_join(g_ticker_tid, &st);
-    }
-    if (g_ui_open) {
-        cellMsgDialogClose(0.0f);
-        pump(200);
-        g_ui_open = 0;
-    }
-
-    unsigned int type =
-        CELL_MSGDIALOG_TYPE_SE_TYPE_NORMAL   |
-        CELL_MSGDIALOG_TYPE_BG_VISIBLE       |
-        CELL_MSGDIALOG_TYPE_BUTTON_TYPE_OK   |
-        CELL_MSGDIALOG_TYPE_DEFAULT_CURSOR_OK;
-    if (cellMsgDialogOpen2(type, msg, wait_ok_callback, NULL, NULL) < 0)
+static void finish_common(int error, int rc, int manual) {
+    (void)manual;
+    if (!g_ui_open)
         return;
 
-    /* Pump for ~3 s so operator can read it. The trampoline exits the
-     * process right after, which closes the dialog anyway. */
-    pump(3000);
+    g_error = error ? 1 : 0;
+    g_final_rc = rc;
+    g_done = error ? 0 : 1;
+    g_phase = error ? EBOOT_PHASE_ERROR : EBOOT_PHASE_DONE;
+    if (!error)
+        g_prog_target = 100;
+
+    int wait_ms = error ? 180000 : 3500;
+    for (int elapsed = 0; elapsed < wait_ms; elapsed += 100) {
+        if (!error && g_prog_current < 100)
+            g_prog_current++;
+        sys_timer_usleep(100 * 1000);
+    }
+
+    g_ui_open = 0;
+    uint64_t st = 0;
+    sys_ppu_thread_join(g_render_tid, &st);
 }
 
 void patch_ui_finish_ok(void) {
-    show_final("Taiko Zucchini\n"
-               "Patch complete.\n"
-               "The game will restart.");
+    finish_common(0, 0, 0);
 }
 
 void patch_ui_finish_ok_manual(void) {
-    show_final("Taiko Zucchini\n"
-               "Patch complete.\n"
-               "Exiting to XMB — relaunch the game to apply.");
+    finish_common(0, 0, 1);
 }
 
 void patch_ui_finish_error(int rc) {
-    (void)rc;
-    show_final("Taiko Zucchini\n"
-               "Patch failed.\n"
-               "Check the SPRX log and try again.");
+    finish_common(1, rc, 1);
 }

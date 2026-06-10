@@ -5,8 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <cell/sysmodule.h>
 #include <cell/fs/cell_fs_file_api.h>
 #include <cell/fs/cell_fs_errno.h>
+#include <sysutil/sysutil_gamecontent.h>
 #include "mbedtls/sha1.h"
 #include "debug.h"
 
@@ -342,6 +344,44 @@ static void fill_patch_args(eboot_flow_args_t *a, const char *orig,
     a->cb             = log_phase;
 }
 
+static int permit_bootstrap_content_writes(void) {
+    unsigned int type = 0;
+    unsigned int attributes = 0;
+    CellGameContentSize size;
+    char dir_name[CELL_GAME_DIRNAME_SIZE];
+    char content_info[CELL_GAME_PATH_MAX];
+    char usrdir[CELL_GAME_PATH_MAX];
+    int rc;
+
+    memset(&size, 0, sizeof(size));
+    memset(dir_name, 0, sizeof(dir_name));
+    memset(content_info, 0, sizeof(content_info));
+    memset(usrdir, 0, sizeof(usrdir));
+
+    rc = cellSysmoduleLoadModule(CELL_SYSMODULE_SYSUTIL_GAME);
+    if (rc != CELL_OK && rc != CELL_SYSMODULE_ERROR_DUPLICATED) {
+        dbg_print_hex32("[eboot] sysutil_game load rc", (uint32_t)rc);
+        return rc;
+    }
+
+    rc = cellGameBootCheck(&type, &attributes, &size, dir_name);
+    dbg_print_hex32("[eboot] cellGameBootCheck rc", (uint32_t)rc);
+    if (rc != CELL_GAME_RET_OK)
+        return rc;
+    dbg_print_hex32("[eboot] game type", type);
+    dbg_print_hex32("[eboot] game attributes", attributes);
+
+    rc = cellGameContentPermit(content_info, usrdir);
+    dbg_print_hex32("[eboot] cellGameContentPermit rc", (uint32_t)rc);
+    if (rc == CELL_GAME_RET_OK) {
+        dbg_print("[eboot] permitted usrdir: ");
+        dbg_print(usrdir);
+        dbg_print("\n");
+        usrdir_seed_path(usrdir);
+    }
+    return rc;
+}
+
 /* Returns 1 if the patch completed, -1 if the patch flow ran but failed,
  * and 0 if no patch flow was run. */
 static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
@@ -358,6 +398,9 @@ static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
     keys[sizeof(keys) - 1] = 0;
 
     dbg_print("[eboot] bootstrap mode detected, running patch flow\n");
+    int permit_rc = permit_bootstrap_content_writes();
+    if (permit_rc != CELL_GAME_RET_OK)
+        dbg_print("[eboot] continuing patch flow without content permit\n");
 
     unsigned char patcher_hash[20];
     int have_patcher_hash = (hash_current_patcher(patcher_hash) == 0);

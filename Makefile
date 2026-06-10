@@ -82,7 +82,7 @@ SYM     := $(BIN_DIR)/$(TARGET_NAME).sym
 BOOTSTRAP_EBOOT := bootstrap_eboot/bin/eboot.elf
 FTP_EBOOT := ftp_eboot/bin/ftp_eboot.elf
 
-SRCS    := core/main.c core/debug.c core/libc_stubs.c core/patch_ui.c core/rsx_init.c core/overlay.c eboot_fpt.c \
+SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_stubs.c core/patch_ui.c core/rsx_init.c core/overlay.c eboot_fpt.c \
            mod_menu/menu.c mod_menu/menu_draw.c mod_menu/menu_pad.c mod_menu/menu_actions.c \
            mod_menu/menu_osk.c \
            ftp/ftp_server.c \
@@ -226,7 +226,7 @@ $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
 core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h network/certs.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h cards/card_picker.h
-mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h
+mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h mod_menu/menu_font_30.h mod_menu/menu_font_42.h
 mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
 mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
 eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
@@ -244,7 +244,10 @@ storage/chassisinfo_synth.o: storage/chassisinfo_synth.c storage/chassisinfo_syn
 storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_schema.h
 patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h core/icache.h core/debug.h
 network/certs.o:     network/certs.c     config.h network/certs.h core/icache.h core/debug.h
-core/debug.o:     core/debug.c     core/debug.h config.h config/runtime.h
+core/debug.o:     core/debug.c     core/debug.h core/diag_log.h config.h config/runtime.h
+core/diag_log.o:  core/diag_log.c  core/diag_log.h
+core/qr_encode.o: core/qr_encode.c core/qr_encode.h
+core/patch_ui.o:  core/patch_ui.c  core/patch_ui.h core/debug.h core/diag_log.h core/qr_encode.h core/rsx_init.h mod_menu/menu_draw.h mod_menu/menu_font_30.h mod_menu/menu_font_42.h
 core/overlay.o:   core/overlay.c   core/overlay.h core/debug.h eboot_fpt.h mod_menu/menu_font_20.h mod_menu/menu_font.h
 input/pad_input.o: input/pad_input.c input/pad_input.h input/kb_input.h config/cfg_file.h config/runtime.h core/debug.h
 input/kb_input.o:  input/kb_input.c  input/kb_input.h  input/pad_input.h config/cfg_file.h config/runtime.h core/debug.h

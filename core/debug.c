@@ -2,6 +2,7 @@
 #include <sys/syscall.h>
 
 #include "debug.h"
+#include "diag_log.h"
 
 static uint32_t dbg_strlen(const char *s) {
     uint32_t len = 0;
@@ -20,12 +21,15 @@ static void dbg_write_tty(const char *s, uint32_t len) {
 
 void dbg_log_reset(void) {
     static const char banner[] = "=== Taiko Zucchini SPRX log start ===\n";
+    diag_log_reset();
     dbg_write_tty(banner, sizeof(banner) - 1);
+    diag_log_append(banner, sizeof(banner) - 1);
 }
 
 void dbg_print(const char *s) {
     uint32_t len = dbg_strlen(s);
     dbg_write_tty(s, len);
+    diag_log_append(s, len);
 }
 
 static void put_hex_nibble(char **p, uint8_t n) {
