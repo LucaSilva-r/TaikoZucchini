@@ -105,10 +105,12 @@ static void draw_progress_bar(void) {
     if (fill > 0)
         menu_draw_rect(x + 4, y + 4, fill, h - 8, g_error ? COLOR_ERR : COLOR_BAR);
 
-    char pct[16];
-    snprintf(pct, sizeof(pct), "%d%%", g_prog_current);
-    int tw = menu_text_width(&menu_font_30_font, pct);
-    menu_draw_text(&menu_font_30_font, x + w - tw, y - 45, COLOR_DIM, pct);
+    if (!g_error) {
+        char pct[16];
+        snprintf(pct, sizeof(pct), "%d%%", g_prog_current);
+        int tw = menu_text_width(&menu_font_30_font, pct);
+        menu_draw_text(&menu_font_30_font, x + w - tw, y - 45, COLOR_DIM, pct);
+    }
 }
 
 static void draw_logs(void) {
@@ -142,8 +144,6 @@ static size_t build_error_payload(char *out, size_t cap) {
     if (!out || cap == 0)
         return 0;
 
-    char logs[TAIKO_QR_MAX_TEXT + 1];
-    diag_log_tail_text(logs, sizeof(logs));
     int n = snprintf(out, cap, "TaikoZucchini patch failed rc=%d\n", g_final_rc);
     if (n < 0)
         n = 0;
@@ -151,15 +151,7 @@ static size_t build_error_payload(char *out, size_t cap) {
         n = (int)cap - 1;
     size_t used = (size_t)n;
 
-    const char *src = logs;
-    size_t l = 0;
-    while (src[l])
-        l++;
-    if (used + l >= cap)
-        l = cap - used - 1;
-    memcpy(out + used, src, l);
-    used += l;
-    out[used] = 0;
+    used += diag_log_tail_text(out + used, cap - used);
     return used;
 }
 

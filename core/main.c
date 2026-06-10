@@ -344,6 +344,24 @@ static void fill_patch_args(eboot_flow_args_t *a, const char *orig,
     a->cb             = log_phase;
 }
 
+static int maybe_force_patch_fail_for_qr_test(const char *flow_name) {
+#if TAIKO_PATCH_UI_FORCE_FAIL
+    dbg_print("[test] forced patch failure enabled for QR testing\n");
+    dbg_print("[test] flow: ");
+    dbg_print(flow_name ? flow_name : "(unknown)");
+    dbg_print("\n");
+    dbg_print("[test] no EBOOT files were modified\n");
+    patch_ui_phase(EBOOT_PHASE_READING, 0);
+    patch_ui_phase(EBOOT_PHASE_DECRYPTING, 0);
+    patch_ui_phase(EBOOT_PHASE_PATCHING, 0);
+    patch_ui_finish_error(-0x357);
+    return 1;
+#else
+    (void)flow_name;
+    return 0;
+#endif
+}
+
 static int permit_bootstrap_content_writes(void) {
     unsigned int type = 0;
     unsigned int attributes = 0;
@@ -411,6 +429,8 @@ static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
     fill_patch_args(&a, orig, boot, keys);
 
     patch_ui_open();
+    if (maybe_force_patch_fail_for_qr_test("bootstrap"))
+        return -1;
     int rc = eboot_flow_run(&a);
     dbg_print_hex32("[eboot] flow rc", (uint32_t)rc);
     if (rc == 0) {
@@ -483,6 +503,8 @@ static int maybe_repatch_from_original(void) {
     fill_patch_args(&a, orig, boot, keys);
 
     patch_ui_open();
+    if (maybe_force_patch_fail_for_qr_test("runtime-repatch"))
+        return 0;
     int rc = eboot_flow_run(&a);
     dbg_print_hex32("[eboot] repatch flow rc", (uint32_t)rc);
     if (rc != 0) {

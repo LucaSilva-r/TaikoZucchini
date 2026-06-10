@@ -52,10 +52,12 @@ INCLUDES := -I$(CELL_SDK)/target/ppu/include \
 # Signing target baked into the sprx: 1 = retail STD (HEN), 0 = debug (GEX).
 # build_sprx.sh compiles the sprx once per flavor.
 HEN_BUILD ?= 1
+FORCE_PATCH_FAIL ?= 0
 
 CFLAGS  := -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
            -mprx -fno-builtin -ffunction-sections -fdata-sections \
            -DHEN_BUILD=$(HEN_BUILD) \
+           -DTAIKO_PATCH_UI_FORCE_FAIL=$(FORCE_PATCH_FAIL) \
            $(INCLUDES)
 
 # -mprx + -zgenprx + -zgenstub tell the toolchain to emit the PRX-shape
