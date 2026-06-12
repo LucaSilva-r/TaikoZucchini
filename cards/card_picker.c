@@ -1,4 +1,5 @@
 #include "card_picker.h"
+#include "card_issuer.h"
 #include "card_store.h"
 
 #include <stdint.h>
@@ -26,7 +27,7 @@
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */
 #define MENU_VISIBLE          16
 
-#define EXTRA_ROWS_MAX        3             /* trailing actions: add kbd, optional qr, quit */
+#define EXTRA_ROWS_MAX        4             /* trailing actions: create, add kbd, optional qr, quit */
 
 static volatile int g_capture_pending;
 static char g_capture_code[21];
@@ -111,6 +112,32 @@ static void action_add_qr(void) {
     (void)menu_pad_pressed();
 }
 
+static int action_create_online(void) {
+    char code[21];
+    char label[CARD_LABEL_CAP];
+
+    taiko_overlay_show_prompt("Creating TaikOnline card...");
+    int rc = card_issuer_create(code);
+    if (rc != 0) {
+        taiko_overlay_show_prompt("Card creation failed");
+        return 0;
+    }
+
+    label[0] = 0;
+    taiko_overlay_menu_active(0);
+    (void)menu_osk_input("Card label", "", MENU_OSK_TEXT,
+                         label, sizeof label);
+    taiko_overlay_menu_active(1);
+
+    if (!card_store_add(label, code)) {
+        taiko_overlay_show_prompt("Card created but save failed");
+        return 0;
+    }
+
+    replay_card(code);
+    return 1;
+}
+
 /* Modal Yes/No confirmation drawn in the same overlay surface. Returns 1
  * if the user confirms (X on "Yes"), 0 otherwise (O, or X on "No"). */
 static int confirm_delete(const char *label) {
@@ -155,16 +182,20 @@ static void run_chooser(void) {
     for (;;) {
         int n = card_store_count();
         int qr_available = camera_qr_available();
-        int extra = qr_available ? 3 : 2;
+        int extra = qr_available ? 4 : 3;
         int total = n + extra;
         int quit_row = n + extra - 1;
+        int create_row = n;
+        int keyboard_row = n + 1;
+        int qr_row = n + 2;
 
         const char *lines[CARD_STORE_MAX + EXTRA_ROWS_MAX];
         for (int i = 0; i < n; i++)
             lines[i] = card_store_label(i);
-        lines[n + 0] = "+ Add via keyboard";
+        lines[create_row] = "+ Create TaikOnline card";
+        lines[keyboard_row] = "+ Add via keyboard";
         if (qr_available)
-            lines[n + 1] = "+ Add via QR scan";
+            lines[qr_row] = "+ Add via QR scan";
         lines[quit_row] = "Quit";
 
         if (sel >= total) sel = total - 1;
@@ -196,9 +227,12 @@ static void run_chooser(void) {
                 if (code)
                     replay_card(code);
                 break;
-            } else if (sel == n) {
+            } else if (sel == create_row) {
+                if (action_create_online())
+                    break;
+            } else if (sel == keyboard_row) {
                 action_add_keyboard();
-            } else if (qr_available && sel == n + 1) {
+            } else if (qr_available && sel == qr_row) {
                 action_add_qr();
             } else if (sel == quit_row) {
                 break;   /* Quit */

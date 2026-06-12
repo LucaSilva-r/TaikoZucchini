@@ -115,7 +115,52 @@ typedef struct {
     const uint8_t *p_seed;
 } nbgic_tables_t;
 
+enum {
+    NBGIC_SCAN_END = 0x00E00000u,
+    NBGIC_TAG_STRIDE = 0x88u,
+    NBGIC_PROFILE_COUNT = 8,
+    NBGIC_PROFILE_STRIDE = 0x48u,
+};
+
 static nbgic_tables_t g_nbgic;
+
+static char hex_digit_lower(uint8_t v) {
+    v &= 0x0F;
+    return (char)(v < 10 ? '0' + v : 'a' + (v - 10));
+}
+
+static void nbgic_log_profile_records_once(const uint8_t *profiles) {
+    static bool logged = false;
+    enum {
+        RECORD_HEX_LEN = NBGIC_PROFILE_STRIDE * 2,
+    };
+
+    if (logged || !profiles)
+        return;
+    logged = true;
+
+    dbg_print("[bp-card] NBGIC profile records for TAIKO_GREEN_NBGIC_PROFILE_RECORDS:\n");
+    for (int profile = 0; profile < NBGIC_PROFILE_COUNT; profile++) {
+        char line[sizeof("[bp-card] profile 0: ") + RECORD_HEX_LEN + 1];
+        char *out = line;
+        const uint8_t *rec = profiles + (size_t)profile * NBGIC_PROFILE_STRIDE;
+
+        memcpy(out, "[bp-card] profile ", sizeof("[bp-card] profile ") - 1);
+        out += sizeof("[bp-card] profile ") - 1;
+        *out++ = (char)('0' + profile);
+        memcpy(out, ": ", 2);
+        out += 2;
+
+        for (size_t i = 0; i < NBGIC_PROFILE_STRIDE; i++) {
+            *out++ = hex_digit_lower((uint8_t)(rec[i] >> 4));
+            *out++ = hex_digit_lower(rec[i]);
+        }
+        *out++ = '\n';
+        *out = '\0';
+        dbg_print(line);
+    }
+    dbg_print("[bp-card] Copy records 0-7 into .env comma-separated.\n");
+}
 
 static uint32_t rd_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
@@ -152,11 +197,6 @@ static bool nbgic_tables_find(void) {
     if (g_nbgic.ready)
         return true;
 
-    enum {
-        NBGIC_SCAN_END = 0x00E00000u,
-        NBGIC_TAG_STRIDE = 0x88u,
-        NBGIC_PROFILE_STRIDE = 0x48u,
-    };
     static const char *prefixes[8] = {
         "300", "302", "303", "304", "305", "306", "307", "308",
     };
@@ -247,6 +287,7 @@ static bool nbgic_tables_find(void) {
         g_nbgic.s_seed = s_seed;
         g_nbgic.p_seed = p_seed;
         g_nbgic.ready = true;
+        nbgic_log_profile_records_once(g_nbgic.profiles);
 #if BPREADER_CARD_TRACE
         dbg_print("[bp-card] NBGIC tables found\n");
         dbg_print_hex32("[bp-card] NBGIC base", (uint32_t)(uintptr_t)g_nbgic.base);

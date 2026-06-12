@@ -10,6 +10,7 @@
  * Features are boot-only: changes require restart. */
 
 #define TAIKO_REDIRECT_HOST_MAX 64
+#define TAIKO_API_TOKEN_MAX 160
 #define TAIKO_DONGLE_SERIAL_LEN 12  /* 12 ASCII digits, "26841" prefix */
 #define TAIKO_CHASSIS_FLAG_COUNT 20 /* must match CI_F__COUNT in storage/chassisinfo_schema.h */
 
@@ -62,6 +63,10 @@ typedef struct {
     unsigned online_redirect_enable : 1;
     char     online_redirect_host[TAIKO_REDIRECT_HOST_MAX];
     uint16_t online_redirect_port;
+
+    /* Optional override for the baked TaikOnline card issuer bearer token.
+     * Empty means use TAIKO_ZUCCHINI_API_TOKEN from the binary. */
+    char     zucchini_api_token[TAIKO_API_TOKEN_MAX];
 
     /* EBOOT-patcher state (slice 7). Tracks whether the on-disk EBOOT
      * has already been pre-patched, so runtime memory writes can be

@@ -12,7 +12,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 12  /* v12: saved-card prompt + keyboard binding */
+#define TAIKO_CFG_VERSION 13  /* v13: TaikOnline card issuer token override */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
@@ -180,6 +180,17 @@ static void handle_network(const char *key, const char *value, void *u) {
         }
         if (v == 0 || v > 65535u) v = 443;
         g_cfg.online_redirect_port = (uint16_t)v;
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "zucchini_api_token")) {
+        while (*value == ' ' || *value == '\t') value++;
+        size_t n = 0;
+        while (value[n] && value[n] != '\r' && value[n] != '\n' &&
+               n < TAIKO_API_TOKEN_MAX - 1) {
+            g_cfg.zucchini_api_token[n] = value[n];
+            n++;
+        }
+        g_cfg.zucchini_api_token[n] = 0;
         return;
     }
 }
@@ -498,6 +509,10 @@ static void write_cfg_file(const char *path) {
     emit_kv_uint(fd,
         "TCP port for the redirected hostname (typically 443).",
         "online_redirect_port", (unsigned)g_cfg.online_redirect_port);
+    emit_kv_str(fd,
+        "Optional TaikOnline card issuer bearer token override. Leave blank "
+        "for official builds with the token baked into zucchini.sprx.",
+        "zucchini_api_token", g_cfg.zucchini_api_token);
     cfg_file_write_str(fd, "\n");
 
     cfg_file_write_str(fd, "[chassis]\n");

@@ -92,7 +92,7 @@ void cfg_file_parse(const char *buf, size_t len,
 
         size_t vstart = i;
         while (i < len && buf[i] != '\n') i++;
-        char value[96];
+        char value[192];
         size_t vlen = i - vstart;
         /* trim trailing whitespace + strip inline comments */
         for (size_t j = 0; j < vlen; j++) {
