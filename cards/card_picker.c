@@ -3,6 +3,7 @@
 #include "card_store.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <sys/ppu_thread.h>
@@ -112,6 +113,75 @@ static void action_add_qr(void) {
     (void)menu_pad_pressed();
 }
 
+/* Build https://host[:port]/green/settings/profile?access_code=CODE — the
+ * deep-link the server prefills the bind form from. */
+static void build_register_url(char *out, int cap, const char *code20) {
+    const char *host = g_cfg.online_redirect_host;
+    int port = g_cfg.online_redirect_port ? (int)g_cfg.online_redirect_port : 443;
+    if (port == 443)
+        snprintf(out, cap, "https://%s/green/settings/profile?access_code=%s",
+                 host, code20);
+    else
+        snprintf(out, cap, "https://%s:%d/green/settings/profile?access_code=%s",
+                 host, port, code20);
+}
+
+/* "12345678901234567890" -> "1234 5678 9012 3456 7890" */
+static void group_code(char *out, int cap, const char *code20) {
+    int o = 0;
+    for (int i = 0; i < 20 && o < cap - 1; i++) {
+        if (i && (i % 4) == 0 && o < cap - 1)
+            out[o++] = ' ';
+        out[o++] = code20[i];
+    }
+    out[o] = 0;
+}
+
+static void wait_dismiss(void) {
+    (void)menu_pad_pressed();
+    for (;;) {
+        uint32_t e = menu_pad_pressed();
+        if (e & (MENU_BTN_CROSS | MENU_BTN_CIRCLE))
+            break;
+        sys_timer_usleep(TICK_US);
+    }
+}
+
+/* Show a card's access code plus a registration QR. `warn` adds the
+ * bind-before-playing caution shown right after a card is created. */
+static void show_card_screen(const char *code20, int warn) {
+    char url[256];
+    build_register_url(url, sizeof url, code20);
+
+    char grouped[40];
+    group_code(grouped, sizeof grouped, code20);
+    char code_line[64];
+    snprintf(code_line, sizeof code_line, "Access code: %s", grouped);
+
+    char host_line[TAIKO_REDIRECT_HOST_MAX + 48];
+    snprintf(host_line, sizeof host_line, "%s/green/settings/profile",
+             g_cfg.online_redirect_host);
+
+    const char *lines[6];
+    int n = 0;
+    if (warn) {
+        lines[n++] = "Bind this card to your account BEFORE you play -";
+        lines[n++] = "otherwise another player can register it and";
+        lines[n++] = "claim all of its scores.";
+    }
+    lines[n++] = code_line;
+    lines[n++] = "Scan to register, or visit:";
+    lines[n++] = host_line;
+
+    taiko_overlay_menu_active(0);
+    taiko_overlay_card_set(warn ? "Register your new card" : "Card access code",
+                           lines, n, "X: OK", url);
+    taiko_overlay_card_active(1);
+    wait_dismiss();
+    taiko_overlay_card_active(0);
+    taiko_overlay_menu_active(1);
+}
+
 static int action_create_online(void) {
     char code[21];
     char label[CARD_LABEL_CAP];
@@ -134,8 +204,11 @@ static int action_create_online(void) {
         return 0;
     }
 
-    replay_card(code);
-    return 1;
+    /* Don't auto-use: a fresh card is unbound and anyone could claim it.
+     * Warn the user and show the code/QR so they register it first. They
+     * select it from the list explicitly when they want to play. */
+    show_card_screen(code, 1);
+    return 0;
 }
 
 /* Modal Yes/No confirmation drawn in the same overlay surface. Returns 1
@@ -204,12 +277,22 @@ static void run_chooser(void) {
         if (sel >= top + MENU_VISIBLE) top = sel - MENU_VISIBLE + 1;
 
         taiko_overlay_menu_set("Saved Cards", lines, NULL, NULL, total, sel, top,
-                               NULL, "Up/Down  X:select  O:delete card");
+                               NULL,
+                               "Up/Down  X:select  Right:show code  O:delete");
         taiko_overlay_menu_active(1);
 
         uint32_t edge = menu_pad_pressed();
         if (edge & MENU_BTN_UP)   sel--;
         if (edge & MENU_BTN_DOWN) sel++;
+
+        /* Right (d-pad or keyboard arrow) shows the highlighted card's access
+         * code + registration QR. No-op on the trailing action rows. */
+        if ((edge & MENU_BTN_RIGHT) && sel < n) {
+            const char *code = card_store_code(sel);
+            if (code)
+                show_card_screen(code, 0);
+            (void)menu_pad_pressed();
+        }
 
         /* O deletes the highlighted card (with confirmation). On action
          * rows it does nothing — Quit is an explicit menu item. */

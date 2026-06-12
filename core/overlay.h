@@ -39,4 +39,16 @@ void taiko_overlay_menu_set(const char *title,
                             const char *desc, const char *footer);
 void taiko_overlay_menu_active(int on);
 
+/* Static info card surface with an optional QR code, blitted centred over the
+ * game each flip while active (takes priority over the menu). Used for the
+ * post-create "register this card" warning and the saved-card "show code"
+ * action.
+ *   lines       : array of `n` short text lines drawn under the title
+ *   footer      : hint line at the bottom (may be NULL)
+ *   qr_payload  : NUL-terminated text to encode as a QR (NULL/empty = no QR) */
+void taiko_overlay_card_set(const char *title,
+                            const char *const *lines, int n,
+                            const char *footer, const char *qr_payload);
+void taiko_overlay_card_active(int on);
+
 #endif

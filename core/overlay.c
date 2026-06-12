@@ -13,6 +13,7 @@
 #include "eboot_fpt.h"
 #include "menu_font_20.h"
 #include "overlay_quad_shaders.h"
+#include "qr_encode.h"
 #include "video_out_hook.h"
 
 #define OVERLAY_BOOT_WINDOW_US (60ULL * 1000ULL * 1000ULL)
@@ -38,6 +39,11 @@
 #define OVERLAY_SWATCH_H       16
 #define OVERLAY_VERTEX_SLOTS   8
 #define OVERLAY_VERTEX_MAX     8192   /* room for 16 rows + wrapped desc */
+
+/* Card/QR surface: a 64x64 ARGB texture holding the QR at 1px/module (QR is
+ * 57 modules), nearest-neighbour scaled up on blit so it stays crisp. */
+#define OVERLAY_QR_TEX_DIM     64
+#define OVERLAY_CARD_LINES     8
 
 #define UI_COLOR_BG       0xDC101010u
 #define UI_COLOR_PANEL    0xF0181818u
@@ -86,6 +92,15 @@ typedef struct {
 } overlay_menu_state_t;
 
 typedef struct {
+    char title[OVERLAY_TEXT_CAP];
+    char lines[OVERLAY_CARD_LINES][OVERLAY_TEXT_CAP];
+    int  line_n;
+    char footer[OVERLAY_TEXT_CAP];
+    int  qr_size;   /* QR module count; 0 = no QR for this card */
+    uint8_t qr_mod[TAIKO_QR_SIZE * TAIKO_QR_SIZE];
+} overlay_card_state_t;
+
+typedef struct {
     float pos[4];
     float color[4];
     float uv[2];
@@ -103,6 +118,8 @@ static uint32_t *g_overlay_cmd;
 static uint32_t g_overlay_cmd_io;
 static uint32_t g_font_tex_io;
 static uint32_t g_swatch_io[6];
+static uint32_t g_qr_tex_io;
+static uint32_t *g_qr_tex;
 static overlay_vertex_t *g_text_vtx;
 static uint32_t g_text_vtx_io;
 static uint32_t g_text_vtx_next;
@@ -126,6 +143,11 @@ static volatile int g_menu_active;
 static volatile int g_menu_cur = -1;
 static volatile int g_menu_reading = -1;
 static overlay_menu_state_t g_menu_state[3];
+
+static volatile int g_card_active;
+static volatile int g_card_cur = -1;
+static volatile int g_card_reading = -1;
+static overlay_card_state_t g_card_state[2];
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -231,6 +253,11 @@ static int ensure_overlay_mapped(void) {
             dst[j] = swatches[i];
         cursor += OVERLAY_SWATCH_W * OVERLAY_SWATCH_H * 4;
     }
+
+    cursor = align_up_u32(cursor, 128);
+    g_qr_tex_io = off + cursor;
+    g_qr_tex = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+    cursor += OVERLAY_QR_TEX_DIM * OVERLAY_QR_TEX_DIM * 4;
 
     cursor = align_up_u32(cursor, 128);
     CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
@@ -889,6 +916,140 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
     (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
 }
 
+/* Static info card with an optional QR code (used for the "register this card"
+ * warning after issuing an online card, and the "show code" action). Drawn
+ * every flip while active, like the menu surface. */
+static void maybe_draw_card(void *ctx, uint8_t id) {
+    if (!g_card_active || !ensure_overlay_mapped() || !g_qr_tex)
+        return;
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end ||
+        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+        return;
+
+    int cur = g_card_cur;
+    if (cur < 0)
+        return;
+    g_card_reading = cur;
+    overlay_card_state_t m = g_card_state[cur];
+    g_card_reading = -1;
+
+    const int pad      = 22;
+    const int title_h  = m.title[0] ? 34 : 0;
+    const int line_h   = 24;
+    const int footer_h = m.footer[0] ? 26 : 0;
+
+    int qr_px = 0;
+    if (m.qr_size > 0) {
+        /* integer scale that fits comfortably and stays crisp */
+        qr_px = (int)b.height / 2;
+        qr_px -= qr_px % m.qr_size;     /* exact multiple of module count */
+        if (qr_px < m.qr_size * 4) qr_px = m.qr_size * 4;
+    }
+
+    int text_h = title_h + m.line_n * line_h;
+    int qr_block = qr_px ? (16 + qr_px + 16) : 0;
+    int box_h = pad + text_h + qr_block + footer_h + pad;
+
+    int box_w = qr_px ? qr_px + 80 : 560;
+    if (box_w < 560) box_w = 560;
+    if (box_w > (int)b.width - 48) box_w = (int)b.width - 48;
+    if (box_h > (int)b.height - 48) box_h = (int)b.height - 48;
+    int inner_w = box_w - 2 * pad;
+
+    int x = ((int)b.width - box_w) / 2;
+    int y = ((int)b.height - box_h) / 2;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+
+    /* Rasterize the QR into its texture: white field, black dark modules. */
+    if (qr_px) {
+        int dim = OVERLAY_QR_TEX_DIM;
+        for (int i = 0; i < dim * dim; i++)
+            g_qr_tex[i] = 0xFFFFFFFFu;
+        int margin = (dim - m.qr_size) / 2;
+        if (margin < 0) margin = 0;
+        for (int qy = 0; qy < m.qr_size && qy + margin < dim; qy++)
+            for (int qx = 0; qx < m.qr_size && qx + margin < dim; qx++)
+                if (m.qr_mod[qy * TAIKO_QR_SIZE + qx])
+                    g_qr_tex[(qy + margin) * dim + (qx + margin)] = 0xFF000000u;
+        flush_dcache(g_qr_tex, (size_t)dim * dim * 4);
+    }
+
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    uint32_t vtx_io = 0;
+    int max_vtx = 0;
+    int vtx_count = 0;
+    overlay_vertex_t *vtx = text_begin(&vtx_io, &max_vtx);
+    if (!vtx)
+        return;
+
+    /* Background rects + the QR blit first; all text batched on top after. */
+    if (!append_rect(&cmd, &b, x, y, box_w, box_h, 1) ||
+        !append_rect(&cmd, &b, x, y, box_w, 3, 2))
+        return;
+
+    int ty = y + pad;
+    if (title_h) {
+        if (!append_rect(&cmd, &b, x + pad, ty + title_h - 8, inner_w, 1, 4))
+            return;
+        ty += title_h;
+    }
+    ty += m.line_n * line_h;
+
+    if (qr_px) {
+        int qx = x + (box_w - qr_px) / 2;
+        int qy = ty + 16;
+        /* white quiet-zone border behind the code (swatch 3 = white) */
+        if (!append_rect(&cmd, &b, qx - 10, qy - 10, qr_px + 20, qr_px + 20, 3))
+            return;
+        if (!append_scaled_blit(&cmd, &b, g_qr_tex_io,
+                                OVERLAY_QR_TEX_DIM * 4,
+                                OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
+                                0, 0, OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
+                                qx, qy, qr_px, qr_px,
+                                CELL_GCM_TRANSFER_INTERPOLATOR_ZOH))
+            return;
+    }
+
+    int tty = y + pad;
+    if (title_h) {
+        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  x + pad, tty, TEXT_ACCENT, m.title))
+            return;
+        tty += title_h;
+    }
+    for (int i = 0; i < m.line_n; i++) {
+        if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  x + pad, tty + i * line_h, TEXT_WHITE,
+                                  m.lines[i]))
+            return;
+    }
+    if (m.footer[0] &&
+        !append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
+                              x + pad, y + box_h - footer_h + 2,
+                              TEXT_MUTED, m.footer))
+        return;
+
+    if (vtx_count > 0) {
+        flush_dcache(vtx, (size_t)vtx_count * sizeof(*vtx));
+        append_text_batch(&cmd, &b, vtx_io, vtx_count);
+    }
+    (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
     if (!g_local_base) {
         CellGcmConfig cfg;
@@ -896,7 +1057,9 @@ static int hk_flip_command(void *ctx, uint8_t id) {
         cellGcmGetConfiguration(&cfg);
         g_local_base = cfg.localAddress;
     }
-    if (g_menu_active)
+    if (g_card_active)
+        maybe_draw_card(ctx, id);
+    else if (g_menu_active)
         maybe_draw_menu(ctx, id);
     else if (g_message_box_frames > 0)
         maybe_draw_message_box(ctx, id);
@@ -1038,6 +1201,46 @@ void taiko_overlay_menu_active(int on) {
     if (!on)
         g_menu_cur = -1;
     g_menu_active = on ? 1 : 0;
+}
+
+void taiko_overlay_card_set(const char *title,
+                            const char *const *lines, int n,
+                            const char *footer, const char *qr_payload) {
+    if (n < 0)
+        n = 0;
+    if (n > OVERLAY_CARD_LINES)
+        n = OVERLAY_CARD_LINES;
+
+    int slot = 0;
+    while (slot == g_card_cur || slot == g_card_reading)
+        slot++;
+    if (slot >= 2)
+        slot = (g_card_cur + 1) % 2;
+    overlay_card_state_t *m = &g_card_state[slot];
+
+    copy_str(m->title, sizeof m->title, title);
+    for (int i = 0; i < n; i++)
+        copy_str(m->lines[i], sizeof m->lines[i],
+                 (lines && lines[i]) ? lines[i] : "");
+    m->line_n = n;
+    copy_str(m->footer, sizeof m->footer, footer);
+
+    m->qr_size = 0;
+    if (qr_payload && qr_payload[0]) {
+        taiko_qr_t qr;
+        if (taiko_qr_encode_text(qr_payload, strlen(qr_payload), &qr) == 0 &&
+            qr.size > 0 && qr.size <= TAIKO_QR_SIZE) {
+            m->qr_size = qr.size;
+            memcpy(m->qr_mod, qr.module, sizeof m->qr_mod);
+        }
+    }
+    g_card_cur = slot;
+}
+
+void taiko_overlay_card_active(int on) {
+    if (!on)
+        g_card_cur = -1;
+    g_card_active = on ? 1 : 0;
 }
 
 void taiko_overlay_hooks_install(void) {

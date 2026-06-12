@@ -90,6 +90,10 @@ void cfg_file_parse(const char *buf, size_t len,
         }
         i++;
 
+        /* skip leading whitespace after '=' so values don't accumulate a
+         * leading space across save/load round-trips (e.g. card labels). */
+        while (i < len && (buf[i] == ' ' || buf[i] == '\t')) i++;
+
         size_t vstart = i;
         while (i < len && buf[i] != '\n') i++;
         char value[192];
