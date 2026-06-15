@@ -4,8 +4,12 @@
 #include <stdint.h>
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 2u
+#define TAIKO_FPT_VERSION 3u           /* v3: serial_utf16 cell appended */
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
+
+/* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the
+ * buffer layout the game's fcntl serial reader expects. */
+#define TAIKO_FPT_SERIAL_BYTES 24u
 
 enum {
     TAIKO_FPT_HTTP_BASE = 0,
@@ -79,7 +83,18 @@ typedef struct {
     uint32_t reserved;
     uint32_t got_slots[TAIKO_FPT_SLOT_COUNT];
     uint32_t slots[TAIKO_FPT_SLOT_COUNT];
+    /* Live dongle serial (UTF-16BE). The sprx writes this each boot from
+     * g_cfg; the patched fcntl serial reader copies it into the game's
+     * buffer. Lets a config serial change take effect without a repatch.
+     * Only present when version >= 3 (offset must stay AFTER slots so the
+     * got_slots/slots offsets the patcher bakes never move). */
+    uint8_t  serial_utf16[TAIKO_FPT_SERIAL_BYTES];
 } taiko_fpt_t;
+
+/* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
+ * UTF-16BE so the patched fcntl reader serves it live. No-op (returns 0)
+ * on tables older than v3, which lack the cell. */
+int taiko_fpt_publish_serial(const char *serial12);
 
 int taiko_fpt_publish(uint32_t slot, const void *opd);
 /* Update only the FPT dispatch slot. Direct GOT callers keep the original OPD. */

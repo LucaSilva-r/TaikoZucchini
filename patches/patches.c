@@ -907,28 +907,41 @@ static const uint32_t fcntl_suffix[] = {
     0x4E800020u, /* blr                    */
 };
 
-static void encode_serial_writes(uint32_t *out, const char *serial) {
-    /* serial is 12 ASCII digits, stored as UTF-16BE 4(r4)..28(r4).
-     * Each char pair becomes (lis r0,hi ; ori r0,r0,lo ; stw r0,off(r4)). */
-    for (int i = 0; i < 12; i += 2) {
-        uint32_t hi  = (uint8_t)serial[i];
-        uint32_t lo  = (uint8_t)serial[i + 1];
-        uint32_t off = (uint32_t)(4 + i * 2);
-        *out++ = 0x3C000000u | hi;             /* lis r0, hi */
-        *out++ = 0x60000000u | lo;             /* ori r0,r0,lo */
-        *out++ = 0x90040000u | (off & 0xFFFFu);/* stw r0,off(r4) */
+/* Serial section: copy 24 bytes (12 digits UTF-16BE) from the FPT
+ * serial_utf16 cell into 4(r4)..28(r4). The source address is left as a
+ * placeholder (lis/ori of 0) here because the FPT VA is not known until
+ * sprx_loader_patch runs after this; that pass fixes up the two
+ * immediates at g_fcntl_serial_cell_site. Reading the cell at boot
+ * instead of baking literal digits lets a config serial change apply
+ * without a repatch. r5 is dead after the prefix's threshold compare, so
+ * it is reused as the cell base; r0 is the load/store temp. */
+static void encode_serial_copy(uint32_t *out) {
+    *out++ = 0x3CA00000u; /* lis r5, 0   (cell@h -- fixed up later) */
+    *out++ = 0x60A50000u; /* ori r5,r5,0 (cell@l -- fixed up later) */
+    for (uint32_t k = 0; k < 24u; k += 4u) {
+        *out++ = 0x80050000u | k;                    /* lwz r0,k(r5)     */
+        *out++ = 0x90040000u | ((4u + k) & 0xFFFFu); /* stw r0,(4+k)(r4) */
     }
 }
 
-static void apply_fcntl_dispatch(void) {
-    enum { PREFIX_W = 24,
-           SUFFIX_W = sizeof(fcntl_suffix) / 4,
-           SERIAL_W = 18,                        /* 6 pairs × 3 insn */
-           TOTAL_W  = PREFIX_W + SERIAL_W + SUFFIX_W };
+enum { FCNTL_PREFIX_W = 24,
+       FCNTL_SERIAL_COPY_W = 2 + 6 * 2 };  /* lis/ori + 6 lwz/stw pairs */
 
-    char serial[13];
-    memcpy(serial, taiko_cfg_dongle_serial(), 12);
-    serial[12] = '\0';
+/* VA of the two placeholder immediates emitted by encode_serial_copy,
+ * recorded when apply_fcntl_dispatch runs so sprx_loader_patch can write
+ * the resolved FPT serial-cell address. 0 when the fcntl patch wasn't
+ * applied (no fixup needed). */
+static uintptr_t g_fcntl_serial_cell_site;
+
+uintptr_t patches_fcntl_serial_cell_site(void) {
+    return g_fcntl_serial_cell_site;
+}
+
+static void apply_fcntl_dispatch(void) {
+    enum { PREFIX_W = FCNTL_PREFIX_W,
+           SUFFIX_W = sizeof(fcntl_suffix) / 4,
+           SERIAL_W = FCNTL_SERIAL_COPY_W,
+           TOTAL_W  = PREFIX_W + SERIAL_W + SUFFIX_W };
 
     uint32_t payload[TOTAL_W];
     uint32_t *p = payload;
@@ -936,10 +949,14 @@ static void apply_fcntl_dispatch(void) {
     encode_fcntl_prefix(p, g_usb_sites.fcntl_dongle_threshold,
                         g_usb_sites.fcntl_dongle_below_threshold);
     p += PREFIX_W;
-    encode_serial_writes(p, serial);                 p += SERIAL_W;
+    encode_serial_copy(p);                           p += SERIAL_W;
     memcpy(p, fcntl_suffix, sizeof(fcntl_suffix));
 
     write_stream(g_usb_sites.fcntl_dispatch, payload, TOTAL_W);
+
+    /* lis/ori sit at the start of the serial section = prefix end. */
+    g_fcntl_serial_cell_site =
+        g_usb_sites.fcntl_dispatch + (uintptr_t)PREFIX_W * 4u;
 }
 
 /* ------------------------------------------------------------------ */

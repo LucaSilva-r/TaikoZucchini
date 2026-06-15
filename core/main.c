@@ -34,6 +34,7 @@
 #include "taiko_frame.h"
 #include "card_picker.h"
 #include "usrdir_path.h"
+#include "eboot_fpt.h"
 #include "param_sfo_fix.h"
 #include "eboot_flow.h"
 #include "patch_ui.h"
@@ -783,6 +784,13 @@ int taiko_start(unsigned int args, void *argp) {
     bpreader_serial_set_reader_enabled(1);
     (void)taiko_game_chassisinfo_dir();  /* warm cache + log detected version */
     chassisinfo_hook_install();
+    /* Publish the live dongle serial into the FPT so the patched fcntl
+     * reader serves the current config value (v3+ EBOOTs). No-op on older
+     * patched EBOOTs, which still carry the literal serial baked at patch
+     * time. Keeps the USB serial in step with the chassisinfo synth, which
+     * already reads the serial live. */
+    if (taiko_fpt_publish_serial(taiko_cfg_dongle_serial()))
+        dbg_print("[fpt] live dongle serial published\n");
     if (g_cfg.usio_emulation) {
         taiko_frame_init();
         pad_input_init();

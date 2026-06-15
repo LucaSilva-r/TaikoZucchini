@@ -154,6 +154,7 @@ typedef enum {
     ITEM_ACTION,
     ITEM_HOST_EDIT, /* string-editor row: opens OSK on confirm */
     ITEM_PORT_EDIT, /* uint16 editor row: opens numeric OSK */
+    ITEM_SERIAL_EDIT, /* dongle serial: opens numeric OSK */
 } item_kind_t;
 
 typedef struct {
@@ -185,6 +186,11 @@ static const menu_item_t g_items[] = {
       0, 0 },
     { ITEM_PORT_EDIT, "Redirect port",
       "Private server TCP port. Usually 443.",
+      0, 0 },
+
+    { ITEM_SECTION, "Dongle", "", 0, 0 },
+    { ITEM_SERIAL_EDIT, "Dongle serial",
+      "12-digit USB dongle serial (must start 26841). Must match a chassisinfo serial entry, else operator flags fall back to zero. Applied live; no repatch.",
       0, 0 },
 
     { ITEM_SECTION, "Chassis settings (chassisinfo.xml)", "", 0, 0 },
@@ -554,6 +560,11 @@ static void draw_frame(void) {
             int tw = menu_text_width(&menu_font_30_font, buf);
             menu_draw_text(&menu_font_30_font,
                            rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, buf);
+        } else if (it->kind == ITEM_SERIAL_EDIT) {
+            const char *s = taiko_cfg_dongle_serial();
+            int tw = menu_text_width(&menu_font_30_font, s);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, s);
         }
     }
 
@@ -736,6 +747,22 @@ static void menu_loop(void) {
                     } else {
                         g_status = "Invalid port (1-65535)";
                     }
+                }
+                (void)menu_pad_pressed();
+            } else if (it->kind == ITEM_SERIAL_EDIT && (edge & MENU_BTN_CROSS)) {
+                char cur[TAIKO_DONGLE_SERIAL_LEN + 1];
+                memcpy(cur, taiko_cfg_dongle_serial(), TAIKO_DONGLE_SERIAL_LEN);
+                cur[TAIKO_DONGLE_SERIAL_LEN] = 0;
+
+                char buf[16];
+                int rc = menu_osk_input("Dongle serial (12 digits, starts 26841)",
+                                        cur, MENU_OSK_NUMERIC,
+                                        buf, sizeof buf);
+                if (rc == 0) {
+                    if (taiko_cfg_set_dongle_serial(buf) == 0)
+                        g_status = "Dongle serial updated";
+                    else
+                        g_status = "Invalid serial (12 digits, 26841 prefix)";
                 }
                 (void)menu_pad_pressed();
             }
@@ -1034,6 +1061,10 @@ static void ig_row_info(int code, char *label, int lcap,
         ig_append(label, 0, lcap, "Redirect port");
         ig_append_u32(value, 0, vcap, g_cfg.online_redirect_port);
         break;
+    case ITEM_SERIAL_EDIT:
+        ig_append(label, 0, lcap, "Dongle serial");
+        ig_append(value, 0, vcap, taiko_cfg_dongle_serial());
+        break;
     }
 }
 
@@ -1172,9 +1203,10 @@ static void ig_activate(int code, uint32_t edge, int *close) {
         } else {
             run_action(it->action);         /* A_DELETE_USIO_BACKUP: no exit */
         }
-    } else if ((it->kind == ITEM_HOST_EDIT || it->kind == ITEM_PORT_EDIT) &&
+    } else if ((it->kind == ITEM_HOST_EDIT || it->kind == ITEM_PORT_EDIT ||
+                it->kind == ITEM_SERIAL_EDIT) &&
                (edge & MENU_BTN_CROSS)) {
-        g_status = "Edit redirect host/port from the boot menu (tap F2 at startup)";
+        g_status = "Edit text/number fields from the boot menu (tap F2 at startup)";
     }
 }
 

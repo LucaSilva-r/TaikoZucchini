@@ -284,6 +284,17 @@ const char *taiko_cfg_dongle_serial(void) {
     return CFG_DONGLE_SERIAL;
 }
 
+int taiko_cfg_set_dongle_serial(const char *s) {
+    if (!s) return -1;
+    int n = 0;
+    while (s[n]) n++;
+    if (n != TAIKO_DONGLE_SERIAL_LEN) return -1;
+    if (!dongle_serial_validate(s)) return -1;
+    memcpy(g_cfg.dongle_serial, s, TAIKO_DONGLE_SERIAL_LEN);
+    g_cfg.dongle_serial[TAIKO_DONGLE_SERIAL_LEN] = '\0';
+    return 0;
+}
+
 static void handle_chassis(const char *key, const char *value, void *u) {
     (void)u;
     for (int id = 0; id < CI_F__COUNT; id++) {

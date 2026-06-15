@@ -5,6 +5,7 @@
 #include "sprx_loader_patch.h"
 #include "debug.h"
 #include "eboot_fpt.h"
+#include "patches/patches.h"
 
 #define PF_X 1u
 #define PF_W 2u
@@ -825,6 +826,29 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
         write_fpt_stub(ctx->buf + stub_off,
                        (uint32_t)(fpt_va + offsetof(taiko_fpt_t, slots) +
                                   s->slot * sizeof(uint32_t)));
+    }
+
+    /* Bake the FPT serial-cell VA into the patched fcntl serial reader.
+     * patches_apply_all_to_buffer emitted lis r5,0 / ori r5,r5,0 as a
+     * placeholder (it ran before the FPT VA was known); fill the two
+     * immediates now. The sprx writes the live serial into this cell at
+     * boot, so a config serial change applies without a repatch. */
+    uintptr_t fcntl_serial_site = patches_fcntl_serial_cell_site();
+    if (fcntl_serial_site) {
+        uint32_t cell_va =
+            (uint32_t)(fpt_va + offsetof(taiko_fpt_t, serial_utf16));
+        uint64_t site_off = 0;
+        if (va_to_off(ctx, phdrs, phnum, (uint64_t)fcntl_serial_site,
+                      &site_off) == 0 && site_off + 8u <= ctx->buf_len) {
+            store_be32(ctx->buf + site_off,
+                       0x3CA00000u | ((cell_va >> 16) & 0xFFFFu)); /* lis r5,h */
+            store_be32(ctx->buf + site_off + 4u,
+                       0x60A50000u | (cell_va & 0xFFFFu));         /* ori r5,r5,l */
+            dbg_print_hex32("[patch] fcntl serial cell VA", cell_va);
+        } else {
+            dbg_print_hex32("[patch] fcntl serial fixup VA unmapped",
+                            (uint32_t)fcntl_serial_site);
+        }
     }
 
     uint64_t old_rw_size = rw_file_size;

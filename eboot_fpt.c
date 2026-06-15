@@ -102,6 +102,18 @@ int taiko_fpt_available(void) {
     return get_fpt() != NULL;
 }
 
+int taiko_fpt_publish_serial(const char *serial12) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 3u || !serial12)
+        return 0;
+    volatile uint8_t *cell = (volatile uint8_t *)t->serial_utf16;
+    for (int i = 0; i < 12; i++) {
+        cell[i * 2]     = 0x00;
+        cell[i * 2 + 1] = (uint8_t)serial12[i];
+    }
+    return 1;
+}
+
 int taiko_fpt_publish(uint32_t slot, const void *opd) {
     taiko_fpt_t *t = get_fpt();
     if (!t || slot >= t->slot_count || slot >= TAIKO_FPT_SLOT_COUNT)

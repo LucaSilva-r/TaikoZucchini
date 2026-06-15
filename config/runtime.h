@@ -127,4 +127,8 @@ int taiko_online_redirect_active(void);
  * Validation (prefix "26841", 12 digits) happens at cfg parse time. */
 const char *taiko_cfg_dongle_serial(void);
 
+/* Validate + store a 12-digit dongle serial (must start "26841"). Returns
+ * 0 on success, -1 if rejected (g_cfg.dongle_serial left unchanged). */
+int taiko_cfg_set_dongle_serial(const char *s);
+
 #endif
