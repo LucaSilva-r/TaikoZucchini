@@ -273,6 +273,91 @@ static int hash_live_eboot(unsigned char out[20]) {
     return hash_file(path, out);
 }
 
+/* ---------------------- Per-game EBOOT repatch state -------------------
+ * Each build's EBOOT differs, so repatch tracking cannot live in the
+ * shared config (config/runtime.c). It is stored in USRDIR/zucchini_hash
+ * as two 40-char hex lines: patcher (zucchini.sprx) hash, then patched
+ * EBOOT hash. The repatch decision logic below reads g_cfg.eboot_*,
+ * which these helpers back. */
+#define TAIKO_EBOOT_HASH_NAME "zucchini_hash"
+
+static int hb_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+static int hb_hex_to_bytes(const char *v, unsigned char *out, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        int h = hb_nibble(v[i*2]), l = hb_nibble(v[i*2+1]);
+        if (h < 0 || l < 0) return 0;
+        out[i] = (unsigned char)((h << 4) | l);
+    }
+    return 1;
+}
+
+static void hb_bytes_to_hex(const unsigned char *in, size_t n, char *out) {
+    static const char hexd[] = "0123456789abcdef";
+    for (size_t i = 0; i < n; i++) {
+        out[i*2]   = hexd[(in[i] >> 4) & 0xF];
+        out[i*2+1] = hexd[ in[i]       & 0xF];
+    }
+}
+
+static void eboot_hash_load(void) {
+    char path[256];
+    if (!usrdir_resolve_path(TAIKO_EBOOT_HASH_NAME, path, sizeof(path)))
+        return;
+    int fd = -1;
+    if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+        return;
+    char buf[128];
+    uint64_t got = 0;
+    int rc = cellFsRead(fd, buf, sizeof(buf) - 1, &got);
+    cellFsClose(fd);
+    if (rc != CELL_FS_SUCCEEDED || got < 40)
+        return;
+    buf[got] = 0;
+
+    /* line 1: patcher hash */
+    if (hb_hex_to_bytes(buf, g_cfg.eboot_patcher_hash, 20))
+        g_cfg.eboot_have_patcher_hash = 1;
+    /* line 2: patched EBOOT hash */
+    uint64_t i = 0;
+    while (i < got && buf[i] != '\n') i++;
+    if (i < got && buf[i] == '\n') {
+        i++;
+        if (got - i >= 40 &&
+            hb_hex_to_bytes(buf + i, g_cfg.eboot_patched_hash, 20))
+            g_cfg.eboot_have_patched_hash = 1;
+    }
+}
+
+static void eboot_hash_save(void) {
+    char path[256];
+    if (!usrdir_resolve_path(TAIKO_EBOOT_HASH_NAME, path, sizeof(path))) {
+        dbg_print("[eboot] hash save: USRDIR unresolved\n");
+        return;
+    }
+    int fd = -1;
+    if (cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                   &fd, NULL, 0) != CELL_FS_SUCCEEDED) {
+        dbg_print("[eboot] hash save: open failed\n");
+        return;
+    }
+    char line[42];
+    uint64_t wrote = 0;
+    hb_bytes_to_hex(g_cfg.eboot_patcher_hash, 20, line);
+    line[40] = '\n';
+    cellFsWrite(fd, line, 41, &wrote);
+    hb_bytes_to_hex(g_cfg.eboot_patched_hash, 20, line);
+    line[40] = '\n';
+    cellFsWrite(fd, line, 41, &wrote);
+    cellFsClose(fd);
+    dbg_print("[eboot] wrote zucchini_hash\n");
+}
+
 static int read_runtime_data00000_metadata(uint32_t *series_version,
                                            uint32_t *product_version) {
     char path[256];
@@ -324,13 +409,11 @@ static void remember_patch_success(const eboot_flow_args_t *a,
                                    int have_patcher_hash) {
     memcpy(g_cfg.eboot_patched_hash, a->out_hash, 20);
     g_cfg.eboot_have_patched_hash = 1;
-    if (hash_file(a->original_path, g_cfg.eboot_unpatched_hash) != 0)
-        memset(g_cfg.eboot_unpatched_hash, 0, 20);
     if (have_patcher_hash) {
         memcpy(g_cfg.eboot_patcher_hash, patcher_hash, 20);
         g_cfg.eboot_have_patcher_hash = 1;
     }
-    taiko_cfg_save();
+    eboot_hash_save();
 }
 
 static void fill_patch_args(eboot_flow_args_t *a, const char *orig,
@@ -656,6 +739,9 @@ int taiko_start(unsigned int args, void *argp) {
             taiko_cfg_try_late_load();
         }
     }
+    /* Per-game repatch state lives in USRDIR/zucchini_hash now, not the
+     * shared config. Load it before the repatch hash check below. */
+    eboot_hash_load();
     /* Runtime path: same operator override window before the auto-repatch
      * hash check runs. */
     menu_maybe_open();

@@ -3,9 +3,10 @@
 
 #include <stdint.h>
 
-/* Runtime-mutable feature flags. Loaded at boot from
- * USRDIR/taiko_config.cfg; falls back to compile-time defaults from
- * features.h / patches.h when the file is unreadable.
+/* Runtime-mutable feature flags. Loaded at boot from the shared
+ * /dev_hdd0/plugins/taiko/taiko_config.cfg, then overlaid by an optional
+ * per-game USRDIR/taiko_config.cfg; falls back to compile-time defaults
+ * from features.h / patches.h when the file is unreadable.
  *
  * Features are boot-only: changes require restart. */
 
@@ -68,11 +69,12 @@ typedef struct {
      * Empty means use TAIKO_ZUCCHINI_API_TOKEN from the binary. */
     char     zucchini_api_token[TAIKO_API_TOKEN_MAX];
 
-    /* EBOOT-patcher state (slice 7). Tracks whether the on-disk EBOOT
-     * has already been pre-patched, so runtime memory writes can be
-     * skipped on retail systems where they would syscall-905 fail. */
+    /* EBOOT-patcher state. Tracks whether the on-disk EBOOT has already
+     * been pre-patched, so runtime memory writes can be skipped on retail
+     * systems where they would syscall-905 fail. In-memory holders only:
+     * persisted per-game to USRDIR/zucchini_hash by core/main.c, NOT to
+     * the shared config (each build's EBOOT differs). */
     unsigned char eboot_patched_hash[20];     /* SHA1 of patched EBOOT.BIN */
-    unsigned char eboot_unpatched_hash[20];   /* SHA1 of original (diagnostic) */
     unsigned char eboot_patcher_hash[20];     /* SHA1 of zucchini.sprx that patched it */
     int           eboot_have_patched_hash;
     int           eboot_have_patcher_hash;

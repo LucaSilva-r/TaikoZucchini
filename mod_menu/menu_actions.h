@@ -7,8 +7,9 @@
 /* Delete USRDIR/usiobackup.bin so next boot rebuilds it from scratch. */
 int menu_action_delete_usio_backup(void);
 
-/* Delete USRDIR/taiko_config.cfg so next boot reapplies the patch flow
- * (hash check sees config missing -> re-runs eboot_flow_run). */
+/* Delete the shared /dev_hdd0/plugins/taiko/taiko_config.cfg so next boot
+ * regenerates it with defaults. Does NOT touch repatch state (that lives
+ * per-game in USRDIR/zucchini_hash). */
 int menu_action_delete_config(void);
 
 /* Persist current g_cfg via taiko_cfg_save(). Always returns 0. */

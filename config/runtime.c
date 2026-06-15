@@ -12,8 +12,12 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 13  /* v13: TaikOnline card issuer token override */
+#define TAIKO_CFG_VERSION 14  /* v14: global shared config + offline defaults */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
+/* Shared config lives next to the module so every game reads/writes one
+ * file. A per-game USRDIR/taiko_config.cfg (TAIKO_CONFIG_NAME) is an
+ * optional hand-edited overlay applied on top of the global values. */
+#define TAIKO_GLOBAL_CONFIG_PATH "/dev_hdd0/plugins/taiko/taiko_config.cfg"
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
  * still sees sane defaults. */
@@ -44,10 +48,18 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_host   = {0},
     .online_redirect_port   = 443,
 
-    /* Sane defaults: only the three "go-online" gates are ON so
-     * stock cabinets boot past the network check without operator
-     * intervention. CI_F_* indices come from chassisinfo_schema.h. */
+    /* Offline-by-default: a fresh install should boot and play on every
+     * build with no operator intervention. is_promotion + force_offline
+     * + force_musicinfo_allrelease give free-play with the full song list
+     * and no network dependency; the three "ignore_*" network gates plus
+     * ignore_closetime / ignore_nblinepoint keep the boot path from
+     * stalling on server checks. CI_F_* indices from chassisinfo_schema.h. */
     .chassis_flags = {
+        [CI_F_IS_PROMOTION]                  = 1,
+        [CI_F_FORCE_OFFLINE]                 = 1,
+        [CI_F_FORCE_MUSICINFO_ALLRELEASE]    = 1,
+        [CI_F_IGNORE_NBLINEPOINT]            = 1,
+        [CI_F_IGNORE_CLOSETIME]              = 1,
         [CI_F_IGNORE_NETWORK_AUTHENTICATION] = 1,
         [CI_F_IGNORE_NETWORK_CONNECTION]     = 1,
         [CI_F_IGNORE_MUCHA_INVALID_ENFORCED] = 1,
@@ -55,7 +67,8 @@ taiko_runtime_cfg_t g_cfg = {
 };
 
 static int g_loaded_version  = -1;
-static int g_loaded_from_file = 0;
+static int g_global_loaded   = 0;  /* global file parsed (or defaults written) */
+static int g_local_overlaid  = 0;  /* per-game override file applied */
 static int g_dongle_serial_reset = 0;  /* set when invalid cfg value coerced to default */
 
 /* ------------------------- Section handlers ------------------------- */
@@ -217,24 +230,6 @@ static void handle_kb_service(const char *key, const char *value, void *u) {
     kb_input_cfg_service_kv(key, value);
 }
 
-static int hex_nibble(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    return -1;
-}
-
-static int hex_to_bytes(const char *v, unsigned char *out, size_t n) {
-    while (*v == ' ' || *v == '\t') v++;
-    for (size_t i = 0; i < n; i++) {
-        int h = hex_nibble(v[0]), l = hex_nibble(v[1]);
-        if (h < 0 || l < 0) return 0;
-        out[i] = (unsigned char)((h << 4) | l);
-        v += 2;
-    }
-    return 1;
-}
-
 static int dongle_serial_validate(const char *s) {
     static const char prefix[5] = { '2','6','8','4','1' };
     for (int i = 0; i < 5; i++)
@@ -301,28 +296,6 @@ static void handle_chassis(const char *key, const char *value, void *u) {
     }
 }
 
-static void handle_eboot(const char *key, const char *value, void *u) {
-    (void)u;
-    if (cfg_file_str_eq_ci(key, "expected_patched_hash")) {
-        if (hex_to_bytes(value, g_cfg.eboot_patched_hash, 20))
-            g_cfg.eboot_have_patched_hash = 1;
-        return;
-    }
-    if (cfg_file_str_eq_ci(key, "last_unpatched_hash")) {
-        hex_to_bytes(value, g_cfg.eboot_unpatched_hash, 20);
-        return;
-    }
-    if (cfg_file_str_eq_ci(key, "patcher_hash")) {
-        if (hex_to_bytes(value, g_cfg.eboot_patcher_hash, 20))
-            g_cfg.eboot_have_patcher_hash = 1;
-        return;
-    }
-    if (cfg_file_str_eq_ci(key, "patch_set_version")) {
-        /* Legacy v2 key. Current builds use patcher_hash instead. */
-        return;
-    }
-}
-
 static const cfg_section_t SECTIONS[] = {
     {"meta",     handle_meta,     NULL},
     {"identity", handle_identity, NULL},
@@ -330,7 +303,6 @@ static const cfg_section_t SECTIONS[] = {
     {"patches",  handle_patches,  NULL},
     {"network",  handle_network,  NULL},
     {"chassis",  handle_chassis,  NULL},
-    {"eboot",    handle_eboot,    NULL},
     {"p1",       handle_p1,       NULL},
     {"p2",       handle_p2,       NULL},
     {"kb_p1",    handle_kb_p1,    NULL},
@@ -377,17 +349,6 @@ static void emit_kv_uint(int fd, const char *comment, const char *key,
     cfg_file_write_str(fd, " = ");
     cfg_file_write_uint(fd, value);
     cfg_file_write_str(fd, "\n");
-}
-
-static void emit_sha1_hex(int fd, const unsigned char hash[20]) {
-    static const char hexd[] = "0123456789abcdef";
-    char hex[41];
-    for (int i = 0; i < 20; i++) {
-        hex[i*2  ] = hexd[(hash[i] >> 4) & 0xF];
-        hex[i*2+1] = hexd[ hash[i]       & 0xF];
-    }
-    hex[40] = 0;
-    cfg_file_write_str(fd, hex);
 }
 
 static void write_cfg_file(const char *path) {
@@ -528,20 +489,9 @@ static void write_cfg_file(const char *path) {
     }
     cfg_file_write_str(fd, "\n");
 
-    cfg_file_write_str(fd, "[eboot]\n");
-    cfg_file_write_str(fd,
-        "# Set by SPRX after a successful on-disk EBOOT patch flow.\n"
-        "# Do not hand-edit - wrong hashes will trigger a re-patch.\n");
-    if (g_cfg.eboot_have_patcher_hash) {
-        cfg_file_write_str(fd, "patcher_hash = ");
-        emit_sha1_hex(fd, g_cfg.eboot_patcher_hash);
-        cfg_file_write_str(fd, "\n");
-    }
-    if (g_cfg.eboot_have_patched_hash) {
-        cfg_file_write_str(fd, "expected_patched_hash = ");
-        emit_sha1_hex(fd, g_cfg.eboot_patched_hash);
-        cfg_file_write_str(fd, "\n");
-    }
+    /* EBOOT repatch hashes are per-game and live in USRDIR/zucchini_hash,
+     * not in this shared file. See core/main.c. */
+
     pad_input_cfg_emit(fd);
     kb_input_cfg_emit(fd);
 
@@ -553,56 +503,68 @@ static void write_cfg_file(const char *path) {
 
 /* --------------------------- Load entry ------------------------------ */
 
-static int try_load(void) {
-    char path[512];
-    if (!usrdir_resolve_path(TAIKO_CONFIG_NAME, path, sizeof path))
-        return 0;
+static void parse_into_cfg(const char *buf, size_t len) {
+    cfg_file_parse(buf, len, SECTIONS, sizeof SECTIONS / sizeof SECTIONS[0]);
+}
 
-    /* Never write defaults to a path resolved via the speculative
-     * fallbacks (self-module scan / PRX list scan) — with the SPRX
-     * shared at /dev_hdd0/plugins/, those can pick the wrong game
-     * folder and pollute it. Require an authoritative seed first. */
-    int authoritative = usrdir_path_authoritative();
-
+/* Load the shared config from the fixed plugin-dir path. The plugin
+ * directory always exists, so this needs no USRDIR resolution. Writes
+ * defaults if the file is absent, and rewrites on version mismatch or
+ * coerced serial. */
+static void load_global(void) {
     static char buf[8192];
     uint64_t got = 0;
-    int read_ok = cfg_file_read(path, buf, sizeof buf - 1, &got);
+    int read_ok =
+        cfg_file_read(TAIKO_GLOBAL_CONFIG_PATH, buf, sizeof buf - 1, &got);
+
+    g_global_loaded = 1;
 
     if (!read_ok || got == 0) {
-        if (!authoritative) {
-            dbg_print("[cfg] usrdir unauthoritative; defer default write\n");
-            return 0;
-        }
-        dbg_print("[cfg] absent, writing defaults\n");
-        write_cfg_file(path);
-        g_loaded_from_file = 1;
-        return 1;
-    }
-    if (!authoritative) {
-        /* Read succeeded from a guessed folder. Use the values
-         * in-memory but do not latch g_loaded_from_file so the
-         * late-load path can retry once the permit hook fires. */
-        dbg_print("[cfg] read from non-authoritative path; deferring latch\n");
+        dbg_print("[cfg] global absent, writing defaults\n");
+        write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
+        return;
     }
 
     buf[got] = 0;
     g_loaded_version = -1;
-    cfg_file_parse(buf, (size_t)got,
-                   SECTIONS, sizeof SECTIONS / sizeof SECTIONS[0]);
-    if (authoritative)
-        g_loaded_from_file = 1;
+    parse_into_cfg(buf, (size_t)got);
 
     /* No dongle_serial key seen at all (parser never fired for it). */
     if (!g_cfg.dongle_serial[0])
         coerce_dongle_serial_to_default("missing");
 
-    if (authoritative &&
-        (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset)) {
+    if (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset) {
         dbg_print_hex32("[cfg] rewriting; loaded version",
                         (uint32_t)g_loaded_version);
-        write_cfg_file(path);
+        write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
     }
-    return authoritative;
+}
+
+/* Overlay the optional per-game USRDIR/taiko_config.cfg on top of the
+ * already-loaded global values. cfg_file_parse only fires handlers for
+ * keys present in the file, so an override file containing a single key
+ * changes only that field and leaves every other global value intact.
+ * Needs an authoritative USRDIR. Returns 1 once an attempt was made
+ * against a resolvable USRDIR (whether or not a file was found), so the
+ * late-load retry can stop. */
+static int load_local_override(void) {
+    if (!usrdir_path_authoritative())
+        return 0;
+
+    char path[512];
+    if (!usrdir_resolve_path(TAIKO_CONFIG_NAME, path, sizeof path))
+        return 0;
+
+    static char buf[8192];
+    uint64_t got = 0;
+    if (cfg_file_read(path, buf, sizeof buf - 1, &got) && got > 0) {
+        buf[got] = 0;
+        dbg_print("[cfg] applying local override: ");
+        dbg_print(path);
+        dbg_print("\n");
+        parse_into_cfg(buf, (size_t)got);
+    }
+    return 1;
 }
 
 void taiko_cfg_init(void) {
@@ -611,21 +573,22 @@ void taiko_cfg_init(void) {
     pad_input_seed_defaults();
     kb_input_seed_defaults();
 
-    if (!try_load()) {
-        dbg_print("[cfg] usrdir not resolvable; using compile defaults\n");
-    }
+    load_global();
+    if (load_local_override())
+        g_local_overlaid = 1;
 }
 
 void taiko_cfg_try_late_load(void) {
-    if (g_loaded_from_file) return;
-    try_load();
+    /* Global is loaded unconditionally at init (fixed path). Only the
+     * USRDIR-relative override may have been deferred. */
+    if (!g_global_loaded)
+        load_global();
+    if (g_local_overlaid)
+        return;
+    if (load_local_override())
+        g_local_overlaid = 1;
 }
 
 void taiko_cfg_save(void) {
-    char path[512];
-    if (!usrdir_resolve_path(TAIKO_CONFIG_NAME, path, sizeof path)) {
-        dbg_print("[cfg] save: USRDIR unresolved\n");
-        return;
-    }
-    write_cfg_file(path);
+    write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
 }

@@ -11,6 +11,9 @@
 #include "usrdir_path.h"
 #include "runtime.h"
 
+/* Must match TAIKO_GLOBAL_CONFIG_PATH in config/runtime.c. */
+#define TAIKO_GLOBAL_CONFIG_PATH "/dev_hdd0/plugins/taiko/taiko_config.cfg"
+
 static int unlink_in_usrdir(const char *tail) {
     char path[256];
     if (!usrdir_resolve_path(tail, path, sizeof(path))) {
@@ -30,7 +33,13 @@ int menu_action_delete_usio_backup(void) {
 }
 
 int menu_action_delete_config(void) {
-    return unlink_in_usrdir("taiko_config.cfg");
+    /* Shared config now lives next to the module, not in USRDIR. */
+    int rc = cellFsUnlink(TAIKO_GLOBAL_CONFIG_PATH);
+    if (rc != CELL_FS_SUCCEEDED) {
+        dbg_print_hex32("[menu_act] delete global cfg rc", (uint32_t)rc);
+        return -2;
+    }
+    return 0;
 }
 
 int menu_action_save_config(void) {
