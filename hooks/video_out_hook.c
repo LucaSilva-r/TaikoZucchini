@@ -347,9 +347,13 @@ int taiko_video_upscale_inject_blit(void *ctx, uint8_t id) {
         return 0;
     /* Reserve enough headroom for the CallCommand we'll emit (~4 words
      * including padding). The actual scale methods live in our own
-     * sub-buffer. */
-    if (gcm->current + 8 > gcm->end)
-        return 0;
+     * sub-buffer. On busy frames the game's ring can sit near `end`; grow
+     * it through the game's own callback rather than dropping the blit
+     * (which would scan out a stale dest surface). */
+    if (gcm->current + 8 > gcm->end) {
+        if (!gcm->callback || gcm->callback(gcm, 8) != CELL_OK)
+            return 0;
+    }
 
     /* Fixed-point 32.32 / x scale ratio expected by NV3062: ratio =
      * (src << 20) / dst. Negative or out-of-range values cause RSX

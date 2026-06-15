@@ -472,6 +472,22 @@ static int get_flip_buffer(uint8_t id, overlay_buffer_t *out) {
     return 1;
 }
 
+/* Make room for `words` in the game's command ring. The injection point is
+ * the game's flip command, where on busy UI frames the ring can sit within a
+ * few words of `end`. Rather than silently dropping our CallCommand (which
+ * flickers the overlay whenever game UI pushes the ring near full), grow it
+ * through the game's own context callback exactly like cellGcmReserveMethodSize
+ * does. Returns 0 only if the context has no callback / the grow failed. */
+static int ensure_game_space(CellGcmContextData *game, uint32_t words) {
+    if (!game || !game->current || !game->end)
+        return 0;
+    if (game->current + words <= game->end)
+        return 1;
+    if (!game->callback)
+        return 0;
+    return game->callback(game, words) == CELL_OK;
+}
+
 static int finish_and_call(CellGcmContextData *game,
                            CellGcmContextData *cmd,
                            uint32_t cmd_io,
@@ -481,6 +497,9 @@ static int finish_and_call(CellGcmContextData *game,
     if (bytes == 0 || bytes > OVERLAY_CMD_WORDS * sizeof(uint32_t))
         return 0;
     flush_dcache(cmd_buf, bytes);
+    /* CallCommand is ~2 words; reserve a small margin and grow if needed. */
+    if (!ensure_game_space(game, OVERLAY_GCM_HEADROOM_WORDS))
+        return 0;
     cellGcmSetCallCommandUnsafe(game, cmd_io);
     return 1;
 }
@@ -590,8 +609,7 @@ static void maybe_draw_toast(void *ctx, uint8_t id) {
         return;
 
     CellGcmContextData *game = (CellGcmContextData *)ctx;
-    if (!game || !game->current || !game->end ||
-        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+    if (!game || !game->current || !game->end)
         return;
 
     int tw = text_width(g_toast);
@@ -688,8 +706,7 @@ static void maybe_draw_message_box(void *ctx, uint8_t id) {
         return;
 
     CellGcmContextData *game = (CellGcmContextData *)ctx;
-    if (!game || !game->current || !game->end ||
-        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+    if (!game || !game->current || !game->end)
         return;
 
     const int pad = 22;
@@ -772,8 +789,7 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
         return;
 
     CellGcmContextData *game = (CellGcmContextData *)ctx;
-    if (!game || !game->current || !game->end ||
-        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+    if (!game || !game->current || !game->end)
         return;
 
     int cur = g_menu_cur;
@@ -928,8 +944,7 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
         return;
 
     CellGcmContextData *game = (CellGcmContextData *)ctx;
-    if (!game || !game->current || !game->end ||
-        game->current + OVERLAY_GCM_HEADROOM_WORDS > game->end)
+    if (!game || !game->current || !game->end)
         return;
 
     int cur = g_card_cur;

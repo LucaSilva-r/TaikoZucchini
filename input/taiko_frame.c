@@ -17,6 +17,12 @@ static int      g_test_on;
 static uint8_t  g_last_frame[0x60];
 static int      g_last_frame_valid;
 static volatile int g_gated;
+/* Armed when the overlay un-gates: keep dropping USIO inputs until a frame
+ * where every mapped button (pad + keyboard, merged in the snapshot) is
+ * released. Without this, the button still held at menu-close — or its
+ * pending press edge — leaks straight into the drum the moment inputs
+ * resume. */
+static volatile int g_release_gate;
 
 /* Per-slot pulse state. `remaining_high` counts down PEAK frames pending,
  * `cooldown` enforces 0 frame(s) between distinct hits. No queue — new
@@ -29,11 +35,16 @@ typedef struct {
 static hit_slot_state_t g_hit_state[2][4];
 
 void taiko_frame_set_gated(int on) {
+    int was_gated = g_gated;
     g_gated = on ? 1 : 0;
     if (g_gated) {
         memset(g_hit_state, 0, sizeof g_hit_state);
         memset(g_last_frame, 0, sizeof g_last_frame);
         g_last_frame_valid = 1;
+        g_release_gate = 0;
+    } else if (was_gated) {
+        /* Un-gating: hold inputs off until everything is released. */
+        g_release_gate = 1;
     }
 }
 
@@ -43,6 +54,7 @@ void taiko_frame_init(void) {
     memset(g_last_frame, 0, sizeof g_last_frame);
     memset(g_hit_state, 0, sizeof g_hit_state);
     g_last_frame_valid = 0;
+    g_release_gate = 0;
 }
 
 void taiko_frame_build(uint8_t out[0x60], int advance_input) {
@@ -54,9 +66,24 @@ void taiko_frame_build(uint8_t out[0x60], int advance_input) {
     pad_snapshot_t snap;
     pad_input_consume(&snap);
 
-    /* Overlay open: drop every input this frame. Consume above already
-     * cleared the source edge counters, so nothing re-fires on un-gate. */
-    if (g_gated)
+    /* Release-gate: after un-gating, keep suppressing inputs until a frame
+     * with nothing held. `level` carries every mapped action bit (drum +
+     * buttons) for both ports, and the keyboard is merged into the same
+     * snapshot, so this clears only once pad AND keyboard are fully idle. */
+    if (g_release_gate) {
+        uint32_t held = snap.level[0] | snap.level[1] |
+                        snap.coin_edges | snap.test_edges;
+        for (int p = 0; p < 2 && !held; p++)
+            for (int i = 0; i < 4; i++)
+                held |= snap.hit[p][i];
+        if (!held)
+            g_release_gate = 0;
+    }
+
+    /* Overlay open (or release-gate pending): drop every input this frame.
+     * Consume above already cleared the source edge counters, so nothing
+     * re-fires once inputs resume. */
+    if (g_gated || g_release_gate)
         memset(&snap, 0, sizeof snap);
 
     const uint32_t level_any = snap.level[0] | snap.level[1];

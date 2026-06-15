@@ -1100,7 +1100,7 @@ static void ig_render(void) {
 
     const char *footer = g_status
         ? g_status
-        : "ARROWS/DPAD move  X/ENTER select  O/F5 close  -  most toggles apply next boot";
+        : "ARROWS move  X select  START/F10 save  O/F5 close  -  changes apply next boot";
     const char *desc = ig_desc_for(g_ig_rows[g_ig_sel]);
 
     taiko_overlay_menu_set("Taiko Zucchini (F5)", lptrs, vptrs, kinds,
