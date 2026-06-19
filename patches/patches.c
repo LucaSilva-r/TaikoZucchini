@@ -784,12 +784,40 @@ static void apply_authenticate_connect_fix(void) {
 
         const uintptr_t body_end = p + 0x900u;
         int is_auth = 0;
+        int is_vu = 0;
         for (uintptr_t q = p; q < body_end && q + 4u <= CFG_SCAN_TEXT_END; q += 4) {
             uint32_t w = pt_read32(T, q);
-            if (w == 0x2F800B9Au || w == 0x2F8013FEu) { is_auth = 1; break; }
+            if (w == 0x2F800B9Au) { is_auth = 1; break; }          /* dongle VID */
+            if (w == 0x2F8013FEu) { is_auth = 1; is_vu = 1; break; } /* VU VID    */
         }
         if (!is_auth)
             continue;
+
+        /*
+         * The VU-storage authenticate() (idVendor 0x13FE) additionally
+         * validates the device SERIAL against the "269701" product prefix +
+         * a check digit. The fcntl getter mock can only synthesize the
+         * configured dongle serial ("26841..."), so the connect-fix path
+         * still fails the serial compare and the game aborts with
+         * "23-2 USB memory error 2". There is no way for the mock to supply a
+         * matching VU serial without a per-build valid number, so stub the
+         * whole method to report success: set obj->status (0x3c) = 0 and
+         * return 0. The dongle authenticate keeps the connect-fix path below
+         * because its "26841" prefix matches the configured serial, and that
+         * path also stores the real serial into the object for later use.
+         */
+        if (is_vu && !g_usb_sites.vu_probe) {
+            static const uint32_t vu_stub[] = {
+                0x38000000u, /* li  r0,0          */
+                0x9003003Cu, /* stw r0,0x3c(r3)   ; obj->status = OK */
+                0x38600000u, /* li  r3,0          */
+                0x4E800020u, /* blr               */
+            };
+            write_stream(p, vu_stub, sizeof(vu_stub) / 4);
+            dbg_print_hex32("[patch] authenticate VU stub", (uint32_t)p);
+            patched++;
+            continue;
+        }
 
         for (uintptr_t q = p; q < body_end && q + 16u <= CFG_SCAN_TEXT_END; q += 4) {
             if ((pt_read32(T, q) & 0xFC000003u) != 0x48000001u) /* bl */
