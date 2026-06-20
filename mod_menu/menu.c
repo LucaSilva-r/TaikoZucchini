@@ -57,7 +57,6 @@ typedef enum {
     F_SAVED_CARD_PROMPT,
     F_CAMERA_DIAG_HOOKS,
     F_DATA00000_REDIRECT,
-    F_CERT_REPLACEMENT,
     F_ONLINE_DIAG,
     /* patches */
     F_PROBE_PATCHES,
@@ -90,7 +89,6 @@ static int field_get(field_id_t id) {
     case F_SAVED_CARD_PROMPT:   return g_cfg.saved_card_prompt;
     case F_CAMERA_DIAG_HOOKS:   return g_cfg.camera_diag_hooks;
     case F_DATA00000_REDIRECT:  return g_cfg.data00000_redirect;
-    case F_CERT_REPLACEMENT:    return g_cfg.cert_replacement;
     case F_ONLINE_DIAG:         return g_cfg.online_diag;
     case F_PROBE_PATCHES:       return g_cfg.probe_patches;
     case F_HARD_DONGLE_PROBE:   return g_cfg.hard_dongle_probe;
@@ -121,7 +119,6 @@ static void field_set(field_id_t id, int v) {
     case F_SAVED_CARD_PROMPT:   g_cfg.saved_card_prompt = v; break;
     case F_CAMERA_DIAG_HOOKS:   g_cfg.camera_diag_hooks = v; break;
     case F_DATA00000_REDIRECT:  g_cfg.data00000_redirect = v; break;
-    case F_CERT_REPLACEMENT:    g_cfg.cert_replacement = v; break;
     case F_ONLINE_DIAG:         g_cfg.online_diag = v; break;
     case F_PROBE_PATCHES:       g_cfg.probe_patches = v; break;
     case F_HARD_DONGLE_PROBE:   g_cfg.hard_dongle_probe = v; break;
@@ -264,9 +261,6 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "DATA00000 redirect",
       "Reads DATA00000.BIN from game USRDIR instead of a USB stick.",
       F_DATA00000_REDIRECT, 0 },
-    { ITEM_TOGGLE,  "Cert replacement",
-      "Loads replacement TLS certificates from disk. Useful for private online servers.",
-      F_CERT_REPLACEMENT, 0 },
     { ITEM_TOGGLE,  "Online diagnostics",
       "Periodically writes network and online state to the debug log.",
       F_ONLINE_DIAG, 0 },

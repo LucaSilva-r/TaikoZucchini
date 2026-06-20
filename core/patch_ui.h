@@ -16,6 +16,11 @@ void patch_ui_finish_ok(void);
  * via exitspawn2 — see the runtime repatch path in main.c). */
 void patch_ui_finish_ok_manual(void);
 void patch_ui_finish_error(int rc);
+/* Like patch_ui_finish_error, but shows a human-readable reason line on the
+ * error screen (e.g. "EBOOT_ORIGINAL.BIN not found / unreadable") instead of
+ * relying on the rc + log tail alone. Used for pre-flow aborts where the
+ * operator would otherwise be stuck on a black screen. */
+void patch_ui_finish_error_msg(int rc, const char *message);
 void patch_ui_wait_for_exit_request(void);
 void patch_ui_close(void);
 

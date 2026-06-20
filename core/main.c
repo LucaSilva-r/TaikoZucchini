@@ -15,7 +15,6 @@
 #include "config.h"
 #include "runtime.h"
 #include "patches/patches.h"
-#include "certs.h"
 #include "http_hook.h"
 #include "dns_hook.h"
 #include "socket_hook.h"
@@ -39,6 +38,8 @@
 #include "eboot_flow.h"
 #include "patch_ui.h"
 #include "overlay.h"
+#include "patch_warn.h"
+#include "write_probe.h"
 #include "menu.h"
 #include "menu_actions.h"
 #include "ftp_server.h"
@@ -417,11 +418,69 @@ static void remember_patch_success(const eboot_flow_args_t *a,
     eboot_hash_save();
 }
 
+/* Reset the per-session write-failure registry, re-save the global config, and
+ * proactively probe every place zucchini writes (plugin dir + game USRDIR
+ * configs/state). The config write at taiko_cfg_init() may have silently
+ * failed (e.g. the plugin dir is owned by root and not writable by the
+ * sandboxed game process — cellFsChmod can't fix that, see git history). The
+ * probe catches the rest BEFORE first runtime write, so the patch UI lists
+ * every misconfigured path up front. The fix for a locked-down install is a
+ * privileged install (PKG / webMAN FTP), not chmod. */
+static void prepare_writable_targets(const char *orig) {
+    patch_warn_reset();
+    taiko_cfg_save();
+
+    /* Derive the game USRDIR from the EBOOT_ORIGINAL.BIN path and probe it +
+     * the plugin dir for write access. */
+    char usrdir[256];
+    const char *slash = orig ? strrchr(orig, '/') : NULL;
+    if (slash && (size_t)(slash - orig) < sizeof(usrdir)) {
+        size_t dl = (size_t)(slash - orig);
+        memcpy(usrdir, orig, dl);
+        usrdir[dl] = 0;
+        write_probe_targets(usrdir, 1);   /* patch context: include EBOOT_ORIGINAL/keys/libsmart */
+    } else {
+        write_probe_targets(NULL, 1);
+    }
+}
+
+/* Finish the patch UI on a flow failure. If any file create/replace was
+ * recorded (patch_warn), the cause is almost always a folder-permission issue
+ * (root-owned game/plugin dirs the sandboxed process can't write) — show the
+ * known-cause perms message + the affected paths so the operator knows exactly
+ * what to fix. Otherwise fall back to the generic rc + QR screen. The fix is
+ * the same for every placement failure: fix folder perms / reinstall via PKG. */
+static void patch_ui_finish_failure(int rc) {
+    if (patch_warn_count() > 0)
+        patch_ui_finish_error_msg(
+            rc,
+            "Could not access one or more files (missing, or folder permission "
+            "issue). If a file is missing, restore/reinstall the game files. "
+            "Otherwise recursively set the plugins and game folders to 777 via "
+            "FTP (or the Linux VM on GEX consoles). See the Zucchini repo. "
+            "Affected files:");
+    else
+        patch_ui_finish_error(rc);
+}
+
+/* If the up-front probe (in prepare_writable_targets) recorded any unreadable/
+ * unwritable file, a patched EBOOT would boot into a broken state (can't read
+ * DATA00000 / save configs / write usiobackup). Gate the EBOOT + hash write:
+ * show the perms error screen and tell the caller to abort instead of writing
+ * a misleadingly "complete" but broken install. Requires the patch UI to be
+ * open. Returns 1 if the patch was gated. */
+static int patch_gate_on_probe_warnings(void) {
+    if (patch_warn_count() == 0)
+        return 0;
+    dbg_print("[eboot] probe found permission problems; gating EBOOT write\n");
+    patch_ui_finish_failure(-0xE0B2);
+    return 1;
+}
+
 static void fill_patch_args(eboot_flow_args_t *a, const char *orig,
                             const char *boot, const char *keys) {
     memset(a, 0, sizeof(*a));
     a->original_path  = orig;
-    a->bootstrap_path = boot;
     a->eboot_path     = boot;
     a->keys_dir       = keys;
     a->target_hen     = HEN_BUILD;
@@ -488,11 +547,21 @@ static int permit_bootstrap_content_writes(void) {
  * and 0 if no patch flow was run. */
 static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
     char orig[256], boot[256], keys[256];
+
     if (!resolve_bootstrap_paths(boot_args, orig, sizeof(orig),
                                  boot, sizeof(boot), 1)) {
-        if (boot_args)
-            dbg_print("[eboot] bootstrap mode aborted before patch flow\n");
-        return 0;
+        /* Missing, or the file/dir is owned by root and unreadable by the
+         * sandboxed game process. Don't leave the operator on a black screen:
+         * show the patch UI with a clear reason and hold so they can quit to
+         * XMB instead of power-cycling the console. */
+        dbg_print("[eboot] bootstrap mode aborted before patch flow\n");
+        patch_ui_open();
+        patch_ui_finish_error_msg(
+            -0xE0B0,
+            "EBOOT_ORIGINAL.BIN not found or unreadable. If the game is "
+            "installed, recursively set the game + plugins folders to 777 via "
+            "FTP (or the Linux VM on GEX consoles). See the Zucchini repo.");
+        return -1;
     }
 
     /* Keys live alongside the PRX in /dev_hdd0/plugins/<dir>/keys/. */
@@ -509,11 +578,15 @@ static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
     if (!have_patcher_hash)
         dbg_print("[eboot] could not hash zucchini.sprx\n");
 
+    prepare_writable_targets(orig);
+
     eboot_flow_args_t a;
     fill_patch_args(&a, orig, boot, keys);
 
     patch_ui_open();
     if (maybe_force_patch_fail_for_qr_test("bootstrap"))
+        return -1;
+    if (patch_gate_on_probe_warnings())
         return -1;
     int rc = eboot_flow_run(&a);
     dbg_print_hex32("[eboot] flow rc", (uint32_t)rc);
@@ -521,7 +594,7 @@ static int maybe_run_bootstrap_flow(const taiko_bootstrap_args_t *boot_args) {
         remember_patch_success(&a, patcher_hash, have_patcher_hash);
         patch_ui_finish_ok_manual();
     } else {
-        patch_ui_finish_error(rc);
+        patch_ui_finish_failure(rc);
     }
     return rc == 0 ? 1 : -1;
 }
@@ -585,22 +658,66 @@ static int maybe_repatch_from_original(void) {
     keys[sizeof(keys) - 1] = 0;
 
     dbg_print("[eboot] repatching EBOOT_ORIGINAL.BIN for current patch state\n");
+    prepare_writable_targets(orig);
+
     eboot_flow_args_t a;
     fill_patch_args(&a, orig, boot, keys);
 
     patch_ui_open();
     if (maybe_force_patch_fail_for_qr_test("runtime-repatch"))
         return -1;
+    if (patch_gate_on_probe_warnings())
+        return -1;
     int rc = eboot_flow_run(&a);
     dbg_print_hex32("[eboot] repatch flow rc", (uint32_t)rc);
     if (rc != 0) {
-        patch_ui_finish_error(rc);
+        patch_ui_finish_failure(rc);
         return -1;
     }
 
     remember_patch_success(&a, patcher_hash, 1);
     patch_ui_finish_ok_manual();
     dbg_print("[eboot] repatch complete; new EBOOT will run next launch\n");
+    return 1;
+}
+
+/* Normal-boot writability gate. The mod is installed and the EBOOT already
+ * patched, but folder permissions can get clobbered after the fact (root-owned
+ * dirs, a re-FTP that reset modes, etc.), leaving the game unable to save
+ * configs or write usiobackup.bin — a silent broken state users can't diagnose.
+ * Probe every file we write at boot; if any is unwritable, halt the boot and
+ * show the perms warning so the user can quit to XMB and fix it, rather than
+ * playing on with broken saves. Returns 1 if boot was blocked. */
+static int runtime_block_on_bad_write_perms(void) {
+    char path[256], usrdir[256];
+
+    /* Resolve the USRDIR via a known per-game file tail. If the USRDIR can't
+     * be resolved yet we can't probe it; don't block (avoid false positives). */
+    if (!usrdir_resolve_path(TAIKO_EBOOT_HASH_NAME, path, sizeof(path)))
+        return 0;
+    const char *slash = strrchr(path, '/');
+    if (!slash)
+        return 0;
+    size_t dl = (size_t)(slash - path);
+    if (dl >= sizeof(usrdir))
+        return 0;
+    memcpy(usrdir, path, dl);
+    usrdir[dl] = 0;
+
+    patch_warn_reset();
+    write_probe_targets(usrdir, 0);   /* normal boot: skip patch-only targets */
+    if (patch_warn_count() == 0)
+        return 0;
+
+    dbg_print("[boot] write-permission check failed; halting boot\n");
+    patch_ui_open();
+    patch_ui_finish_error_msg(
+        -0xE0B1,
+        "Cannot access all required files (missing, or folder permission "
+        "issue). The game can't read its data or save configs/usiobackup. If a "
+        "file is missing, restore/reinstall the game files. Otherwise "
+        "recursively set the plugins and game folders to 777 via FTP (or the "
+        "Linux VM on GEX consoles). See the Zucchini repo. Affected files:");
     return 1;
 }
 
@@ -760,6 +877,12 @@ int taiko_start(unsigned int args, void *argp) {
         return SYS_PRX_RESIDENT;
     }
     if (repatch_rc < 0)
+        return SYS_PRX_RESIDENT;
+    /* Booting the already-patched game: verify we can still write every file
+     * the mod needs (configs, usiobackup, per-game state). If perms got
+     * clobbered, halt with a warning so the user fixes them instead of playing
+     * with broken saves. */
+    if (runtime_block_on_bad_write_perms())
         return SYS_PRX_RESIDENT;
     data00000_redirect_install();
     http_hooks_install();

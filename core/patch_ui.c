@@ -12,6 +12,7 @@
 
 #include "debug.h"
 #include "diag_log.h"
+#include "patch_warn.h"
 #include "qr_encode.h"
 #include "rsx_init.h"
 #include "menu_draw.h"
@@ -49,6 +50,7 @@ static eboot_phase_t g_phase;
 static sys_ppu_thread_t g_render_tid;
 static volatile int g_exit_requested;
 static int g_sysutil_callback_registered;
+static char g_error_msg[256];
 
 static void patch_ui_sysutil_callback(uint64_t status, uint64_t param,
                                       void *userdata) {
@@ -104,6 +106,103 @@ static void draw_text_fit(const menu_font_t *font, int x, int y,
         n++;
     }
     menu_draw_text(font, x, y, color, buf);
+}
+
+/* Word-wrap `s` into lines no wider than max_w. Breaks on spaces; a single word
+ * wider than max_w spills (clipped). When draw is 0, only counts lines (no
+ * render) so callers can size a panel first. Returns the number of lines. */
+/* A single wrapped line can be wide (~90 chars at the 1680px panel width), so
+ * the per-line buffer must be larger than the diag-log line cap or words would
+ * fill the buffer and truncate before width-wrapping ever triggers. */
+#define WRAP_LINE_CAP 256
+
+static int text_wordwrap(const menu_font_t *font, int x, int y, int max_w,
+                         int line_h, uint32_t color, const char *s,
+                         int max_lines, int draw) {
+    char line[WRAP_LINE_CAP];
+    int li = 0;
+    int lines = 0;
+    if (!s)
+        s = "";
+
+    while (*s && lines < max_lines) {
+        const char *word = s;
+        while (*word == ' ')
+            word++;
+        const char *end = word;
+        while (*end && *end != ' ')
+            end++;
+        int wlen = (int)(end - word);
+
+        char cand[WRAP_LINE_CAP];
+        int ci = 0;
+        if (li > 0) {
+            for (int i = 0; i < li && ci < (int)sizeof(cand) - 1; i++)
+                cand[ci++] = line[i];
+            if (ci < (int)sizeof(cand) - 1)
+                cand[ci++] = ' ';
+        }
+        for (int i = 0; i < wlen && ci < (int)sizeof(cand) - 1; i++)
+            cand[ci++] = word[i];
+        cand[ci] = 0;
+
+        if (li > 0 && menu_text_width(font, cand) > max_w) {
+            line[li] = 0;
+            if (draw)
+                menu_draw_text(font, x, y + lines * line_h, color, line);
+            lines++;
+            li = 0;
+            continue;
+        }
+
+        li = 0;
+        for (int i = 0; i < ci && li < (int)sizeof(line) - 1; i++)
+            line[li++] = cand[i];
+        line[li] = 0;
+        s = end;
+    }
+    if (li > 0 && lines < max_lines) {
+        line[li] = 0;
+        if (draw)
+            menu_draw_text(font, x, y + lines * line_h, color, line);
+        lines++;
+    }
+    return lines;
+}
+
+/* Character-wrap `s` (no word boundaries needed — for long paths). Greedily
+ * packs as many chars as fit per line. When draw is 0, only counts. Returns the
+ * number of lines used. */
+static int text_charwrap(const menu_font_t *font, int x, int y, int max_w,
+                         int line_h, uint32_t color, const char *s,
+                         int max_lines, int draw) {
+    char buf[WRAP_LINE_CAP];
+    int lines = 0;
+    if (!s)
+        s = "";
+
+    while (*s && lines < max_lines) {
+        int n = 0;
+        while (s[n] && n < (int)sizeof(buf) - 1) {
+            buf[n] = s[n];
+            buf[n + 1] = 0;
+            if (menu_text_width(font, buf) > max_w) {
+                buf[n] = 0;
+                break;
+            }
+            n++;
+        }
+        if (n == 0) {           /* guarantee progress on a too-narrow box */
+            buf[0] = s[0];
+            buf[1] = 0;
+            n = 1;
+        }
+        if (draw)
+            menu_draw_text(font, x, y + lines * line_h, color, buf);
+        s += n;
+        lines++;
+    }
+    return lines;
 }
 
 static void draw_progress_bar(void) {
@@ -199,6 +298,131 @@ static void draw_qr_error(void) {
     }
 }
 
+/* List files the patch flow couldn't create (almost always a directory
+ * permission the in-plugin chmod couldn't clear). Shown on the success screen
+ * because a failed config/aux write does NOT fail the patch itself, yet still
+ * breaks the install (e.g. taiko_config.cfg never lands). */
+static void draw_warnings(void) {
+    int n = patch_warn_count();
+    if (n <= 0)
+        return;
+
+    const int x = 120;
+    const int y = 432;
+    const int w = 1680;
+    const int pad = 27;
+    const int lh = 36;
+    const int tw = w - 2 * pad;        /* header text width */
+    const int pw = w - 2 * pad - 12;   /* indented path text width */
+    const int max_hdr = 3;
+    const int max_paths = 5;
+    const int max_path_lines = 2;
+
+    static const char *const HDR =
+        "Cannot access these files (missing, or folder permission issue). "
+        "If missing, restore the game files; otherwise recursively chmod 777 "
+        "the plugins + game folders (FTP, or the Linux VM on GEX). See the "
+        "Zucchini repo:";
+
+    int wrows = n > max_paths ? max_paths : n;
+
+    /* Measure first so the box is sized to the wrapped header + char-wrapped
+     * (long, space-less) paths instead of overflowing the border. */
+    int hdr_lines = text_wordwrap(&menu_font_30_font, 0, 0, tw, lh, 0, HDR,
+                                  max_hdr, 0);
+    int path_lines = 0;
+    for (int i = 0; i < wrows; i++)
+        path_lines += text_charwrap(&menu_font_30_font, 0, 0, pw, lh, 0,
+                                    patch_warn_get(i), max_path_lines, 0);
+    int more = (n > wrows) ? 1 : 0;
+
+    int h = 18 + (hdr_lines + path_lines + more) * lh + 6 + 18;
+
+    menu_draw_rect(x, y, w, h, COLOR_PANEL2);
+    menu_draw_rect_outline(x, y, w, h, COLOR_ERR);
+
+    int cy = y + 30;
+    cy += text_wordwrap(&menu_font_30_font, x + pad, cy, tw, lh, COLOR_ERR,
+                        HDR, max_hdr, 1) * lh;
+    cy += 6;
+    for (int i = 0; i < wrows; i++)
+        cy += text_charwrap(&menu_font_30_font, x + pad + 12, cy, pw, lh,
+                            COLOR_TEXT, patch_warn_get(i), max_path_lines,
+                            1) * lh;
+    if (more) {
+        char m[48];
+        snprintf(m, sizeof(m), "...and %d more", n - wrows);
+        menu_draw_text(&menu_font_30_font, x + pad + 12, cy, COLOR_DIM, m);
+    }
+}
+
+/* Dedicated panel for a known-cause failure (g_error_msg set): a word-wrapped
+ * explanation that takes over the left column where the progress bar would be,
+ * instead of a single clipped line. When the failure recorded affected files
+ * (patch_warn — e.g. couldn't write EBOOT.BIN / libsmart.sprx / config), they
+ * are listed under the message so the operator knows exactly which paths to
+ * fix. QR still renders for support. */
+static void draw_known_error(void) {
+    const int x = 120;
+    const int y = 270;   /* clear the "Patch failed" phase label at y=219 */
+    const int w = 840;
+    const int pad = 27;
+    const int lh = 39;
+    const int tw = w - 2 * pad;        /* message text width */
+    const int pw = w - 2 * pad - 12;   /* indented path text width */
+    const int max_msg = 6;
+    const int max_paths = 5;
+    const int max_path_lines = 2;
+
+    int nwarn = patch_warn_count();
+    int wrows = nwarn > max_paths ? max_paths : nwarn;
+
+    /* Measure first (draw=0) so the panel is sized to exactly fit the wrapped
+     * message + the char-wrapped (long, space-less) paths — bar and patch log
+     * are hidden on a known-issue screen, so the box can be as tall as needed. */
+    int msg_lines = text_wordwrap(&menu_font_30_font, 0, 0, tw, lh, 0,
+                                  g_error_msg, max_msg, 0);
+    int path_lines = 0;
+    for (int i = 0; i < wrows; i++)
+        path_lines += text_charwrap(&menu_font_30_font, 0, 0, pw, lh, 0,
+                                    patch_warn_get(i), max_path_lines, 0);
+    int more = (nwarn > wrows) ? 1 : 0;
+
+    int content = lh + msg_lines * lh +
+                  (wrows ? ((path_lines + more) * lh + 12) : 0) + 12 + 2 * lh;
+    int h = 36 + content + 12;
+
+    menu_draw_rect(x, y, w, h, COLOR_PANEL2);
+    menu_draw_rect_outline(x, y, w, h, COLOR_ERR);
+
+    int cy = y + 36;
+    menu_draw_text(&menu_font_30_font, x + pad, cy, COLOR_ERR, "Known issue:");
+    cy += lh;
+    cy += text_wordwrap(&menu_font_30_font, x + pad, cy, tw, lh, COLOR_TITLE,
+                        g_error_msg, max_msg, 1) * lh;
+
+    if (wrows) {
+        for (int i = 0; i < wrows; i++)
+            cy += text_charwrap(&menu_font_30_font, x + pad + 12, cy, pw, lh,
+                                COLOR_TEXT, patch_warn_get(i), max_path_lines,
+                                1) * lh;
+        if (more) {
+            char m[48];
+            snprintf(m, sizeof(m), "...and %d more", nwarn - wrows);
+            menu_draw_text(&menu_font_30_font, x + pad + 12, cy, COLOR_DIM, m);
+            cy += lh;
+        }
+        cy += 12;
+    }
+
+    char rc[48];
+    snprintf(rc, sizeof(rc), "Return code: %d", g_final_rc);
+    menu_draw_text(&menu_font_30_font, x + pad, cy + 6, COLOR_DIM, rc);
+    menu_draw_text(&menu_font_30_font, x + pad, cy + 6 + lh, COLOR_TEXT,
+                   "Press PS button -> Quit to return to XMB.");
+    draw_qr_error();
+}
+
 static void render_frame(void) {
     if (!menu_draw_begin())
         return;
@@ -210,18 +434,24 @@ static void render_frame(void) {
                            : "Patching EBOOT - do not power off.");
     menu_draw_rect(120, 180, 1680, 3, COLOR_BORDER);
 
+    int known_error = g_error && g_error_msg[0];
+
     menu_draw_text(&menu_font_42_font, 120, 219,
                    g_error ? COLOR_ERR : COLOR_TEXT, phase_label(g_phase));
-    draw_progress_bar();
+    /* Known-cause errors replace the progress bar with the warning panel. */
+    if (!known_error)
+        draw_progress_bar();
 
-    if (g_error) {
+    if (known_error) {
+        draw_known_error();
+    } else if (g_error) {
         char rc[48];
         snprintf(rc, sizeof(rc), "Return code: %d", g_final_rc);
         menu_draw_text(&menu_font_30_font, 120, 384, COLOR_ERR, rc);
         menu_draw_text(&menu_font_30_font, 120, 432, COLOR_TEXT,
                        "The log tail is embedded in the QR code.");
         menu_draw_text(&menu_font_30_font, 120, 480, COLOR_DIM,
-                       "You can exit to XMB after photographing the QR code.");
+                       "Press PS button -> Quit to return to XMB.");
         draw_qr_error();
     } else if (g_done) {
         menu_draw_text(&menu_font_30_font, 120, 384, COLOR_BAR,
@@ -231,7 +461,15 @@ static void render_frame(void) {
                        "This may take a few minutes on hardware.");
     }
 
-    draw_logs();
+    /* A warning panel (known-cause error, or the success-with-failed-writes
+     * list) occupies the same vertical band as the bottom patch log, so don't
+     * draw both — the log would overlap the warning text. On a known-cause
+     * error the QR still carries the log tail for support. */
+    int warn_panel = known_error || (!g_error && patch_warn_count() > 0);
+    if (!g_error)
+        draw_warnings();
+    if (!warn_panel)
+        draw_logs();
     menu_draw_end();
 }
 
@@ -265,6 +503,7 @@ void patch_ui_open(void) {
     g_prog_target = 0;
     g_phase = EBOOT_PHASE_INIT;
     g_exit_requested = 0;
+    g_error_msg[0] = 0;
     g_ui_open = 1;
 
     int rc = sys_ppu_thread_create(&g_render_tid, render_thread, 0,
@@ -309,6 +548,15 @@ static void finish_common(int error, int rc, int manual) {
         sys_timer_usleep(PATCH_UI_FRAME_US);
     }
 
+    /* Patch succeeded but one or more aux files (e.g. taiko_config.cfg) could
+     * not be written — a relaunch would hit the same broken install. Hold the
+     * screen so the operator reads the listed paths and can exit to XMB to fix
+     * folder permissions, instead of auto-closing after a few seconds. */
+    if (patch_warn_count() > 0) {
+        patch_ui_wait_for_exit_request();
+        return;
+    }
+
     patch_ui_close();
 }
 
@@ -321,6 +569,18 @@ void patch_ui_finish_ok_manual(void) {
 }
 
 void patch_ui_finish_error(int rc) {
+    g_error_msg[0] = 0;
+    finish_common(1, rc, 1);
+    patch_ui_wait_for_exit_request();
+}
+
+void patch_ui_finish_error_msg(int rc, const char *message) {
+    if (message) {
+        strncpy(g_error_msg, message, sizeof(g_error_msg) - 1);
+        g_error_msg[sizeof(g_error_msg) - 1] = 0;
+    } else {
+        g_error_msg[0] = 0;
+    }
     finish_common(1, rc, 1);
     patch_ui_wait_for_exit_request();
 }

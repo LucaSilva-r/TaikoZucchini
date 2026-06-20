@@ -7,6 +7,8 @@
 #include <cell/fs/cell_fs_file_api.h>
 #include <cell/fs/cell_fs_errno.h>
 
+#include "patch_warn.h"
+
 int cfg_file_str_eq_ci(const char *a, const char *b) {
     if (!a || !b) return 0;
     while (*a && *b) {
@@ -128,7 +130,10 @@ int cfg_file_open_write(const char *path) {
     int rc = cellFsOpen(path,
                         CELL_FS_O_WRONLY | CELL_FS_O_CREAT | CELL_FS_O_TRUNC,
                         &fd, NULL, 0);
-    if (rc != CELL_FS_SUCCEEDED) return -1;
+    if (rc != CELL_FS_SUCCEEDED) {
+        patch_warn_add_write_fail(path);
+        return -1;
+    }
     return fd;
 }
 

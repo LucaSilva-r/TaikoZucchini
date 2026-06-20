@@ -27,7 +27,6 @@ taiko_runtime_cfg_t g_cfg = {
     .saved_card_prompt    = 1,
     .camera_diag_hooks    = TAIKO_FEATURE_CAMERA_DIAG_HOOKS,
     .data00000_redirect   = TAIKO_FEATURE_DATA00000_REDIRECT,
-    .cert_replacement     = TAIKO_FEATURE_CERT_REPLACEMENT,
     .online_diag          = TAIKO_FEATURE_ONLINE_DIAG,
 
     .probe_patches        = TAIKO_PATCH_PROBE_PATCHES,
@@ -85,7 +84,6 @@ static void handle_features(const char *key, const char *value, void *u) {
     SET_BIT("saved_card_prompt",  saved_card_prompt);
     SET_BIT("camera_diag_hooks",  camera_diag_hooks);
     SET_BIT("data00000_redirect", data00000_redirect);
-    SET_BIT("cert_replacement",   cert_replacement);
     if (cfg_file_str_eq_ci(key, "http_hooks")) return; /* legacy v5 key */
     SET_BIT("online_diag",        online_diag);
 }
@@ -409,9 +407,6 @@ static void write_cfg_file(const char *path) {
     emit_kv_bool(fd,
         "Redirect DATA00000.BIN reads from USB stick to game USRDIR.",
         "data00000_redirect", g_cfg.data00000_redirect);
-    emit_kv_bool(fd,
-        "Replace TLS certs at runtime (needed for online auth on private servers).",
-        "cert_replacement", g_cfg.cert_replacement);
     emit_kv_bool(fd,
         "Periodic dump of network/online state to log.",
         "online_diag", g_cfg.online_diag);

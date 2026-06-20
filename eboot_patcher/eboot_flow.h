@@ -19,8 +19,7 @@ typedef void (*eboot_progress_cb)(void *ctx, eboot_phase_t p, int rc);
 
 typedef struct {
     const char *original_path;   /* in : path to EBOOT_ORIGINAL.BIN */
-    const char *bootstrap_path;  /* in : current bootstrap EBOOT.BIN; renamed to EBOOT_BOOTSTRAP.BIN */
-    const char *eboot_path;      /* in : final destination EBOOT.BIN */
+    const char *eboot_path;      /* in : final destination EBOOT.BIN (overwritten in place) */
     const char *keys_dir;        /* in : /dev_hdd0/plugins/<dir>/keys */
     int target_hen;              /* in : 1 = re-encode as retail 3.XX STD for
                                   *      HEN-enabled CEX; 0 = legacy
@@ -31,7 +30,7 @@ typedef struct {
 } eboot_flow_args_t;
 
 /* Run end-to-end: load original, decrypt, patch, re-encrypt, write
- * EBOOT.BIN.new, atomic rename to EBOOT.BIN, rename bootstrap aside.
+ * EBOOT.BIN.new, then unlink + rename it over EBOOT.BIN in place.
  * Returns 0 on success. */
 int eboot_flow_run(eboot_flow_args_t *args);
 

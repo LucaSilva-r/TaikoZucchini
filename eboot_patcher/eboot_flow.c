@@ -22,6 +22,7 @@
 #include "sprx_loader_patch.h"
 #include "patches/patches.h"
 #include "debug.h"
+#include "patch_warn.h"
 
 /* HEN target: fakesigned NPDRM EBOOT, key revision 0x04 (fw 3.40), free
  * license. An HDD-game EBOOT.BIN launched from XMB must be NPDRM (a plain APP
@@ -153,6 +154,7 @@ static int write_whole_file(const char *path, const uint8_t *buf, size_t len) {
         dbg_print(path);
         dbg_print("\n");
         dbg_print_hex32("[eboot] cellFsOpen rc", (uint32_t)rc);
+        patch_warn_add_write_fail(path);
         return -1;
     }
     uint64_t wrote = 0;
@@ -250,26 +252,23 @@ static int write_and_swap(eboot_flow_args_t *args, const uint8_t *buf,
     mbedtls_sha1(buf, buf_len, args->out_hash);
 
     REPORT(args, EBOOT_PHASE_SWAPPING, 0);
-    snprintf(tmp, sizeof(tmp), "%s.bootstrap", args->eboot_path);
-    rc = cellFsUnlink(tmp);
+
+    /* Overwrite EBOOT.BIN in place with the freshly written .new. cellFsRename
+     * won't replace an existing destination (EEXIST), so unlink the current
+     * EBOOT first, then rename .new over it. No .bootstrap backup is kept — it
+     * was never read by anything and only left an extra (often perms-locked)
+     * file, which is also what caused the unlink-old-.bootstrap EACCES. */
+    rc = cellFsUnlink(args->eboot_path);
     if (rc != CELL_FS_SUCCEEDED && rc != CELL_FS_ENOENT) {
-        dbg_print("[eboot] unlink old bootstrap failed: ");
-        dbg_print(tmp);
+        dbg_print("[eboot] unlink current EBOOT failed: ");
+        dbg_print(args->eboot_path);
         dbg_print("\n");
         dbg_print_hex32("[eboot] cellFsUnlink rc", (uint32_t)rc);
-    }
-    rc = cellFsRename(args->bootstrap_path, tmp);
-    if (rc != CELL_FS_SUCCEEDED) {
-        dbg_print("[eboot] rename bootstrap failed: ");
-        dbg_print(args->bootstrap_path);
-        dbg_print(" -> ");
-        dbg_print(tmp);
-        dbg_print("\n");
-        dbg_print_hex32("[eboot] cellFsRename rc", (uint32_t)rc);
+        cellFsUnlink(tmp);      /* drop the orphaned .new */
+        patch_warn_add_write_fail(args->eboot_path);
         return -799;
     }
 
-    snprintf(tmp, sizeof(tmp), "%s.new", args->eboot_path);
     rc = cellFsRename(tmp, args->eboot_path);
     if (rc != CELL_FS_SUCCEEDED) {
         dbg_print("[eboot] rename patched EBOOT failed: ");
@@ -278,16 +277,8 @@ static int write_and_swap(eboot_flow_args_t *args, const uint8_t *buf,
         dbg_print(args->eboot_path);
         dbg_print("\n");
         dbg_print_hex32("[eboot] cellFsRename rc", (uint32_t)rc);
-        snprintf(tmp, sizeof(tmp), "%s.bootstrap", args->eboot_path);
-        rc = cellFsRename(tmp, args->bootstrap_path);
-        if (rc != CELL_FS_SUCCEEDED) {
-            dbg_print("[eboot] restore bootstrap failed: ");
-            dbg_print(tmp);
-            dbg_print(" -> ");
-            dbg_print(args->bootstrap_path);
-            dbg_print("\n");
-            dbg_print_hex32("[eboot] cellFsRename rc", (uint32_t)rc);
-        }
+        cellFsUnlink(tmp);
+        patch_warn_add_write_fail(args->eboot_path);
         return -800;
     }
     return 0;
@@ -352,7 +343,12 @@ static int hen_resign_module(const char *path, const self_keyset_t *ks_app) {
     snprintf(tmp, sizeof(tmp), "%s.new", path);
     if ((rc = write_whole_file(tmp, sbuf, sbuf_len)) != 0) { ok = -980 + rc; goto out; }
     cellFsUnlink(path);
-    if (cellFsRename(tmp, path) != CELL_FS_SUCCEEDED) { cellFsUnlink(tmp); ok = -985; goto out; }
+    if (cellFsRename(tmp, path) != CELL_FS_SUCCEEDED) {
+        cellFsUnlink(tmp);
+        patch_warn_add_write_fail(path);
+        ok = -985;
+        goto out;
+    }
 
 out:
     free(segs);
@@ -479,6 +475,12 @@ int eboot_flow_run(eboot_flow_args_t *args) {
     REPORT(args, EBOOT_PHASE_READING, 0);
     if ((rc = read_whole_file(args->original_path, &buf, &buf_len,
                               &orig_file_size)) != 0) {
+        /* rc == -1 is an open failure — almost always EBOOT_ORIGINAL.BIN being
+         * unreadable (wrong folder/file permissions), the same class of
+         * problem as the write failures. Record it so the patch UI shows the
+         * perms message + this path instead of a bare return code. */
+        if (rc == -1)
+            patch_warn_add_write_fail(args->original_path);
         ok = -300 + rc; goto done;
     }
     if (read_data00000_metadata(args->original_path,

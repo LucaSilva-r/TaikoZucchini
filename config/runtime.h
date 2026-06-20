@@ -22,7 +22,6 @@ typedef struct {
     unsigned saved_card_prompt  : 1;
     unsigned camera_diag_hooks  : 1;
     unsigned data00000_redirect : 1;
-    unsigned cert_replacement   : 1;
     unsigned online_diag        : 1;
 
     /* patches (binary memory writes at boot) */
