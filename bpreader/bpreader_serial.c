@@ -264,8 +264,24 @@ static bool nbgic_tables_find(void) {
         }
 
         const uint8_t *p_seed = NULL;
+        /*
+         * Katsu Don stores the standard Blowfish P array immediately before
+         * the S boxes. Later builds such as Green keep another copy roughly
+         * 0x1000 bytes after them.
+         */
+        if ((uintptr_t)s_seed >= CFG_SCAN_TEXT_START + 18u * 4u) {
+            const uint8_t *pp = s_seed - 18u * 4u;
+            if (rd_be32(pp) == 0x243f6a88u &&
+                rd_be32(pp + 4) == 0x85a308d3u &&
+                rd_be32(pp + 8) == 0x13198a2eu &&
+                rd_be32(pp + 12) == 0x03707344u) {
+                p_seed = pp;
+            }
+        }
+
         for (uintptr_t q = (uintptr_t)s_seed + 0x1000u;
-             q + 16u <= scan_end && q < (uintptr_t)s_seed + 0x1800u; q += 4u) {
+             !p_seed && q + 16u <= scan_end &&
+             q < (uintptr_t)s_seed + 0x1800u; q += 4u) {
             const uint8_t *pp = (const uint8_t *)q;
             if (rd_be32(pp) == 0x243f6a88u &&
                 rd_be32(pp + 4) == 0x85a308d3u &&
