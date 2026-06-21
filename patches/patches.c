@@ -1358,6 +1358,62 @@ static void apply_allow_screen_tearing(void) {
 }
 
 /*
+ * Katsu Don ST21 (software 0.21 and older) updates the gold-crown bit in
+ * object byte +0x44, but the field actually lives at +0x45. Later EBOOTs
+ * corrected all four accesses. Match both complete loop fragments before
+ * writing so fixed/newer revisions and unrelated builds remain untouched.
+ *
+ * Verified Katsu Don ELF mapping:
+ *   VA 0x4ff1c -> file 0x3ff1c: lbz r9,0x44(r8)
+ *   VA 0x4ff2c -> file 0x3ff2c: stb r9,0x44(r8)
+ *   VA 0x4ffa0 -> file 0x3ffa0: lbz r9,0x44(r11)
+ *   VA 0x4ffb0 -> file 0x3ffb0: stb r9,0x44(r11)
+ */
+static void apply_katsudon_gold_crown_fix(void) {
+    static const uint32_t loop_r8_orig[] = {
+        0x7F604830u, 0x89280044u, 0x7C1F5038u, 0x7D694B78u,
+        0x2C1F0000u, 0x99280044u, 0x41820010u,
+    };
+    static const uint32_t loop_r8_fixed[] = {
+        0x7F604830u, 0x89280045u, 0x7C1F5038u, 0x7D694B78u,
+        0x2C1F0000u, 0x99280045u, 0x41820010u,
+    };
+    static const uint32_t loop_r11_orig[] = {
+        0x7C805030u, 0x892B0044u, 0x7C0A3838u, 0x7D094B78u,
+        0x2C0A0000u, 0x992B0044u, 0x41820010u,
+    };
+    static const uint32_t loop_r11_fixed[] = {
+        0x7C805030u, 0x892B0045u, 0x7C0A3838u, 0x7D094B78u,
+        0x2C0A0000u, 0x992B0045u, 0x41820010u,
+    };
+    enum {
+        LOOP_R8 = 0x004FF18u,
+        LOOP_R11 = 0x004FF9Cu,
+    };
+
+    if (words_match(LOOP_R8, loop_r8_fixed, sizeof(loop_r8_fixed) / 4) &&
+        words_match(LOOP_R11, loop_r11_fixed, sizeof(loop_r11_fixed) / 4)) {
+        dbg_print("[patch] Katsu Don gold crowns already fixed\n");
+        return;
+    }
+    if (!words_match(LOOP_R8, loop_r8_orig, sizeof(loop_r8_orig) / 4) ||
+        !words_match(LOOP_R11, loop_r11_orig, sizeof(loop_r11_orig) / 4))
+        return;
+
+    dbg_print("[patch] applying Katsu Don <=0.21 gold-crown fix\n");
+    write32(0x004FF1Cu, 0x89280045u);
+    write32(0x004FF2Cu, 0x99280045u);
+    write32(0x004FFA0u, 0x892B0045u);
+    write32(0x004FFB0u, 0x992B0045u);
+
+    if (!words_match(LOOP_R8, loop_r8_fixed, sizeof(loop_r8_fixed) / 4) ||
+        !words_match(LOOP_R11, loop_r11_fixed, sizeof(loop_r11_fixed) / 4)) {
+        dbg_print("[patch] Katsu Don gold-crown fix write verification failed\n");
+        g_patch_error = -1;
+    }
+}
+
+/*
  * Kimidori (ST51) reads the version-up stamp from
  * /dev_usbNNN/VERSIONUP/DATA00000.BIN through a std::ifstream rather than
  * parsing an in-memory descriptor like green/Murasaki. The ifstream open
@@ -1709,6 +1765,7 @@ static void patches_apply_all_impl(void) {
     if (g_cfg.allow_screen_tearing)
         apply_allow_screen_tearing();
     apply_online_gate_force_patches();
+    apply_katsudon_gold_crown_fix();
     if (g_have_data00000_metadata)
         apply_data00000_embed_patch();
 
