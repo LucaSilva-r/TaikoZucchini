@@ -39,6 +39,8 @@
 #include "runtime.h"
 #include "usrdir_path.h"
 #include "chassisinfo_hook.h"
+#include "game_state.h"
+#include "enso_override.h"
 
 #define CELLFS_OPEN_FNID 0x718BF5F8u
 #define TARGET_PATH_TAIL "DATA00000.BIN"
@@ -98,6 +100,13 @@ static int versionup_path_matches(const char *p) {
  * the EBOOT's stub. Calling it here forwards to firmware. */
 static int hk_cellFsOpen(const char *path, int flags, int *fd,
                          const void *arg, uint64_t size) {
+    int override_rc = CELL_FS_SUCCEEDED;
+
+    taiko_game_state_observe_open(path);
+
+    if (taiko_enso_override_try_open(path, flags, fd, arg, size, &override_rc))
+        return override_rc;
+
     /* chassisinfo synth short-circuits before any disk-bound logic.
      * Returns a virtual fd that chassisinfo_hook.c's Read/Lseek/Close/
      * Fstat hooks recognize and back with an in-memory XML buffer. */

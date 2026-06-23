@@ -11,6 +11,7 @@
 #include "storage/chassisinfo_synth.h"
 #include "storage/chassisinfo_schema.h"
 #include "core/game_version.h"
+#include "core/enso_override.h"
 #include "eboot_fpt.h"
 
 #include <stdint.h>
@@ -88,7 +89,9 @@ static int hk_read(int fd, void *buf, uint64_t nbytes, uint64_t *nread) {
         if (nread) *nread = n;
         return CELL_FS_SUCCEEDED;
     }
-    return cellFsRead(fd, buf, nbytes, nread);
+    int rc = cellFsRead(fd, buf, nbytes, nread);
+    taiko_enso_override_note_read(fd, nbytes, rc, nread ? *nread : 0);
+    return rc;
 }
 
 static int hk_lseek(int fd, int64_t offset, int whence, uint64_t *pos) {
@@ -118,7 +121,9 @@ static int hk_close(int fd) {
         dbg_print("[chassis] synth close\n");
         return CELL_FS_SUCCEEDED;
     }
-    return cellFsClose(fd);
+    int rc = cellFsClose(fd);
+    taiko_enso_override_note_close(fd, rc);
+    return rc;
 }
 
 static int hk_fstat(int fd, CellFsStat *sb) {

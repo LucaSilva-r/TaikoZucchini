@@ -90,7 +90,7 @@ SYM     := $(BIN_DIR)/$(TARGET_NAME).sym
 BOOTSTRAP_EBOOT := bootstrap_eboot/bin/eboot.elf
 FTP_EBOOT := ftp_eboot/bin/ftp_eboot.elf
 
-SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_stubs.c core/patch_ui.c core/patch_warn.c core/write_probe.c core/rsx_init.c core/overlay.c eboot_fpt.c \
+SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_override.c core/custom_song_launcher.c core/qr_encode.c core/libc_stubs.c core/patch_ui.c core/patch_warn.c core/write_probe.c core/rsx_init.c core/overlay.c eboot_fpt.c \
            mod_menu/menu.c mod_menu/menu_draw.c mod_menu/menu_pad.c mod_menu/menu_actions.c \
            mod_menu/menu_osk.c \
            ftp/ftp_server.c \

@@ -32,6 +32,7 @@
 #include "kb_input.h"
 #include "taiko_frame.h"
 #include "card_picker.h"
+#include "custom_song_launcher.h"
 #include "usrdir_path.h"
 #include "eboot_fpt.h"
 #include "param_sfo_fix.h"
@@ -934,6 +935,7 @@ int taiko_start(unsigned int args, void *argp) {
      * states, so it is started unconditionally. The pad path is independent
      * of USIO; when USIO is off the watcher also self-polls the keyboard. */
     menu_ingame_start(!g_cfg.usio_emulation);
+    custom_song_launcher_start();
     if (g_cfg.online_diag)
         online_diag_start();
 
