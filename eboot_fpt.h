@@ -4,8 +4,11 @@
 #include <stdint.h>
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 3u           /* v3: serial_utf16 cell appended */
+#define TAIKO_FPT_VERSION 8u           /* v8: Lumen native-call capture ring */
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
+
+/* v8 native-call ring: must be a power of two (trampoline masks with NLOG-1). */
+#define TAIKO_FPT_NLOG 128u
 
 /* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the
  * buffer layout the game's fcntl serial reader expects. */
@@ -89,6 +92,22 @@ typedef struct {
      * Only present when version >= 3 (offset must stay AFTER slots so the
      * got_slots/slots offsets the patcher bakes never move). */
     uint8_t  serial_utf16[TAIKO_FPT_SERIAL_BYTES];
+    /* Written by an EBOOT-side trampoline in SongSelectStateMachine.
+     * The SPRX reads this to request the game's normal song-select ->
+     * gameplay transition without cross-TOC internal C hooks. */
+    uint32_t song_select_scene;
+    uint32_t song_select_scene_source;
+    uint32_t song_select_launch_request;
+    /* v8: Lumen native-call capture ring. A wrapper trampoline on the native
+     * arg-reader (FUN_00399074) appends one record per AS->C++ argument fetch.
+     * The wrapper runs the reader body, then logs the DECODED {type,value}
+     * along with idx and the calling native's return address (lr -> which
+     * native). The SPRX drains this to TTY. Diagnostic only. Flat layout:
+     * head counter (monotonic) then NLOG records of {lr, idx, type, val}.
+     * Must stay AFTER the v<8 fields so baked got_slots/slots offsets never
+     * move. */
+    uint32_t native_log_head;
+    uint32_t native_log[TAIKO_FPT_NLOG * 4u];
 } taiko_fpt_t;
 
 /* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
@@ -101,6 +120,15 @@ int taiko_fpt_publish(uint32_t slot, const void *opd);
 int taiko_fpt_publish_slot_only(uint32_t slot, const void *opd);
 uintptr_t taiko_fpt_original_opd(uint32_t slot);
 uintptr_t taiko_fpt_slot_value(uint32_t slot);
+uintptr_t taiko_fpt_song_select_scene(void);
+uintptr_t taiko_fpt_table_address(void);
+uint32_t taiko_fpt_version_seen(void);
+uintptr_t taiko_fpt_song_select_scene_cell(void);
+uint32_t taiko_fpt_song_select_scene_source(void);
+int taiko_fpt_request_song_select_launch(void);
 int taiko_fpt_available(void);
+/* VA of the native-call ring header (native_log_head), or 0 on tables < v8.
+ * Header is followed by NLOG records of 4 u32 each {lr, idx, type, val}. */
+uintptr_t taiko_fpt_native_log(void);
 
 #endif

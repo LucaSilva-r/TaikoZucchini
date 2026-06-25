@@ -254,6 +254,21 @@ static uint32_t branch_target(uint32_t insn, uint32_t insn_va) {
     return (uint32_t)(insn_va + disp);
 }
 
+static int encode_relative_b(uint32_t src, uint32_t dst, uint32_t *out) {
+    int32_t disp = (int32_t)(dst - src);
+    if ((disp & 3) != 0 || disp < -0x02000000 || disp > 0x01FFFFFC)
+        return 0;
+    *out = 0x48000000u | ((uint32_t)disp & 0x03FFFFFCu);
+    return 1;
+}
+
+static int encode_relative_bl(uint32_t src, uint32_t dst, uint32_t *out) {
+    if (!encode_relative_b(src, dst, out))
+        return 0;
+    *out |= 1u; /* set link bit */
+    return 1;
+}
+
 static int va_in_load(elf64_phdr_t *phdrs, uint16_t phnum, uint32_t va,
                       uint32_t len) {
     uint64_t end = (uint64_t)va + len;
@@ -678,6 +693,345 @@ static int update_embedded_phdr(self_ctx_t *ctx, uint16_t ph_index,
     return 0;
 }
 
+/* Normal Green GameSongSelect::Proc_Main (@0x1f5ca8). This is the state
+   machine that eventually reaches enso. The launcher does not patch the input
+   callback; it asks Proc_Main to run the same post-confirm state chain the game
+   uses after the highlighted song has been validated. */
+static int song_select_proc_prologue_matches(const uint8_t *b) {
+    return load_be32(b + 0x00) == 0xF821FDF1u &&  /* stdu r1,-0x210(r1) */
+           load_be32(b + 0x04) == 0x7C0802A6u &&  /* mfspr r0,LR        */
+           load_be32(b + 0x08) == 0xFB4101E0u &&  /* std r26,0x1e0(r1)  */
+           load_be32(b + 0x0C) == 0xF8010220u &&  /* std r0,0x220(r1)   */
+           load_be32(b + 0x10) == 0x80030010u &&  /* lwz r0,0x10(r3)    */
+           load_be32(b + 0x14) == 0x7C7A1B78u &&  /* or r26,r3,r3       */
+           load_be32(b + 0x18) == 0xFB6101E8u &&  /* std r27,0x1e8(r1)  */
+           load_be32(b + 0x1C) == 0x2B80000Du;    /* cmplwi cr7,r0,13   */
+}
+
+static int find_song_select_proc(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                 uint16_t phnum, uint32_t *out_va,
+                                 uint64_t *out_off) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+    uint32_t found_va = 0;
+    uint64_t found_off = 0;
+    uint32_t count = 0;
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 0x20u)
+            continue;
+        for (uint64_t pos = 0; pos + 0x20u <= size; pos += 4u) {
+            if (!song_select_proc_prologue_matches(ctx->buf + base + pos))
+                continue;
+            found_va = (uint32_t)(p->p_vaddr + pos);
+            found_off = base + pos;
+            if (++count > 1)
+                return 0;
+        }
+    }
+
+    if (count != 1)
+        return 0;
+    *out_va = found_va;
+    *out_off = found_off;
+    return 1;
+}
+
+/* Green-only. Selection validate/commit helper called by the real confirm
+   before it advances the state machine. */
+#define SS_VALIDATE_SELECTION_VA 0x00245c98u
+
+/* Trampoline on GameSongSelect::Proc_Main (0x1f5ca8), called every frame as
+   Proc_Main(scene=r3, controller=r4). Two jobs:
+
+   1. Diagnostics: cache scene (r3) and controller (r4) into the FPT so the
+      SPRX can print the live state machine progression (state @+0x10,
+      next_scene @+0x14) over TTY -- no GDB needed.
+
+   2. Launch: when the SPRX sets song_select_launch_request and a valid song is
+      highlighted (state==7, +0xa8==1, FUN_00245c98 commits the selection),
+      run the same decide tail used by the real input handler. The request stays
+      queued until state 7's setup path has produced the script handles used by
+      that tail (+e14, +e08). */
+static int patch_song_select_direct_enso(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                         uint16_t phnum, uint32_t fpt_va,
+                                         uint64_t tramp_off, uint32_t tramp_va,
+                                         uint64_t next_load_off,
+                                         uint64_t *append_end) {
+    enum { TRAMP_WORDS = 52 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+
+    uint32_t func_va = 0;
+    uint64_t func_off = 0;
+    if (!find_song_select_proc(ctx, phdrs, phnum, &func_va, &func_off))
+        return -3;
+
+    uint32_t branch = 0;
+    if (!encode_relative_b(func_va, tramp_va, &branch))
+        return -4;
+    uint32_t resume = 0;
+    if (!encode_relative_b(tramp_va + 0xCCu, func_va + 4u, &resume))
+        return -5;
+    /* Exact replica of the state-7 decide tail from FUN_001f4914 (the real
+       drum-decide handler), minus the pad-button check -> a synthetic,
+       input-independent decide that works on real USIO arcades:
+         if (FUN_00245c98(scene+0xc8)) {           // validate selection
+             FUN_0024af08(scene+0xe84);            // arm
+             *(scene+0x14) = 2;                     // manual route = gameplay
+             *(scene+0x10) = 0xb;                   // post-select wait state
+             FUN_0024d208(scene+0xe28);            // fire transition event
+         }
+       FUN_0024d208(+0xe28) is the sub-scene-swap event that constructs enso --
+       the call every prior forced attempt skipped. Done once, in order, so it
+       matches the engine exactly (no double-arm / waiwai). Same module/TOC ->
+       direct bl. */
+    uint32_t bl_validate = 0;
+    if (!encode_relative_bl(tramp_va + 0x6Cu, SS_VALIDATE_SELECTION_VA, &bl_validate))
+        return -6;
+    uint32_t bl_arm = 0;
+    if (!encode_relative_bl(tramp_va + 0x80u, 0x0024af08u, &bl_arm))
+        return -7;
+    uint32_t bl_fire = 0;
+    if (!encode_relative_bl(tramp_va + 0xA0u, 0x0024d208u, &bl_fire))
+        return -8;
+
+    uint32_t scene_va =
+        fpt_va + (uint32_t)offsetof(taiko_fpt_t, song_select_scene);
+    uint32_t flag_va =
+        fpt_va + (uint32_t)offsetof(taiko_fpt_t, song_select_launch_request);
+    uint8_t *t = ctx->buf + tramp_off;
+
+    store_be32(t + 0x00, 0x7C0802A6u);                                /* mflr r0             */
+    store_be32(t + 0x04, 0xF821FF81u);                                /* stdu r1,-0x80(r1)   */
+    store_be32(t + 0x08, 0xF8010090u);                                /* std r0,0x90(r1)     */
+    store_be32(t + 0x0C, 0xF8610070u);                                /* std r3,0x70(r1) scene*/
+    store_be32(t + 0x10, 0xF8810078u);                                /* std r4,0x78(r1)     */
+    store_be32(t + 0x14, 0x3D800000u | ((scene_va >> 16) & 0xFFFFu)); /* lis r12,hi(scene)   */
+    store_be32(t + 0x18, 0x618C0000u | (scene_va & 0xFFFFu));         /* ori r12,r12,lo      */
+    store_be32(t + 0x1C, 0x906C0000u);                                /* stw r3,0(r12) scene */
+    store_be32(t + 0x20, 0x816C0008u);                                /* lwz r11,8(r12) flag */
+    store_be32(t + 0x24, 0x2C0B0000u);                                /* cmpwi r11,0         */
+    store_be32(t + 0x28, 0x4182008Cu);                                /* beq done            */
+    store_be32(t + 0x2C, 0x81630010u);                                /* lwz r11,0x10(r3) st */
+    store_be32(t + 0x30, 0x2C0B0007u);                                /* cmpwi r11,7         */
+    store_be32(t + 0x34, 0x40820080u);                                /* bne done            */
+    store_be32(t + 0x38, 0x816300A8u);                                /* lwz r11,0xa8(r3)    */
+    store_be32(t + 0x3C, 0x2C0B0001u);                                /* cmpwi r11,1         */
+    store_be32(t + 0x40, 0x40820074u);                                /* bne done            */
+    store_be32(t + 0x44, 0x60000000u);                                /* nop: +e68 byte may stay 0 */
+    store_be32(t + 0x48, 0x60000000u);                                /* nop                 */
+    store_be32(t + 0x4C, 0x60000000u);                                /* nop                 */
+    store_be32(t + 0x50, 0x81630E14u);                                /* lwz r11,0xe14(r3)   */
+    store_be32(t + 0x54, 0x2C0B0000u);                                /* cmpwi r11,0         */
+    store_be32(t + 0x58, 0x4182005Cu);                                /* beq done            */
+    store_be32(t + 0x5C, 0x81630E08u);                                /* lwz r11,0xe08(r3)   */
+    store_be32(t + 0x60, 0x2C0B0000u);                                /* cmpwi r11,0         */
+    store_be32(t + 0x64, 0x41820050u);                                /* beq done            */
+    store_be32(t + 0x68, 0x386300C8u);                                /* addi r3,r3,0xc8 obj */
+    store_be32(t + 0x6C, bl_validate);                                /* bl FUN_00245c98     */
+    store_be32(t + 0x70, 0x706300FFu);                                /* andi. r3,r3,0xff    */
+    store_be32(t + 0x74, 0x41820040u);                                /* beq done            */
+    store_be32(t + 0x78, 0xE8610070u);                                /* ld r3,0x70(r1) scene*/
+    store_be32(t + 0x7C, 0x38630E84u);                                /* addi r3,r3,0xe84    */
+    store_be32(t + 0x80, bl_arm);                                     /* bl FUN_0024af08 arm */
+    store_be32(t + 0x84, 0xE8610070u);                                /* ld r3,0x70(r1) scene*/
+    store_be32(t + 0x88, 0x38000002u);                                /* li r0,2             */
+    store_be32(t + 0x8C, 0x90030014u);                                /* stw r0,0x14 next=2  */
+    store_be32(t + 0x90, 0x3800000Bu);                                /* li r0,0xb           */
+    store_be32(t + 0x94, 0x90030010u);                                /* stw r0,0x10 st=0xb  */
+    store_be32(t + 0x98, 0xE8610070u);                                /* ld r3,0x70(r1) scene*/
+    store_be32(t + 0x9C, 0x38630E28u);                                /* addi r3,r3,0xe28    */
+    store_be32(t + 0xA0, bl_fire);                                    /* bl FUN_0024d208 fire*/
+    store_be32(t + 0xA4, 0x3D800000u | ((flag_va >> 16) & 0xFFFFu));  /* lis r12,hi(flag)    */
+    store_be32(t + 0xA8, 0x618C0000u | (flag_va & 0xFFFFu));          /* ori r12,r12,lo      */
+    store_be32(t + 0xAC, 0x39600000u);                                /* li r11,0            */
+    store_be32(t + 0xB0, 0x916C0000u);                                /* stw r11,0(r12) clr  */
+    store_be32(t + 0xB4, 0xE8010090u);                                /* done: ld r0,0x90    */
+    store_be32(t + 0xB8, 0x7C0803A6u);                                /* mtlr r0             */
+    store_be32(t + 0xBC, 0xE8610070u);                                /* ld r3,0x70(r1) scene*/
+    store_be32(t + 0xC0, 0xE8810078u);                                /* ld r4,0x78(r1)      */
+    store_be32(t + 0xC4, 0x38210080u);                                /* addi r1,r1,0x80     */
+    store_be32(t + 0xC8, load_be32(ctx->buf + func_off));             /* original stdu       */
+    store_be32(t + 0xCC, resume);                                     /* b Proc_Main+4       */
+    store_be32(ctx->buf + func_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+
+    dbg_print("[patch] song-select confirm trampoline\n");
+    dbg_print_hex32("[patch] confirm tramp va", tramp_va);
+    dbg_print_hex32("[patch] confirm proc fn", func_va);
+    dbg_print_hex32("[patch] confirm scene cell", scene_va);
+    dbg_print_hex32("[patch] confirm flag cell", flag_va);
+    return 0;
+}
+
+/* Enso scene proc (0x1ef214). Cache its scene pointer (r3) into the FPT
+   song_select_scene_source cell each frame so the SPRX can watch the enso
+   scene's state (+0x14) and load fields and find where startup stalls. */
+static int enso_proc_prologue_matches(const uint8_t *b) {
+    return load_be32(b + 0x00) == 0x7D800026u &&  /* mfcr r12          */
+           load_be32(b + 0x04) == 0xF821FBF1u &&  /* stdu r1,-0x410(r1)*/
+           load_be32(b + 0x08) == 0xFAC103C0u &&  /* std r22,0x3c0(r1) */
+           load_be32(b + 0x0C) == 0xFB0103D0u &&  /* std r24,0x3d0(r1) */
+           load_be32(b + 0x10) == 0xFB2103D8u &&  /* std r25,0x3d8(r1) */
+           load_be32(b + 0x14) == 0xFB4103E0u &&  /* std r26,0x3e0(r1) */
+           load_be32(b + 0x18) == 0xFB6103E8u &&  /* std r27,0x3e8(r1) */
+           load_be32(b + 0x1C) == 0xFB8103F0u;    /* std r28,0x3f0(r1) */
+}
+
+static int find_enso_proc(self_ctx_t *ctx, elf64_phdr_t *phdrs, uint16_t phnum,
+                          uint32_t *out_va, uint64_t *out_off) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+    uint32_t found_va = 0;
+    uint64_t found_off = 0;
+    uint32_t count = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 0x20u)
+            continue;
+        for (uint64_t pos = 0; pos + 0x20u <= size; pos += 4u) {
+            if (!enso_proc_prologue_matches(ctx->buf + base + pos))
+                continue;
+            found_va = (uint32_t)(p->p_vaddr + pos);
+            found_off = base + pos;
+            if (++count > 1)
+                return 0;
+        }
+    }
+    if (count != 1)
+        return 0;
+    *out_va = found_va;
+    *out_off = found_off;
+    return 1;
+}
+
+static int patch_enso_proc_cache(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                 uint16_t phnum, uint32_t fpt_va,
+                                 uint64_t tramp_off, uint32_t tramp_va,
+                                 uint64_t next_load_off, uint64_t *append_end) {
+    enum { TRAMP_WORDS = 5 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+
+    uint32_t func_va = 0;
+    uint64_t func_off = 0;
+    if (!find_enso_proc(ctx, phdrs, phnum, &func_va, &func_off))
+        return -3;
+
+    uint32_t branch = 0;
+    if (!encode_relative_b(func_va, tramp_va, &branch))
+        return -4;
+    uint32_t resume = 0;
+    if (!encode_relative_b(tramp_va + 0x10u, func_va + 4u, &resume))
+        return -5;
+
+    uint32_t cell_va =
+        fpt_va + (uint32_t)offsetof(taiko_fpt_t, song_select_scene_source);
+    uint8_t *t = ctx->buf + tramp_off;
+    store_be32(t + 0x00, 0x3D800000u | ((cell_va >> 16) & 0xFFFFu)); /* lis r12,hi   */
+    store_be32(t + 0x04, 0x618C0000u | (cell_va & 0xFFFFu));         /* ori r12,r12,lo */
+    store_be32(t + 0x08, 0x906C0000u);                              /* stw r3,0(r12) */
+    store_be32(t + 0x0C, load_be32(ctx->buf + func_off));           /* mfcr r12 (orig) */
+    store_be32(t + 0x10, resume);                                   /* b proc+4      */
+    store_be32(ctx->buf + func_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+    dbg_print("[patch] enso proc cache trampoline\n");
+    dbg_print_hex32("[patch] enso proc fn", func_va);
+    dbg_print_hex32("[patch] enso scene cell", cell_va);
+    return 0;
+}
+
+/* Lumen native arg-reader FUN_00399074(out=r3, callctx=r4, argIndex=r5);
+ * fills *out = {type@0, value@4}. Every AS->C++ native fetches each argument
+ * through it. We WRAP it (call the body, read the decoded *out on return) and
+ * append {nativeLR, idx, type, value} to the FPT native_log ring; nativeLR =
+ * which native, drained to TTY by the SPRX. The wrapper calls the body at
+ * VA+4 (past the patched entry word) so it does not re-enter the hook. */
+#define ARG_READER_VA 0x00399074u
+static int patch_native_arg_logger(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                   uint16_t phnum, uint32_t fpt_va,
+                                   uint64_t tramp_off, uint32_t tramp_va,
+                                   uint64_t next_load_off, uint64_t *append_end) {
+    enum { TRAMP_WORDS = 28 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+
+    uint64_t func_off = 0;
+    if (va_to_off(ctx, phdrs, phnum, ARG_READER_VA, &func_off) != 0 ||
+        func_off + 4u > ctx->buf_len)
+        return -3;
+    uint32_t orig = load_be32(ctx->buf + func_off);
+    if (orig != 0xF821FF81u) /* stdu r1,-0x80(r1) — prologue sanity */
+        return -4;
+
+    uint32_t branch = 0;
+    if (!encode_relative_b(ARG_READER_VA, tramp_va, &branch))
+        return -5;
+    uint32_t callbody = 0;
+    if (!encode_relative_bl(tramp_va + 0x18u, ARG_READER_VA + 4u, &callbody))
+        return -6;
+
+    uint32_t ring_va = fpt_va + (uint32_t)offsetof(taiko_fpt_t, native_log_head);
+    uint8_t *t = ctx->buf + tramp_off;
+    store_be32(t + 0x00, 0x7C0802A6u);                                /* mflr r0            */
+    store_be32(t + 0x04, 0xF821FF91u);                                /* stdu r1,-0x70(r1)  */
+    store_be32(t + 0x08, 0xF8010060u);                                /* std r0,0x60(r1) LR */
+    store_be32(t + 0x0C, 0xF8610040u);                                /* std r3,0x40(r1) out*/
+    store_be32(t + 0x10, 0xF8A10048u);                                /* std r5,0x48(r1) idx*/
+    store_be32(t + 0x14, orig);                                       /* stdu r1,-0x80(r1)  */
+    store_be32(t + 0x18, callbody);                                   /* bl reader+4        */
+    store_be32(t + 0x1C, 0xE8610040u);                                /* ld r3,0x40(r1) out */
+    store_be32(t + 0x20, 0x81430000u);                                /* lwz r10,0(r3) type */
+    store_be32(t + 0x24, 0x81630004u);                                /* lwz r11,4(r3) val  */
+    store_be32(t + 0x28, 0xE9210060u);                                /* ld r9,0x60(r1) LR  */
+    store_be32(t + 0x2C, 0xE9010048u);                                /* ld r8,0x48(r1) idx */
+    store_be32(t + 0x30, 0x3D800000u | ((ring_va >> 16) & 0xFFFFu));  /* lis r12,hi(ring)   */
+    store_be32(t + 0x34, 0x618C0000u | (ring_va & 0xFFFFu));          /* ori r12,r12,lo     */
+    store_be32(t + 0x38, 0x80EC0000u);                                /* lwz r7,0(r12) head */
+    store_be32(t + 0x3C, 0x54E6067Eu);                                /* clrlwi r6,r7,25    */
+    store_be32(t + 0x40, 0x54C62036u);                                /* slwi r6,r6,4       */
+    store_be32(t + 0x44, 0x7CAC3214u);                                /* add r5,r12,r6      */
+    store_be32(t + 0x48, 0x91250004u);                                /* stw r9,4(r5) lr    */
+    store_be32(t + 0x4C, 0x91050008u);                                /* stw r8,8(r5) idx   */
+    store_be32(t + 0x50, 0x9145000Cu);                                /* stw r10,12(r5) type*/
+    store_be32(t + 0x54, 0x91650010u);                                /* stw r11,16(r5) val */
+    store_be32(t + 0x58, 0x38E70001u);                                /* addi r7,r7,1       */
+    store_be32(t + 0x5C, 0x90EC0000u);                                /* stw r7,0(r12) head */
+    store_be32(t + 0x60, 0xE8010060u);                                /* ld r0,0x60(r1) LR  */
+    store_be32(t + 0x64, 0x7C0803A6u);                                /* mtlr r0            */
+    store_be32(t + 0x68, 0x38210070u);                                /* addi r1,r1,0x70    */
+    store_be32(t + 0x6C, 0x4E800020u);                                /* blr -> native      */
+    store_be32(ctx->buf + func_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+    dbg_print("[patch] native arg-logger trampoline\n");
+    dbg_print_hex32("[patch] nlog tramp va", tramp_va);
+    dbg_print_hex32("[patch] nlog ring va", ring_va);
+    return 0;
+}
+
 static void update_self_section_size(self_ctx_t *ctx, uint16_t ph_index,
                                      uint64_t old_size, uint64_t new_size) {
     if (!ctx || !ctx->si)
@@ -912,6 +1266,7 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
         return -4;
     if (next_load_off && payload_end > next_load_off)
         return -5;
+    uint64_t append_end = payload_end;
 
     uint64_t opd_off = 0;
     if (va_to_off(ctx, phdrs, phnum, ehdr->e_entry, &opd_off) != 0 ||
@@ -963,6 +1318,36 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
     if (fpt_rc != 0)
         return -800 + fpt_rc;
 
+    uint64_t confirm_tramp_off = align_u64(append_end, 4);
+    uint32_t confirm_tramp_va =
+        (uint32_t)(payload_va + (confirm_tramp_off - payload_off));
+    int confirm_rc = patch_song_select_direct_enso(ctx, phdrs, phnum, fpt_va,
+                                                   confirm_tramp_off,
+                                                   confirm_tramp_va,
+                                                   next_load_off, &append_end);
+    if (confirm_rc != 0) {
+        dbg_print_hex32("[patch] song-select confirm skipped",
+                        (uint32_t)confirm_rc);
+    }
+
+    uint64_t enso_tramp_off = align_u64(append_end, 4);
+    uint32_t enso_tramp_va =
+        (uint32_t)(payload_va + (enso_tramp_off - payload_off));
+    int enso_rc = patch_enso_proc_cache(ctx, phdrs, phnum, fpt_va,
+                                        enso_tramp_off, enso_tramp_va,
+                                        next_load_off, &append_end);
+    if (enso_rc != 0)
+        dbg_print_hex32("[patch] enso proc cache skipped", (uint32_t)enso_rc);
+
+    uint64_t nlog_tramp_off = align_u64(append_end, 4);
+    uint32_t nlog_tramp_va =
+        (uint32_t)(payload_va + (nlog_tramp_off - payload_off));
+    int nlog_rc = patch_native_arg_logger(ctx, phdrs, phnum, fpt_va,
+                                          nlog_tramp_off, nlog_tramp_va,
+                                          next_load_off, &append_end);
+    if (nlog_rc != 0)
+        dbg_print_hex32("[patch] native arg-logger skipped", (uint32_t)nlog_rc);
+
     uint32_t resume_va = main_va + 16u;
     uint32_t main_w3 = load_be32(ctx->buf + main_off + 12u);
     int main_entry_is_thunk = is_relative_b(main_w3);
@@ -987,7 +1372,7 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
     write_abs_jump(ctx->buf + main_off, (uint32_t)payload_va);
 
     uint64_t old_rx_size = rx_size;
-    uint64_t growth = payload_end - (rx_off + rx_size);
+    uint64_t growth = append_end - (rx_off + rx_size);
     rx->p_filesz += growth;
     rx->p_memsz += growth;
     update_self_section_size(ctx, (uint16_t)rx_index, old_rx_size,

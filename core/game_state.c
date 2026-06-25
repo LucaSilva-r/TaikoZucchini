@@ -1,4 +1,5 @@
 #include <stddef.h>
+#include <stdint.h>
 
 #include "debug.h"
 #include "game_state.h"
@@ -283,18 +284,10 @@ static void observe_song_audio(const char *path) {
             return;
 
         copy_token_lower(g_preview_song, sizeof g_preview_song, song, '\0', '\0');
-        dbg_print("[gamesong] preview ");
-        dbg_print(g_preview_song);
-        dbg_print("\n");
         return;
     }
 
-    if (g_game_state == TAIKO_GAME_STATE_GAMEPLAY &&
-        !str_equal(g_gameplay_song, song)) {
-        dbg_print("[gamesong] gameplay_audio ");
-        dbg_print(song);
-        dbg_print("\n");
-    }
+    (void)song;
 }
 
 static void observe_fumen(const char *path) {
@@ -319,18 +312,27 @@ static void observe_fumen(const char *path) {
     copy_token_lower(g_gameplay_song, sizeof g_gameplay_song, song, '\0', '\0');
     copy_token_lower(g_gameplay_course, sizeof g_gameplay_course, course, '\0', '\0');
     copy_token_lower(g_gameplay_chart_kind, sizeof g_gameplay_chart_kind, kind, '\0', '\0');
+}
 
-    dbg_print("[gamesong] gameplay ");
-    dbg_print(g_gameplay_song);
-    if (g_gameplay_chart_kind[0]) {
-        dbg_print(" chart=");
-        dbg_print(g_gameplay_chart_kind);
+/* Walk the PPU stack backchain and log return addresses. Called from the
+   cellFsOpen hook the moment the game opens enso_system/* (= inside the real
+   enso constructor's call chain), so the chain reveals who constructs the enso
+   scene — the launch trigger static RE couldn't pin (runtime dispatch).
+   PS3 64-bit ABI: 8-byte slots, BE -> 32-bit address in the low word (+4).
+   backchain at *(sp); return addr saved by callee at caller_sp+0x10. */
+static void dump_ctor_chain(void) {
+    uintptr_t sp;
+    __asm__ volatile ("mr %0, %%r1" : "=r"(sp));
+    for (int i = 0; i < 18; i++) {
+        if (sp < 0x10000u || sp >= 0xe0000000u)
+            break;
+        uintptr_t caller = *(volatile uint32_t *)(sp + 4u); /* backchain low word */
+        if (caller <= sp || caller < 0x10000u || caller >= 0xe0000000u)
+            break;
+        uint32_t lr = *(volatile uint32_t *)(caller + 0x14u); /* LR save low word */
+        dbg_print_hex32("[ctor] lr", lr);
+        sp = caller;
     }
-    if (g_gameplay_course[0]) {
-        dbg_print(" course=");
-        dbg_print(g_gameplay_course);
-    }
-    dbg_print("\n");
 }
 
 void taiko_game_state_observe_open(const char *path) {
@@ -342,19 +344,21 @@ void taiko_game_state_observe_open(const char *path) {
         dbg_print(" via ");
         dbg_print(path ? path : "(null)");
         dbg_print("\n");
+        if (state == TAIKO_GAME_STATE_GAMEPLAY)
+            dump_ctor_chain();  /* one-shot: log enso constructor call chain */
     }
 
     const char *asset = classify_asset_path(path);
     if (!asset)
         return;
 
-    dbg_print("[gamefile] ");
-    dbg_print(taiko_game_state_name(g_game_state));
-    dbg_print(" ");
-    dbg_print(asset);
-    dbg_print(" via ");
-    dbg_print(path ? path : "(null)");
-    dbg_print("\n");
+    if (str_equal(asset, "fumen") || str_equal(asset, "song_audio")) {
+        dbg_print("[gamefile] ");
+        dbg_print(asset);
+        dbg_print(" ");
+        dbg_print(path ? path : "(null)");
+        dbg_print("\n");
+    }
 
     if (str_equal(asset, "song_audio"))
         observe_song_audio(path);

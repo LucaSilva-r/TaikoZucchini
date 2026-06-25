@@ -44,8 +44,19 @@ static uintptr_t fpt_size_for_slots(uint32_t slots) {
 }
 
 static uintptr_t fpt_total_size(uint32_t version, uint32_t slots) {
-    (void)version;
-    return fpt_size_for_slots(slots);
+    uintptr_t size = fpt_size_for_slots(slots);
+    if (version >= 3u)
+        size += TAIKO_FPT_SERIAL_BYTES;
+    if (version >= 4u)
+        size += sizeof(uint32_t);
+    if (version >= 5u)
+        size += sizeof(uint32_t);
+    if (version >= 6u)
+        size += sizeof(uint32_t);
+    if (version >= 8u)
+        size += sizeof(uint32_t) +
+                (uintptr_t)TAIKO_FPT_NLOG * 4u * sizeof(uint32_t);
+    return size;
 }
 
 static taiko_fpt_t *find_fpt(void) {
@@ -148,4 +159,50 @@ uintptr_t taiko_fpt_slot_value(uint32_t slot) {
     if (!t || slot >= t->slot_count || slot >= TAIKO_FPT_SLOT_COUNT)
         return 0;
     return (uintptr_t)t->slots[slot];
+}
+
+uintptr_t taiko_fpt_song_select_scene(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 4u)
+        return 0;
+    return (uintptr_t)t->song_select_scene;
+}
+
+uintptr_t taiko_fpt_table_address(void) {
+    return (uintptr_t)get_fpt();
+}
+
+uint32_t taiko_fpt_version_seen(void) {
+    taiko_fpt_t *t = get_fpt();
+    return t ? t->version : 0;
+}
+
+uintptr_t taiko_fpt_song_select_scene_cell(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 4u)
+        return 0;
+    return (uintptr_t)&t->song_select_scene;
+}
+
+uint32_t taiko_fpt_song_select_scene_source(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 5u)
+        return 0;
+    return t->song_select_scene_source;
+}
+
+int taiko_fpt_request_song_select_launch(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 6u)
+        return 0;
+    t->song_select_launch_request = 1;
+    __asm__ volatile("sync" ::: "memory");
+    return 1;
+}
+
+uintptr_t taiko_fpt_native_log(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 8u)
+        return 0;
+    return (uintptr_t)&t->native_log_head;
 }
