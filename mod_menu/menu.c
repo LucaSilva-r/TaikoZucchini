@@ -151,6 +151,8 @@ typedef enum {
     ITEM_ACTION,
     ITEM_HOST_EDIT, /* string-editor row: opens OSK on confirm */
     ITEM_PORT_EDIT, /* uint16 editor row: opens numeric OSK */
+    ITEM_TJAREPO_HOST_EDIT, /* TJARepo service host */
+    ITEM_TJAREPO_PORT_EDIT, /* TJARepo service port */
     ITEM_SERIAL_EDIT, /* dongle serial: opens numeric OSK */
 } item_kind_t;
 
@@ -183,6 +185,12 @@ static const menu_item_t g_items[] = {
       0, 0 },
     { ITEM_PORT_EDIT, "Redirect port",
       "Private server TCP port. Usually 443.",
+      0, 0 },
+    { ITEM_TJAREPO_HOST_EDIT, "TJARepo host",
+      "Converter service hostname for browsing/downloading custom songs.",
+      0, 0 },
+    { ITEM_TJAREPO_PORT_EDIT, "TJARepo port",
+      "Converter service TCP port. Usually 443, or 8090 for local Docker.",
       0, 0 },
 
     { ITEM_SECTION, "Dongle", "", 0, 0 },
@@ -554,6 +562,28 @@ static void draw_frame(void) {
             int tw = menu_text_width(&menu_font_30_font, buf);
             menu_draw_text(&menu_font_30_font,
                            rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, buf);
+        } else if (it->kind == ITEM_TJAREPO_HOST_EDIT) {
+            const char *s = g_cfg.tjarepo_host[0]
+                              ? g_cfg.tjarepo_host
+                              : "(unset)";
+            uint32_t c = g_cfg.tjarepo_host[0] ? COLOR_TEXT : COLOR_DIM;
+            int tw = menu_text_width(&menu_font_30_font, s);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, c, s);
+        } else if (it->kind == ITEM_TJAREPO_PORT_EDIT) {
+            char buf[8];
+            unsigned v = g_cfg.tjarepo_port;
+            int n = 0;
+            if (v == 0) buf[n++] = '0';
+            else {
+                char tmp[8]; int t = 0;
+                while (v && t < (int)sizeof tmp) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+                while (t > 0) buf[n++] = tmp[--t];
+            }
+            buf[n] = 0;
+            int tw = menu_text_width(&menu_font_30_font, buf);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, buf);
         } else if (it->kind == ITEM_SERIAL_EDIT) {
             const char *s = taiko_cfg_dongle_serial();
             int tw = menu_text_width(&menu_font_30_font, s);
@@ -738,6 +768,49 @@ static void menu_loop(void) {
                     if (pv > 0) {
                         g_cfg.online_redirect_port = (uint16_t)pv;
                         g_status = "Redirect port updated";
+                    } else {
+                        g_status = "Invalid port (1-65535)";
+                    }
+                }
+                (void)menu_pad_pressed();
+            } else if (it->kind == ITEM_TJAREPO_HOST_EDIT && (edge & MENU_BTN_CROSS)) {
+                char buf[TAIKO_REDIRECT_HOST_MAX];
+                int rc = menu_osk_input("TJARepo host (e.g. tjarepo.example.com)",
+                                        g_cfg.tjarepo_host,
+                                        MENU_OSK_TEXT,
+                                        buf, sizeof buf);
+                if (rc == 0) {
+                    taiko_cfg_normalize_host(g_cfg.tjarepo_host,
+                                             TAIKO_REDIRECT_HOST_MAX, buf);
+                    g_status = "TJARepo host updated";
+                }
+                (void)menu_pad_pressed();
+            } else if (it->kind == ITEM_TJAREPO_PORT_EDIT && (edge & MENU_BTN_CROSS)) {
+                char cur[8];
+                unsigned v = g_cfg.tjarepo_port;
+                int n = 0;
+                if (v == 0) cur[n++] = '0';
+                else {
+                    char tmp[8]; int t = 0;
+                    while (v && t < (int)sizeof tmp) { tmp[t++] = (char)('0' + (v % 10)); v /= 10; }
+                    while (t > 0) cur[n++] = tmp[--t];
+                }
+                cur[n] = 0;
+
+                char buf[8];
+                int rc = menu_osk_input("TJARepo port (1-65535)",
+                                        cur, MENU_OSK_NUMERIC,
+                                        buf, sizeof buf);
+                if (rc == 0) {
+                    unsigned pv = 0;
+                    for (int i = 0; buf[i]; i++) {
+                        if (buf[i] < '0' || buf[i] > '9') { pv = 0; break; }
+                        pv = pv * 10u + (unsigned)(buf[i] - '0');
+                        if (pv > 65535u) { pv = 0; break; }
+                    }
+                    if (pv > 0) {
+                        g_cfg.tjarepo_port = (uint16_t)pv;
+                        g_status = "TJARepo port updated";
                     } else {
                         g_status = "Invalid port (1-65535)";
                     }
@@ -1055,6 +1128,15 @@ static void ig_row_info(int code, char *label, int lcap,
         ig_append(label, 0, lcap, "Redirect port");
         ig_append_u32(value, 0, vcap, g_cfg.online_redirect_port);
         break;
+    case ITEM_TJAREPO_HOST_EDIT:
+        ig_append(label, 0, lcap, "TJARepo host");
+        ig_append(value, 0, vcap, g_cfg.tjarepo_host[0]
+                                    ? g_cfg.tjarepo_host : "(unset)");
+        break;
+    case ITEM_TJAREPO_PORT_EDIT:
+        ig_append(label, 0, lcap, "TJARepo port");
+        ig_append_u32(value, 0, vcap, g_cfg.tjarepo_port);
+        break;
     case ITEM_SERIAL_EDIT:
         ig_append(label, 0, lcap, "Dongle serial");
         ig_append(value, 0, vcap, taiko_cfg_dongle_serial());
@@ -1198,6 +1280,8 @@ static void ig_activate(int code, uint32_t edge, int *close) {
             run_action(it->action);         /* A_DELETE_USIO_BACKUP: no exit */
         }
     } else if ((it->kind == ITEM_HOST_EDIT || it->kind == ITEM_PORT_EDIT ||
+                it->kind == ITEM_TJAREPO_HOST_EDIT ||
+                it->kind == ITEM_TJAREPO_PORT_EDIT ||
                 it->kind == ITEM_SERIAL_EDIT) &&
                (edge & MENU_BTN_CROSS)) {
         g_status = "Edit text/number fields from the boot menu (tap F2 at startup)";

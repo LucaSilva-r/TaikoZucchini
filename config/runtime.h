@@ -64,6 +64,12 @@ typedef struct {
     char     online_redirect_host[TAIKO_REDIRECT_HOST_MAX];
     uint16_t online_redirect_port;
 
+    /* Separate endpoint for the TJARepo conversion service. Kept out of
+     * online_redirect_host so TaikOnline traffic and song conversion can
+     * live on different domains. */
+    char     tjarepo_host[TAIKO_REDIRECT_HOST_MAX];
+    uint16_t tjarepo_port;
+
     /* Optional override for the baked TaikOnline card issuer bearer token.
      * Empty means use TAIKO_ZUCCHINI_API_TOKEN from the binary. */
     char     zucchini_api_token[TAIKO_API_TOKEN_MAX];

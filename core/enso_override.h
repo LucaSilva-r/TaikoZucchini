@@ -14,6 +14,11 @@ int taiko_enso_override_set_folder(const char *carrier_song,
                                    const char *custom_song,
                                    const char *custom_root,
                                    const char *audio_path);
+int taiko_enso_override_set_folder_course(const char *carrier_song,
+                                          const char *custom_song,
+                                          const char *custom_root,
+                                          const char *course,
+                                          const char *audio_path);
 int taiko_enso_override_try_open(const char *path, int flags, int *fd,
                                  const void *arg, uint64_t size,
                                  int *out_rc);

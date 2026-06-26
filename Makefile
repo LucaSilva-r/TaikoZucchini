@@ -119,7 +119,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            hooks/http_hook.c hooks/cell_http_shim.c \
            hooks/dns_hook.c hooks/socket_hook.c \
            hooks/video_out_hook.c \
-           network/uri.c network/http_client.c network/version_check.c
+           network/uri.c network/http_client.c network/version_check.c \
+           network/custom_song_client.c
 OBJS    := $(SRCS:.c=.o)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf

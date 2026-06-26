@@ -1,6 +1,7 @@
 #include "custom_song_launcher.h"
 
 #include <stdint.h>
+#include <stdio.h>
 
 #include <cell/keyboard/kb_codes.h>
 #include <sys/ppu_thread.h>
@@ -12,15 +13,17 @@
 #include "game_state.h"
 #include "kb_input.h"
 #include "menu_pad.h"
+#include "network/custom_song_client.h"
 #include "overlay.h"
+#include "taiko_frame.h"
 
 #define TICK_US              (4 * 1000)
 #define OPEN_HOLD_TICKS      200
 #define PROMPT_REFRESH_TICKS 250
 #define LAUNCH_RETRY_TICKS   30
 
-#define KUMA_ROOT  "/dev_hdd0/plugins/taiko/custom_songs/kuma"
-#define KUMA_AUDIO "/dev_hdd0/plugins/taiko/custom_songs/kuma/SONG_KUMA.nub"
+#define PICKER_VISIBLE_ROWS 12
+#define ESE_CUSTOM_ROOT "/dev_hdd0/plugins/taiko/custom_songs"
 
 #define SONG_RECORD_STRIDE 0x90u
 #define SONG_RECORD_ID_OFF 0x04u
@@ -170,38 +173,438 @@ static int current_state_is_song_select(void) {
            s == TAIKO_GAME_STATE_WAIWAI_SONG_SELECT;
 }
 
-static int launch_kuma_override(void) {
-    load_builtin_seed();
-    if (!g_seed.valid) {
-        taiko_overlay_show_prompt("Play any song once to capture seed");
-        dbg_print("[custom_song] no seed yet\n");
+static int picker_move(int sel, int delta, int count) {
+    if (count <= 0)
+        return 0;
+    sel += delta;
+    if (sel < 0)
+        sel = count - 1;
+    if (sel >= count)
+        sel = 0;
+    return sel;
+}
+
+static void picker_render_categories(const ese_category_entry_t *cats,
+                                     int count, int sel, int top,
+                                     const char *status) {
+    static char labels[PICKER_VISIBLE_ROWS][ESE_SONG_TITLE_MAX];
+    static char values[PICKER_VISIBLE_ROWS][16];
+    static unsigned char kinds[PICKER_VISIBLE_ROWS];
+    const char *lptrs[PICKER_VISIBLE_ROWS];
+    const char *vptrs[PICKER_VISIBLE_ROWS];
+
+    int visible = count - top;
+    if (visible > PICKER_VISIBLE_ROWS)
+        visible = PICKER_VISIBLE_ROWS;
+    if (visible < 0)
+        visible = 0;
+
+    for (int i = 0; i < visible; i++) {
+        int idx = top + i;
+        snprintf(labels[i], sizeof labels[i], "%s", cats[idx].title[0]
+                 ? cats[idx].title : cats[idx].id);
+        snprintf(values[i], sizeof values[i], "%d", cats[idx].song_count);
+        kinds[i] = TAIKO_OVL_ROW_ACTION;
+        lptrs[i] = labels[i];
+        vptrs[i] = values[i];
+    }
+
+    taiko_overlay_menu_set("Custom Songs", lptrs, vptrs, kinds,
+                           visible, sel - top, 0,
+                           status ? status : cats[sel].id,
+                           "UP/DOWN move  X open  O close");
+    taiko_overlay_menu_active(1);
+}
+
+static int song_row_to_index(int row, int has_prev) {
+    return row - (has_prev ? 1 : 0);
+}
+
+static int build_cached_song_root(char *out, unsigned int cap,
+                                  const char *song_id) {
+    int n;
+    if (!out || cap == 0 || !song_id || !song_id[0])
+        return 0;
+    n = snprintf(out, cap, "%s/%s", ESE_CUSTOM_ROOT, song_id);
+    return n > 0 && (unsigned int)n < cap;
+}
+
+static void copy_limited(char *out, unsigned int cap, const char *src,
+                         unsigned int max_chars) {
+    unsigned int n = 0;
+    if (!out || cap == 0)
+        return;
+    if (!src)
+        src = "";
+    while (src[n] && n + 1 < cap && n < max_chars) {
+        out[n] = src[n];
+        n++;
+    }
+    out[n] = '\0';
+}
+
+static const char *carrier_song_id(void) {
+    if (g_seed.valid && g_seed.song_id[0])
+        return g_seed.song_id;
+    if (BUILTIN_SEED.valid && BUILTIN_SEED.song_id[0])
+        return BUILTIN_SEED.song_id;
+    return "kimetu";
+}
+
+static int picker_render_courses(const ese_song_entry_t *song,
+                                 const ese_course_entry_t *courses,
+                                 int count, int sel,
+                                 const char *status) {
+    static char labels[PICKER_VISIBLE_ROWS][ESE_SONG_TITLE_MAX];
+    static char values[PICKER_VISIBLE_ROWS][16];
+    static unsigned char kinds[PICKER_VISIBLE_ROWS];
+    const char *lptrs[PICKER_VISIBLE_ROWS];
+    const char *vptrs[PICKER_VISIBLE_ROWS];
+    char title[96];
+    char short_title[73];
+    int visible = count;
+
+    if (visible > PICKER_VISIBLE_ROWS)
+        visible = PICKER_VISIBLE_ROWS;
+    if (visible < 0)
+        visible = 0;
+
+    for (int i = 0; i < visible; i++) {
+        snprintf(labels[i], sizeof labels[i], "%s",
+                 courses[i].label[0] ? courses[i].label : courses[i].id);
+        if (courses[i].stars > 0)
+            snprintf(values[i], sizeof values[i], "%d stars",
+                     courses[i].stars);
+        else
+            values[i][0] = 0;
+        kinds[i] = TAIKO_OVL_ROW_ACTION;
+        lptrs[i] = labels[i];
+        vptrs[i] = values[i];
+    }
+
+    copy_limited(short_title, sizeof short_title,
+                 song && song->title[0] ? song->title : "Song", 72);
+    snprintf(title, sizeof title, "Difficulty - %s", short_title);
+    taiko_overlay_menu_set(title, lptrs, vptrs, kinds, visible,
+                           sel, 0,
+                           status ? status : "Choose difficulty to launch",
+                           "UP/DOWN move  X launch  O cancel");
+    taiko_overlay_menu_active(1);
+    return visible;
+}
+
+static int choose_course(const ese_song_entry_t *song,
+                         const ese_course_entry_t *courses,
+                         int count) {
+    int sel = 0;
+
+    if (!courses || count <= 0)
+        return -1;
+
+    (void)menu_pad_pressed();
+    for (;;) {
+        uint32_t edge;
+        picker_render_courses(song, courses, count, sel, NULL);
+        edge = menu_pad_pressed();
+        if (edge & MENU_BTN_UP)
+            sel = picker_move(sel, -1, count);
+        if (edge & MENU_BTN_DOWN)
+            sel = picker_move(sel, 1, count);
+        if (edge & MENU_BTN_CROSS)
+            return sel;
+        if (edge & MENU_BTN_CIRCLE)
+            return -1;
+        sys_timer_usleep(30 * 1000);
+    }
+}
+
+static int arm_selected_song(const ese_song_entry_t *song,
+                             const ese_course_entry_t *course) {
+    char root[192];
+    uintptr_t scene;
+    uintptr_t mm;
+
+    if (!song || !song->id[0] || !course || !course->id[0])
+        return 0;
+
+    if (!build_cached_song_root(root, sizeof root, song->id)) {
+        taiko_overlay_show_prompt("Cache path too long");
         return 0;
     }
 
-    uintptr_t scene = taiko_fpt_song_select_scene();
-    if (!ptr_sane(scene))
-        return 0;
-    uintptr_t mm = read_game_word(scene + 0x0cu);
-    if (!ptr_sane(mm))
-        return 0;
-
-    if (!taiko_enso_override_set_folder(g_seed.song_id, "kuma",
-                                        KUMA_ROOT, KUMA_AUDIO)) {
-        taiko_overlay_show_prompt("Kuma override failed");
+    if (!taiko_enso_override_set_folder_course(carrier_song_id(), song->id,
+                                               root, course->id, NULL)) {
+        taiko_overlay_show_prompt("Override failed");
         dbg_print("[custom_song] override arm failed\n");
         return 0;
+    }
+
+    scene = taiko_fpt_song_select_scene();
+    if (!ptr_sane(scene)) {
+        taiko_overlay_show_prompt("Armed - start song");
+        dbg_print("[custom_song] song select scene unavailable after arm\n");
+        return 1;
+    }
+
+    mm = read_game_word(scene + 0x0cu);
+    if (!ptr_sane(mm)) {
+        taiko_overlay_show_prompt("Armed - start song");
+        dbg_print("[custom_song] song select mm unavailable after arm\n");
+        return 1;
     }
 
     replay_selection_seed(mm);
 
     if (taiko_fpt_request_song_select_launch()) {
-        taiko_overlay_show_prompt("Kuma launching");
+        taiko_overlay_show_prompt("Launching custom song...");
         dbg_print("[custom_song] launch queued\n");
     } else {
-        taiko_overlay_show_prompt("Kuma armed - start song");
+        taiko_overlay_show_prompt("Armed - start song");
         dbg_print("[custom_song] launch request unavailable\n");
     }
     return 1;
+}
+
+static int prepare_selected_song(const ese_song_entry_t *song) {
+    ese_course_entry_t courses[ESE_COURSE_LIST_MAX];
+    int course_count = 0;
+    int course_sel;
+    int rc;
+
+    if (!song || !song->id[0])
+        return 0;
+
+    /* Hide the song list; ese_song_prepare_and_cache drives a centred
+     * loading-bar card while it converts/downloads. */
+    taiko_overlay_menu_active(0);
+    rc = ese_song_prepare_and_cache(song->id, song->title[0]
+                                    ? song->title : song->id,
+                                    courses, ESE_COURSE_LIST_MAX,
+                                    &course_count);
+    taiko_overlay_card_active(0);
+    if (rc <= 0) {
+        char msg[96];
+        snprintf(msg, sizeof msg, "Prepare failed %d", rc);
+        taiko_overlay_show_prompt(msg);
+        return 0;
+    }
+    if (course_count <= 0) {
+        taiko_overlay_show_prompt("No supported charts");
+        return 0;
+    }
+
+    course_sel = choose_course(song, courses, course_count);
+    if (course_sel < 0) {
+        taiko_overlay_show_prompt("Launch cancelled");
+        return 0;
+    }
+
+    taiko_overlay_menu_active(0);
+    return arm_selected_song(song, &courses[course_sel]);
+}
+
+static int picker_render_songs(const ese_song_entry_t *songs, int count,
+                               int total, int offset, int sel,
+                               const char *category_title,
+                               const char *status) {
+    static char labels[PICKER_VISIBLE_ROWS][ESE_SONG_TITLE_MAX];
+    static char values[PICKER_VISIBLE_ROWS][16];
+    static unsigned char kinds[PICKER_VISIBLE_ROWS];
+    char title[96];
+    char short_category[73];
+    const char *lptrs[PICKER_VISIBLE_ROWS];
+    const char *vptrs[PICKER_VISIBLE_ROWS];
+    int row = 0;
+    int has_prev = offset > 0;
+    int has_next = offset + count < total;
+
+    if (has_prev && row < PICKER_VISIBLE_ROWS) {
+        snprintf(labels[row], sizeof labels[row], "< Previous page");
+        values[row][0] = 0;
+        kinds[row] = TAIKO_OVL_ROW_ACTION;
+        lptrs[row] = labels[row];
+        vptrs[row] = values[row];
+        row++;
+    }
+
+    for (int i = 0; i < count && row < PICKER_VISIBLE_ROWS; i++, row++) {
+        snprintf(labels[row], sizeof labels[row], "%s", songs[i].title[0]
+                 ? songs[i].title : songs[i].id);
+        snprintf(values[row], sizeof values[row], "%d/%d",
+                 offset + i + 1, total);
+        kinds[row] = TAIKO_OVL_ROW_ACTION;
+        lptrs[row] = labels[row];
+        vptrs[row] = values[row];
+    }
+
+    if (has_next && row < PICKER_VISIBLE_ROWS) {
+        snprintf(labels[row], sizeof labels[row], "Next page >");
+        values[row][0] = 0;
+        kinds[row] = TAIKO_OVL_ROW_ACTION;
+        lptrs[row] = labels[row];
+        vptrs[row] = values[row];
+        row++;
+    }
+
+    copy_limited(short_category, sizeof short_category,
+                 category_title ? category_title : "Songs", 72);
+    snprintf(title, sizeof title, "Custom Songs - %s", short_category);
+    taiko_overlay_menu_set(title, lptrs, vptrs, kinds, row,
+                           sel, 0,
+                           status ? status : "Select a song to inspect its id",
+                           "UP/DOWN move  LEFT/RIGHT page  X select  O back");
+    taiko_overlay_menu_active(1);
+    return row;
+}
+
+static int custom_song_picker_run(void) {
+    ese_category_entry_t cats[ESE_CATEGORY_LIST_MAX];
+    ese_song_entry_t songs[ESE_SONG_PAGE_MAX];
+    int cat_count;
+    int cat_sel = 0;
+    int cat_top = 0;
+    int song_count = 0;
+    int song_total = 0;
+    int song_offset = 0;
+    int song_sel = 0;
+    int song_rows = 0;
+    int mode = 0; /* 0 categories, 1 songs */
+    char status_buf[128];
+    status_buf[0] = 0;
+
+    if (!ese_song_service_ready()) {
+        taiko_overlay_show_prompt("Set TJARepo host/token first");
+        return 0;
+    }
+
+    taiko_frame_set_gated(1);
+    (void)menu_pad_pressed();
+
+    cat_count = ese_song_fetch_categories(cats, ESE_CATEGORY_LIST_MAX);
+    if (cat_count <= 0) {
+        taiko_overlay_show_prompt("Categories failed");
+        taiko_overlay_menu_active(0);
+        taiko_frame_set_gated(0);
+        (void)menu_pad_pressed();
+        return 0;
+    }
+
+    for (;;) {
+        uint32_t edge;
+
+        if (mode == 0) {
+            if (cat_sel < cat_top)
+                cat_top = cat_sel;
+            if (cat_sel >= cat_top + PICKER_VISIBLE_ROWS)
+                cat_top = cat_sel - PICKER_VISIBLE_ROWS + 1;
+            picker_render_categories(cats, cat_count, cat_sel, cat_top,
+                                     status_buf[0] ? status_buf : NULL);
+        } else {
+            song_rows = picker_render_songs(songs, song_count, song_total,
+                                            song_offset, song_sel,
+                                            cats[cat_sel].title,
+                                            status_buf[0] ? status_buf : NULL);
+        }
+
+        edge = menu_pad_pressed();
+        if (mode == 0 && (edge & MENU_BTN_UP))
+            cat_sel = picker_move(cat_sel, -1, cat_count);
+        if (mode == 0 && (edge & MENU_BTN_DOWN))
+            cat_sel = picker_move(cat_sel, 1, cat_count);
+        if (mode == 1 && (edge & MENU_BTN_UP))
+            song_sel = picker_move(song_sel, -1, song_rows);
+        if (mode == 1 && (edge & MENU_BTN_DOWN))
+            song_sel = picker_move(song_sel, 1, song_rows);
+        if (edge & MENU_BTN_CIRCLE) {
+            status_buf[0] = 0;
+            if (mode == 1) {
+                mode = 0;
+            } else {
+                taiko_overlay_menu_active(0);
+                taiko_frame_set_gated(0);
+                (void)menu_pad_pressed();
+                return 0;
+            }
+        }
+        if (edge & MENU_BTN_CROSS) {
+            if (mode == 0) {
+                song_offset = 0;
+                song_sel = 0;
+                song_count = ese_song_fetch_page(cats[cat_sel].id,
+                                                 song_offset,
+                                                 ESE_SONG_PAGE_MAX,
+                                                 songs, ESE_SONG_PAGE_MAX,
+                                                 &song_total);
+                if (song_count <= 0) {
+                    char short_cat[65];
+                    copy_limited(short_cat, sizeof short_cat,
+                                 cats[cat_sel].title, 64);
+                    snprintf(status_buf, sizeof status_buf,
+                             "No songs in %s", short_cat);
+                } else {
+                    status_buf[0] = 0;
+                    mode = 1;
+                }
+            } else {
+                int has_prev = song_offset > 0;
+                int has_next = song_offset + song_count < song_total;
+                int song_idx = song_row_to_index(song_sel, has_prev);
+                if (has_prev && song_sel == 0) {
+                    song_offset -= ESE_SONG_PAGE_MAX;
+                    if (song_offset < 0)
+                        song_offset = 0;
+                    song_sel = 0;
+                    song_count = ese_song_fetch_page(cats[cat_sel].id,
+                                                     song_offset,
+                                                     ESE_SONG_PAGE_MAX,
+                                                     songs, ESE_SONG_PAGE_MAX,
+                                                     &song_total);
+                    status_buf[0] = 0;
+                } else if (has_next && song_idx >= song_count) {
+                    song_offset += ESE_SONG_PAGE_MAX;
+                    song_sel = 0;
+                    song_count = ese_song_fetch_page(cats[cat_sel].id,
+                                                     song_offset,
+                                                     ESE_SONG_PAGE_MAX,
+                                                     songs, ESE_SONG_PAGE_MAX,
+                                                     &song_total);
+                    status_buf[0] = 0;
+                } else if (song_idx >= 0 && song_idx < song_count) {
+                    int ok = prepare_selected_song(&songs[song_idx]);
+                    taiko_overlay_menu_active(0);
+                    taiko_frame_set_gated(0);
+                    (void)menu_pad_pressed();
+                    return ok;
+                }
+            }
+        }
+        if (mode == 1 && (edge & (MENU_BTN_LEFT | MENU_BTN_RIGHT))) {
+            if ((edge & MENU_BTN_LEFT) && song_offset > 0) {
+                song_offset -= ESE_SONG_PAGE_MAX;
+                if (song_offset < 0)
+                    song_offset = 0;
+                song_sel = 0;
+                song_count = ese_song_fetch_page(cats[cat_sel].id,
+                                                 song_offset,
+                                                 ESE_SONG_PAGE_MAX,
+                                                 songs, ESE_SONG_PAGE_MAX,
+                                                 &song_total);
+                status_buf[0] = 0;
+            } else if ((edge & MENU_BTN_RIGHT) &&
+                       song_offset + song_count < song_total) {
+                song_offset += ESE_SONG_PAGE_MAX;
+                song_sel = 0;
+                song_count = ese_song_fetch_page(cats[cat_sel].id,
+                                                 song_offset,
+                                                 ESE_SONG_PAGE_MAX,
+                                                 songs, ESE_SONG_PAGE_MAX,
+                                                 &song_total);
+                status_buf[0] = 0;
+            }
+        }
+
+        sys_timer_usleep(30 * 1000);
+    }
 }
 
 static void custom_song_launcher_thread(uint64_t arg) {
@@ -230,13 +633,16 @@ static void custom_song_launcher_thread(uint64_t arg) {
 
         if (armed && state == TAIKO_GAME_STATE_GAMEPLAY)
             saw_gameplay = 1;
-        if (armed && saw_gameplay && state != TAIKO_GAME_STATE_GAMEPLAY) {
+        if (armed && saw_gameplay &&
+            (state == TAIKO_GAME_STATE_SONG_SELECT ||
+             state == TAIKO_GAME_STATE_DANI_SELECT ||
+             state == TAIKO_GAME_STATE_WAIWAI_SONG_SELECT)) {
             taiko_enso_override_clear();
             armed = 0;
             saw_gameplay = 0;
         }
 
-        if (armed)
+        if (armed && in_song_select)
             replay_selection_seed(g_last_mm);
 
         if (in_song_select) {
@@ -251,14 +657,14 @@ static void custom_song_launcher_thread(uint64_t arg) {
             f6_prev = f6;
 
             if (f6_edge && launch_retry == 0) {
-                armed = launch_kuma_override();
+                armed = custom_song_picker_run();
                 saw_gameplay = 0;
                 hold = 0;
                 refresh = 0;
                 launch_retry = LAUNCH_RETRY_TICKS;
             } else if (combo_held) {
                 if (++hold >= OPEN_HOLD_TICKS) {
-                    armed = launch_kuma_override();
+                    armed = custom_song_picker_run();
                     saw_gameplay = 0;
                     hold = 0;
                     refresh = 0;

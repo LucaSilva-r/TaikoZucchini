@@ -12,7 +12,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 14  /* v14: global shared config + offline defaults */
+#define TAIKO_CFG_VERSION 15  /* v15: separate tjarepo conversion endpoint */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file. A per-game USRDIR/taiko_config.cfg (TAIKO_CONFIG_NAME) is an
@@ -46,6 +46,8 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_enable = 0,
     .online_redirect_host   = {0},
     .online_redirect_port   = 443,
+    .tjarepo_host           = {0},
+    .tjarepo_port           = 443,
 
     /* Offline-by-default: a fresh install should boot and play on every
      * build with no operator intervention. is_promotion + force_offline
@@ -191,6 +193,22 @@ static void handle_network(const char *key, const char *value, void *u) {
         }
         if (v == 0 || v > 65535u) v = 443;
         g_cfg.online_redirect_port = (uint16_t)v;
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "tjarepo_host")) {
+        taiko_cfg_normalize_host(g_cfg.tjarepo_host,
+                                 TAIKO_REDIRECT_HOST_MAX, value);
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "tjarepo_port")) {
+        while (*value == ' ' || *value == '\t') value++;
+        unsigned v = 0;
+        while (*value >= '0' && *value <= '9') {
+            v = v * 10u + (unsigned)(*value - '0');
+            value++;
+        }
+        if (v == 0 || v > 65535u) v = 443;
+        g_cfg.tjarepo_port = (uint16_t)v;
         return;
     }
     if (cfg_file_str_eq_ci(key, "zucchini_api_token")) {
@@ -476,6 +494,13 @@ static void write_cfg_file(const char *path) {
     emit_kv_uint(fd,
         "TCP port for the redirected hostname (typically 443).",
         "online_redirect_port", (unsigned)g_cfg.online_redirect_port);
+    emit_kv_str(fd,
+        "Hostname for the separate TJARepo converter service. Used only "
+        "by the custom song browser/downloader.",
+        "tjarepo_host", g_cfg.tjarepo_host);
+    emit_kv_uint(fd,
+        "TCP port for the TJARepo converter service.",
+        "tjarepo_port", (unsigned)g_cfg.tjarepo_port);
     emit_kv_str(fd,
         "Optional TaikOnline card issuer bearer token override. Leave blank "
         "for official builds with the token baked into zucchini.sprx.",

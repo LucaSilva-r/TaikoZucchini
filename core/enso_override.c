@@ -235,6 +235,16 @@ int taiko_enso_override_set_folder(const char *carrier_song,
                                    const char *custom_song,
                                    const char *custom_root,
                                    const char *audio_path) {
+    return taiko_enso_override_set_folder_course(carrier_song, custom_song,
+                                                 custom_root, NULL,
+                                                 audio_path);
+}
+
+int taiko_enso_override_set_folder_course(const char *carrier_song,
+                                          const char *custom_song,
+                                          const char *custom_root,
+                                          const char *course,
+                                          const char *audio_path) {
     enso_override_t next;
 
     memset(&next, 0, sizeof next);
@@ -246,6 +256,7 @@ int taiko_enso_override_set_folder(const char *carrier_song,
         return 0;
     if (!copy_path(next.custom_root, sizeof next.custom_root, custom_root))
         return 0;
+    copy_token_lower(next.course, sizeof next.course, course, '\0', '\0');
     if (audio_path && audio_path[0] &&
         !copy_path(next.audio_path, sizeof next.audio_path, audio_path))
         return 0;
@@ -260,6 +271,10 @@ int taiko_enso_override_set_folder(const char *carrier_song,
     dbg_print(g_enso_override.custom_song);
     dbg_print(" root=");
     dbg_print(g_enso_override.custom_root);
+    if (g_enso_override.course[0]) {
+        dbg_print(" forced_course=");
+        dbg_print(g_enso_override.course);
+    }
     dbg_print("\n");
     return 1;
 }
@@ -440,14 +455,18 @@ int taiko_enso_override_try_open(const char *path, int flags, int *fd,
                            course, sizeof course, kind, sizeof kind,
                            duet_player, sizeof duet_player) &&
         str_equal(song, g_enso_override.carrier_song) &&
-        course_matches(g_enso_override.course, course) &&
+        (g_enso_override.folder_mode && g_enso_override.course[0]
+             ? 1 : course_matches(g_enso_override.course, course)) &&
         kind_matches(g_enso_override.chart_kind, kind)) {
         const char *target = g_enso_override.fumen_path;
         if (g_enso_override.folder_mode) {
+            const char *target_course = g_enso_override.course[0]
+                                      ? g_enso_override.course
+                                      : course;
             if (!build_folder_fumen_path(dynamic_fumen, sizeof dynamic_fumen,
                                          g_enso_override.custom_root,
                                          g_enso_override.custom_song,
-                                         kind, course, duet_player))
+                                         kind, target_course, duet_player))
                 return 0;
             target = dynamic_fumen;
         }
