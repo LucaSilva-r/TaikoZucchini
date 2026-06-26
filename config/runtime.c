@@ -12,7 +12,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 14  /* v14: global shared config + offline defaults */
+#define TAIKO_CFG_VERSION 15  /* v15: Dan-i Dojo unlock EBOOT patch */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file. A per-game USRDIR/taiko_config.cfg (TAIKO_CONFIG_NAME) is an
@@ -40,6 +40,7 @@ taiko_runtime_cfg_t g_cfg = {
     .net_cleanup_guard    = TAIKO_PATCH_NET_CLEANUP_GUARD,
     .clearlocks_stub      = TAIKO_PATCH_CLEARLOCKS_STUB,
     .allow_screen_tearing = TAIKO_PATCH_ALLOW_SCREEN_TEARING,
+    .dani_dojo_unlock     = TAIKO_PATCH_DANI_DOJO_UNLOCK,
     .upscale_to_native    = 1,
     .upscale_blit         = 1,
 
@@ -101,6 +102,7 @@ static void handle_patches(const char *key, const char *value, void *u) {
     SET_BIT("net_cleanup_guard",    net_cleanup_guard);
     SET_BIT("clearlocks_stub",      clearlocks_stub);
     SET_BIT("allow_screen_tearing", allow_screen_tearing);
+    SET_BIT("dani_dojo_unlock",     dani_dojo_unlock);
     SET_BIT("upscale_to_native",    upscale_to_native);
     SET_BIT("upscale_blit",         upscale_blit);
 }
@@ -447,6 +449,10 @@ static void write_cfg_file(const char *path) {
         "Set game flip mode to CELL_GCM_DISPLAY_HSYNC instead of VSYNC. "
         "This can tear, but avoids visible rhythm-lane jumps when a frame misses vblank.",
         "allow_screen_tearing", g_cfg.allow_screen_tearing);
+    emit_kv_bool(fd,
+        "Unlock Dan-i Dojo type-9 availability on older pre-Red builds. "
+        "Self-validates by nearby instruction signatures and skips unknown builds.",
+        "dani_dojo_unlock", g_cfg.dani_dojo_unlock);
     emit_kv_bool(fd,
         "Force the game to render at 720p and RSX-scale the output up "
         "to the system's native HDMI mode (1080p). Required on monitors "

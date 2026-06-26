@@ -70,6 +70,7 @@ typedef enum {
     F_NET_CLEANUP_GUARD,
     F_CLEARLOCKS_STUB,
     F_ALLOW_SCREEN_TEARING,
+    F_DANI_DOJO_UNLOCK,
     /* network */
     F_ONLINE_REDIRECT_ENABLE,
 
@@ -101,6 +102,7 @@ static int field_get(field_id_t id) {
     case F_NET_CLEANUP_GUARD:   return g_cfg.net_cleanup_guard;
     case F_CLEARLOCKS_STUB:     return g_cfg.clearlocks_stub;
     case F_ALLOW_SCREEN_TEARING:return g_cfg.allow_screen_tearing;
+    case F_DANI_DOJO_UNLOCK:    return g_cfg.dani_dojo_unlock;
     case F_ONLINE_REDIRECT_ENABLE: return g_cfg.online_redirect_enable;
     default: break;
     }
@@ -131,6 +133,7 @@ static void field_set(field_id_t id, int v) {
     case F_NET_CLEANUP_GUARD:   g_cfg.net_cleanup_guard = v; break;
     case F_CLEARLOCKS_STUB:     g_cfg.clearlocks_stub = v; break;
     case F_ALLOW_SCREEN_TEARING:g_cfg.allow_screen_tearing = v; break;
+    case F_DANI_DOJO_UNLOCK:    g_cfg.dani_dojo_unlock = v; break;
     case F_ONLINE_REDIRECT_ENABLE: g_cfg.online_redirect_enable = v; break;
     default: break;
     }
@@ -297,6 +300,9 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "Allow screen tearing",
       "Uses HSYNC flips instead of VSYNC. Can tear, but may reduce rhythm-lane jumps.",
       F_ALLOW_SCREEN_TEARING, 0 },
+    { ITEM_TOGGLE,  "Dan-i Dojo unlock",
+      "Unlocks Dan grading availability gates on supported pre-Red builds.",
+      F_DANI_DOJO_UNLOCK, 0 },
 
     { ITEM_SECTION, "Actions", "", 0, 0 },
     { ITEM_ACTION,  "Delete usiobackup.bin",
