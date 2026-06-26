@@ -1358,6 +1358,165 @@ static void apply_allow_screen_tearing(void) {
 }
 
 /*
+ * Older pre-Red builds carry a dormant Dan-i Dojo type-9 case, but two gates
+ * suppress it:
+ *
+ *   Count gate:
+ *     lwz r9,0xc(r11) ; cmpwi cr7,r9,0 ; beq cr7,+0x1c ; xori r9,r9,9
+ *     Patch xori imm 9 -> 0 so type 9 is counted.
+ *
+ *   Emit gate:
+ *     cmpwi cr7,r0,0 ; beq ... ; cmpwi cr7,r0,9 ; beq skip ; cmplwi cr7,r0,9
+ *     Patch the second beq to nop so type 9 is emitted.
+ *
+ * The dormant case maps type 9 to row 0x0d on newer pre-Red builds, but
+ * Momoiro maps it to row 0x0c. Accept either mapping; do not use row 0x0d as
+ * the only validator.
+ */
+enum {
+    DANI_GATE_ABSENT  = 0,
+    DANI_GATE_ORIG    = 1,
+    DANI_GATE_PATCHED = 2,
+};
+
+static int dani_count_gate_state(uintptr_t addr) {
+    if (pt_read32(T, addr + 0x00u) != 0x812B000Cu) return DANI_GATE_ABSENT;
+    if (pt_read32(T, addr + 0x04u) != 0x2F890000u) return DANI_GATE_ABSENT;
+    if (pt_read32(T, addr + 0x08u) != 0x419E001Cu) return DANI_GATE_ABSENT;
+
+    uint32_t xori = pt_read32(T, addr + 0x0Cu);
+    if (xori == 0x69290009u) return DANI_GATE_ORIG;
+    if (xori == 0x69290000u) return DANI_GATE_PATCHED;
+    return DANI_GATE_ABSENT;
+}
+
+static int dani_emit_gate_state(uintptr_t addr) {
+    if (pt_read32(T, addr + 0x00u) != 0x2F800000u) return DANI_GATE_ABSENT;
+
+    uint32_t zero_branch = pt_read32(T, addr + 0x04u);
+    if ((zero_branch & 0xFFFF0003u) != 0x419E0000u)
+        return DANI_GATE_ABSENT;
+
+    if (pt_read32(T, addr + 0x08u) != 0x2F800009u) return DANI_GATE_ABSENT;
+
+    uint32_t type9_branch = pt_read32(T, addr + 0x0Cu);
+    if (pt_read32(T, addr + 0x10u) != 0x2B800009u) return DANI_GATE_ABSENT;
+    if ((type9_branch & 0xFFFF0003u) == 0x419E0000u) return DANI_GATE_ORIG;
+    if (type9_branch == 0x60000000u) return DANI_GATE_PATCHED;
+    return DANI_GATE_ABSENT;
+}
+
+static int dani_find_dormant_type9_case(uintptr_t count_sig,
+                                        uintptr_t *out_case) {
+    uintptr_t start = count_sig + 0x700u;
+    uintptr_t end = count_sig + 0x1600u;
+    if (end > CFG_SCAN_TEXT_END)
+        end = CFG_SCAN_TEXT_END;
+
+    for (uintptr_t p = start; p + 4u <= end; p += 4u) {
+        uint32_t w = pt_read32(T, p);
+        if (w == 0x3880000Du || /* li r4,0x0d */
+            w == 0x3900000Du || /* li r8,0x0d */
+            w == 0x3900000Cu) { /* li r8,0x0c (Momoiro) */
+            *out_case = p;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int resolve_dani_dojo_sites(uintptr_t *out_count_patch,
+                                   uintptr_t *out_emit_patch,
+                                   uintptr_t *out_dormant_case,
+                                   int *out_count_state,
+                                   int *out_emit_state) {
+    uintptr_t found_count = 0;
+    uintptr_t found_emit = 0;
+    uintptr_t found_case = 0;
+    int found_count_state = DANI_GATE_ABSENT;
+    int found_emit_state = DANI_GATE_ABSENT;
+    uint32_t candidates = 0;
+
+    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x10u <= CFG_SCAN_TEXT_END; p += 4u) {
+        int count_state = dani_count_gate_state(p);
+        if (!count_state)
+            continue;
+
+        uintptr_t emit_sig = 0;
+        int emit_state = DANI_GATE_ABSENT;
+        uint32_t emit_matches = 0;
+        for (uintptr_t q = p + 0x40u;
+             q <= p + 0x200u && q + 0x14u <= CFG_SCAN_TEXT_END; q += 4u) {
+            int cur_emit_state = dani_emit_gate_state(q);
+            if (!cur_emit_state)
+                continue;
+            emit_sig = q;
+            emit_state = cur_emit_state;
+            emit_matches++;
+            if (emit_matches > 1u)
+                break;
+        }
+        if (emit_matches != 1u)
+            continue;
+
+        uintptr_t dormant_case = 0;
+        if (!dani_find_dormant_type9_case(p, &dormant_case))
+            continue;
+
+        found_count = p + 0x0Cu;
+        found_emit = emit_sig + 0x0Cu;
+        found_case = dormant_case;
+        found_count_state = count_state;
+        found_emit_state = emit_state;
+        candidates++;
+        if (candidates > 1u)
+            break;
+    }
+
+    if (candidates != 1u) {
+        if (candidates == 0u)
+            dbg_print("[patch] Dan-i Dojo unlock skipped; unresolved gates\n");
+        else
+            dbg_print("[patch] Dan-i Dojo unlock skipped; ambiguous gates\n");
+        return 0;
+    }
+
+    *out_count_patch = found_count;
+    *out_emit_patch = found_emit;
+    *out_dormant_case = found_case;
+    *out_count_state = found_count_state;
+    *out_emit_state = found_emit_state;
+    return 1;
+}
+
+static void apply_dani_dojo_unlock(void) {
+    uintptr_t count_patch = 0;
+    uintptr_t emit_patch = 0;
+    uintptr_t dormant_case = 0;
+    int count_state = DANI_GATE_ABSENT;
+    int emit_state = DANI_GATE_ABSENT;
+
+    if (!resolve_dani_dojo_sites(&count_patch, &emit_patch, &dormant_case,
+                                 &count_state, &emit_state))
+        return;
+
+    dbg_print_hex32("[patch] Dan-i Dojo count gate", (uint32_t)count_patch);
+    dbg_print_hex32("[patch] Dan-i Dojo emit gate", (uint32_t)emit_patch);
+    dbg_print_hex32("[patch] Dan-i Dojo dormant case", (uint32_t)dormant_case);
+
+    if (count_state == DANI_GATE_ORIG)
+        write32(count_patch, 0x69290000u); /* xori r9,r9,0 */
+    if (emit_state == DANI_GATE_ORIG)
+        write32(emit_patch, 0x60000000u);  /* nop */
+
+    if (pt_read32(T, count_patch) != 0x69290000u ||
+        pt_read32(T, emit_patch) != 0x60000000u) {
+        dbg_print("[patch] Dan-i Dojo unlock write verification failed\n");
+        g_patch_error = -1;
+    }
+}
+
+/*
  * Katsu Don ST21 (software 0.21 and older) updates the gold-crown bit in
  * object byte +0x44, but the field actually lives at +0x45. Later EBOOTs
  * corrected all four accesses. Match both complete loop fragments before
@@ -1764,6 +1923,8 @@ static void patches_apply_all_impl(void) {
         apply_clearlocks_stub();
     if (g_cfg.allow_screen_tearing)
         apply_allow_screen_tearing();
+    if (g_cfg.dani_dojo_unlock)
+        apply_dani_dojo_unlock();
     apply_online_gate_force_patches();
     apply_katsudon_gold_crown_fix();
     if (g_have_data00000_metadata)
