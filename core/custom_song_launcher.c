@@ -36,17 +36,29 @@
 #define SEL_OFF_408 0x408u
 #define SEL_OFF_40C 0x40cu
 
-static const uint16_t SEL_OFFS[] = {
+#define SEL_IDX_COURSE 2u
+
+static const uint16_t SEL_CAPTURE_OFFS[] = {
     SEL_OFF_39C, SEL_OFF_3A0, SEL_OFF_3A8, SEL_OFF_3D8,
     SEL_OFF_404, SEL_OFF_408, SEL_OFF_40C,
 };
-#define SEL_N (sizeof(SEL_OFFS) / sizeof(SEL_OFFS[0]))
+static const uint16_t SEL_REPLAY_OFFS[] = {
+    SEL_OFF_39C, SEL_OFF_3A0, SEL_OFF_3A8,
+};
+#define SEL_N (sizeof(SEL_CAPTURE_OFFS) / sizeof(SEL_CAPTURE_OFFS[0]))
+#define SEL_REPLAY_N (sizeof(SEL_REPLAY_OFFS) / sizeof(SEL_REPLAY_OFFS[0]))
 
 typedef struct {
     int valid;
     uint32_t v[SEL_N];
     char song_id[32];
 } selection_seed_t;
+
+typedef enum {
+    SEED_SOURCE_NONE = 0,
+    SEED_SOURCE_BUILTIN,
+    SEED_SOURCE_LIVE,
+} seed_source_t;
 
 /* Fill this from a one-time [custom_song_seed] TTY capture to make forced
  * launch work from a cold boot without first playing a normal song. */
@@ -58,7 +70,9 @@ static const selection_seed_t BUILTIN_SEED = {
 };
 
 static selection_seed_t g_seed;
+static seed_source_t g_seed_source;
 static uintptr_t g_last_mm;
+static char g_pending_course[ESE_COURSE_ID_MAX];
 
 static uint32_t read_game_word(uintptr_t addr) {
     if (addr < 0x10000u)
@@ -101,8 +115,53 @@ static void log_seed_capture(const selection_seed_t *s) {
 }
 
 static void load_builtin_seed(void) {
-    if (!g_seed.valid && BUILTIN_SEED.valid)
+    if (!g_seed.valid && BUILTIN_SEED.valid) {
         g_seed = BUILTIN_SEED;
+        g_seed_source = SEED_SOURCE_BUILTIN;
+    }
+}
+
+static int course_selector_value(const char *course, uint32_t *out) {
+    char c;
+
+    if (!course || !course[0] || !out)
+        return 0;
+
+    c = course[0];
+    if (c >= 'A' && c <= 'Z')
+        c = (char)(c + ('a' - 'A'));
+
+    switch (c) {
+    case 'e':
+        *out = 0;
+        return 1;
+    case 'n':
+        *out = 1;
+        return 1;
+    case 'h':
+        *out = 2;
+        return 1;
+    case 'm':
+        *out = 3;
+        return 1;
+    case 'o':
+    case 'u':
+    case 'x':
+        *out = 4;
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int seed_force_course(selection_seed_t *s, const char *course) {
+    uint32_t selector;
+
+    if (!s || !s->valid || !course_selector_value(course, &selector))
+        return 0;
+
+    s->v[SEL_IDX_COURSE] = selector;
+    return 1;
 }
 
 static void update_song_select_mm(void) {
@@ -136,7 +195,7 @@ static void capture_selection_seed(uintptr_t mm) {
 
     next.valid = 1;
     for (uint32_t k = 0; k < SEL_N; k++)
-        next.v[k] = read_game_word(mm + SEL_OFFS[k]);
+        next.v[k] = read_game_word(mm + SEL_CAPTURE_OFFS[k]);
 
     uintptr_t id = base + song * SONG_RECORD_STRIDE + SONG_RECORD_ID_OFF;
     uint32_t i;
@@ -152,17 +211,19 @@ static void capture_selection_seed(uintptr_t mm) {
     if (i == 0)
         return;
 
-    if (seed_changed(&g_seed, &next)) {
-        g_seed = next;
+    int changed = seed_changed(&g_seed, &next) ||
+                  g_seed_source != SEED_SOURCE_LIVE;
+    g_seed = next;
+    g_seed_source = SEED_SOURCE_LIVE;
+    if (changed)
         log_seed_capture(&g_seed);
-    }
 }
 
 static void replay_selection_seed(uintptr_t mm) {
     if (!g_seed.valid || !ptr_sane(mm))
         return;
-    for (uint32_t k = 0; k < SEL_N; k++)
-        *(volatile uint32_t *)(mm + SEL_OFFS[k]) = g_seed.v[k];
+    for (uint32_t k = 0; k < SEL_REPLAY_N; k++)
+        *(volatile uint32_t *)(mm + SEL_REPLAY_OFFS[k]) = g_seed.v[k];
     __asm__ volatile("sync" ::: "memory");
 }
 
@@ -322,14 +383,38 @@ static int arm_selected_song(const ese_song_entry_t *song,
                              const ese_course_entry_t *course) {
     char root[192];
     uintptr_t scene;
-    uintptr_t mm;
+    uintptr_t mm = 0;
+    int have_live_seed;
 
     if (!song || !song->id[0] || !course || !course->id[0])
         return 0;
 
+    taiko_fpt_clear_song_select_launch();
+    copy_limited(g_pending_course, sizeof g_pending_course,
+                 course->id, ESE_COURSE_ID_MAX - 1);
+
     if (!build_cached_song_root(root, sizeof root, song->id)) {
         taiko_overlay_show_prompt("Cache path too long");
         return 0;
+    }
+
+    update_song_select_mm();
+    scene = taiko_fpt_song_select_scene();
+    if (ptr_sane(scene)) {
+        mm = read_game_word(scene + 0x0cu);
+        if (ptr_sane(mm)) {
+            g_last_mm = mm;
+            capture_selection_seed(mm);
+        }
+    }
+    have_live_seed = g_seed_source == SEED_SOURCE_LIVE;
+
+    if (have_live_seed) {
+        if (seed_force_course(&g_seed, course->id))
+            dbg_print_hex32("[custom_song] carrier course",
+                            g_seed.v[SEL_IDX_COURSE]);
+        else
+            dbg_print("[custom_song] unknown course id for selector\n");
     }
 
     if (!taiko_enso_override_set_folder_course(carrier_song_id(), song->id,
@@ -339,17 +424,21 @@ static int arm_selected_song(const ese_song_entry_t *song,
         return 0;
     }
 
-    scene = taiko_fpt_song_select_scene();
     if (!ptr_sane(scene)) {
         taiko_overlay_show_prompt("Armed - start song");
         dbg_print("[custom_song] song select scene unavailable after arm\n");
         return 1;
     }
 
-    mm = read_game_word(scene + 0x0cu);
     if (!ptr_sane(mm)) {
         taiko_overlay_show_prompt("Armed - start song");
         dbg_print("[custom_song] song select mm unavailable after arm\n");
+        return 1;
+    }
+
+    if (!have_live_seed) {
+        taiko_overlay_show_prompt("Armed - start carrier song");
+        dbg_print("[custom_song] live seed unavailable; manual start only\n");
         return 1;
     }
 
@@ -358,10 +447,11 @@ static int arm_selected_song(const ese_song_entry_t *song,
     if (taiko_fpt_request_song_select_launch()) {
         taiko_overlay_show_prompt("Launching custom song...");
         dbg_print("[custom_song] launch queued\n");
-    } else {
-        taiko_overlay_show_prompt("Armed - start song");
-        dbg_print("[custom_song] launch request unavailable\n");
+        return 2;
     }
+
+    taiko_overlay_show_prompt("Armed - start song");
+    dbg_print("[custom_song] launch request unavailable\n");
     return 1;
 }
 
@@ -619,14 +709,18 @@ static void custom_song_launcher_thread(uint64_t arg) {
     int armed = 0;
     int saw_gameplay = 0;
     int launch_retry = 0;
+    int launch_requested = 0;
 
     for (;;) {
         taiko_game_state_t state = taiko_game_state_current();
         int in_song_select = current_state_is_song_select();
 
-        update_song_select_mm();
-        if (!BUILTIN_SEED.valid)
+        if (in_song_select) {
+            update_song_select_mm();
             capture_selection_seed(g_last_mm);
+        } else {
+            g_last_mm = 0;
+        }
 
         if (launch_retry > 0)
             launch_retry--;
@@ -638,12 +732,27 @@ static void custom_song_launcher_thread(uint64_t arg) {
              state == TAIKO_GAME_STATE_DANI_SELECT ||
              state == TAIKO_GAME_STATE_WAIWAI_SONG_SELECT)) {
             taiko_enso_override_clear();
+            taiko_fpt_clear_song_select_launch();
+            g_pending_course[0] = '\0';
             armed = 0;
             saw_gameplay = 0;
+            launch_requested = 0;
         }
 
-        if (armed && in_song_select)
+        if (armed && in_song_select) {
+            if (!saw_gameplay && g_seed_source == SEED_SOURCE_LIVE &&
+                g_pending_course[0] && !launch_requested) {
+                seed_force_course(&g_seed, g_pending_course);
+                if (launch_retry == 0 &&
+                    taiko_fpt_request_song_select_launch()) {
+                    taiko_overlay_show_prompt("Launching custom song...");
+                    dbg_print("[custom_song] delayed launch queued\n");
+                    launch_retry = LAUNCH_RETRY_TICKS;
+                    launch_requested = 1;
+                }
+            }
             replay_selection_seed(g_last_mm);
+        }
 
         if (in_song_select) {
             if (!armed && (refresh % PROMPT_REFRESH_TICKS) == 0)
@@ -657,15 +766,19 @@ static void custom_song_launcher_thread(uint64_t arg) {
             f6_prev = f6;
 
             if (f6_edge && launch_retry == 0) {
-                armed = custom_song_picker_run();
+                int picker_rc = custom_song_picker_run();
+                armed = picker_rc > 0;
                 saw_gameplay = 0;
+                launch_requested = picker_rc == 2;
                 hold = 0;
                 refresh = 0;
                 launch_retry = LAUNCH_RETRY_TICKS;
             } else if (combo_held) {
                 if (++hold >= OPEN_HOLD_TICKS) {
-                    armed = custom_song_picker_run();
+                    int picker_rc = custom_song_picker_run();
+                    armed = picker_rc > 0;
                     saw_gameplay = 0;
+                    launch_requested = picker_rc == 2;
                     hold = 0;
                     refresh = 0;
                     launch_retry = LAUNCH_RETRY_TICKS;

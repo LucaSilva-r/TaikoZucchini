@@ -526,13 +526,6 @@ void taiko_enso_override_note_read(int fd, uint64_t requested,
 
     t->read_count++;
     t->total_read += nread;
-
-    if (t->read_count <= 8 || nread == 0 || rc != CELL_FS_SUCCEEDED) {
-        dbg_print_hex32("[enso_override] audio read fd", (uint32_t)fd);
-        dbg_print_hex32("[enso_override] audio read req", (uint32_t)requested);
-        dbg_print_hex32("[enso_override] audio read rc", (uint32_t)rc);
-        dbg_print_hex32("[enso_override] audio read got", (uint32_t)nread);
-    }
 }
 
 void taiko_enso_override_note_close(int fd, int rc) {
@@ -540,9 +533,5 @@ void taiko_enso_override_note_close(int fd, int rc) {
     if (!t)
         return;
 
-    dbg_print_hex32("[enso_override] audio close fd", (uint32_t)fd);
-    dbg_print_hex32("[enso_override] audio close rc", (uint32_t)rc);
-    dbg_print_hex32("[enso_override] audio total lo", (uint32_t)t->total_read);
-    dbg_print_hex32("[enso_override] audio reads", t->read_count);
     memset(t, 0, sizeof *t);
 }

@@ -784,8 +784,10 @@ static int patch_song_select_direct_enso(self_ctx_t *ctx, elf64_phdr_t *phdrs,
          }
        FUN_0024d208(+0xe28) is the sub-scene-swap event that constructs enso --
        the call every prior forced attempt skipped. Done once, in order, so it
-       matches the engine exactly (no double-arm / waiwai). Same module/TOC ->
-       direct bl. */
+       matches the engine exactly (no double-arm / waiwai). Later stages can
+       have a different scene+0xa8 value, so state 7, non-null script handles,
+       and the real validate helper are the gates that matter. Same module/TOC
+       -> direct bl. */
     uint32_t bl_validate = 0;
     if (!encode_relative_bl(tramp_va + 0x6Cu, SS_VALIDATE_SELECTION_VA, &bl_validate))
         return -6;
@@ -816,9 +818,9 @@ static int patch_song_select_direct_enso(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     store_be32(t + 0x2C, 0x81630010u);                                /* lwz r11,0x10(r3) st */
     store_be32(t + 0x30, 0x2C0B0007u);                                /* cmpwi r11,7         */
     store_be32(t + 0x34, 0x40820080u);                                /* bne done            */
-    store_be32(t + 0x38, 0x816300A8u);                                /* lwz r11,0xa8(r3)    */
-    store_be32(t + 0x3C, 0x2C0B0001u);                                /* cmpwi r11,1         */
-    store_be32(t + 0x40, 0x40820074u);                                /* bne done            */
+    store_be32(t + 0x38, 0x60000000u);                                /* nop: +a8 varies by stage */
+    store_be32(t + 0x3C, 0x60000000u);                                /* nop                 */
+    store_be32(t + 0x40, 0x60000000u);                                /* nop                 */
     store_be32(t + 0x44, 0x60000000u);                                /* nop: +e68 byte may stay 0 */
     store_be32(t + 0x48, 0x60000000u);                                /* nop                 */
     store_be32(t + 0x4C, 0x60000000u);                                /* nop                 */
@@ -864,6 +866,65 @@ static int patch_song_select_direct_enso(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     dbg_print_hex32("[patch] confirm proc fn", func_va);
     dbg_print_hex32("[patch] confirm scene cell", scene_va);
     dbg_print_hex32("[patch] confirm flag cell", flag_va);
+    return 0;
+}
+
+/* Green-only. The result builder reads a per-song result table through a
+ * pointer at selected_song+0x1b0. Custom carriers can leave that pointer null,
+ * or with a stale/invalid low address on later-stage result teardown. Preserve
+ * the surrounding session bookkeeping by redirecting missing/low table
+ * pointers to a zero word, making the original code take its default
+ * table-entry path. */
+#define GREEN_RESULT_TABLE_LWZ_VA   0x001328e0u
+#define GREEN_RESULT_TABLE_LWZ_ORIG 0x81670000u
+
+static int patch_result_table_null_guard(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                         uint16_t phnum, uint32_t fpt_va,
+                                         uint64_t tramp_off, uint32_t tramp_va,
+                                         uint64_t next_load_off,
+                                         uint64_t *append_end) {
+    enum { TRAMP_WORDS = 6 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    uint64_t guard_off = 0;
+    uint32_t branch = 0;
+    uint32_t resume = 0;
+    uint32_t zero_va = fpt_va + (uint32_t)offsetof(taiko_fpt_t, reserved);
+
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+    if (va_to_off(ctx, phdrs, phnum, GREEN_RESULT_TABLE_LWZ_VA,
+                  &guard_off) != 0)
+        return -3;
+    if (guard_off + 4u > ctx->buf_len)
+        return -4;
+    if (load_be32(ctx->buf + guard_off) != GREEN_RESULT_TABLE_LWZ_ORIG) {
+        dbg_print_hex32("[patch] result table lwz mismatch",
+                        load_be32(ctx->buf + guard_off));
+        return -5;
+    }
+    if (!encode_relative_b(GREEN_RESULT_TABLE_LWZ_VA, tramp_va, &branch))
+        return -6;
+    if (!encode_relative_b(tramp_va + 0x14u,
+                           GREEN_RESULT_TABLE_LWZ_VA + 4u, &resume))
+        return -7;
+
+    uint8_t *t = ctx->buf + tramp_off;
+    store_be32(t + 0x00, 0x2F871000u);                               /* cmpwi cr7,r7,0x1000 */
+    store_be32(t + 0x04, 0x409C000Cu);                               /* bge cr7,use_table   */
+    store_be32(t + 0x08, 0x3CE00000u | ((zero_va >> 16) & 0xffffu)); /* lis r7,hi(zero)     */
+    store_be32(t + 0x0C, 0x60E70000u | (zero_va & 0xffffu));         /* ori r7,r7,lo        */
+    store_be32(t + 0x10, GREEN_RESULT_TABLE_LWZ_ORIG);              /* use_table: lwz r11  */
+    store_be32(t + 0x14, resume);                                   /* b after stolen insn */
+    store_be32(ctx->buf + guard_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+
+    dbg_print("[patch] result table null guard\n");
+    dbg_print_hex32("[patch] result table tramp va", tramp_va);
+    dbg_print_hex32("[patch] result table zero cell", zero_va);
     return 0;
 }
 
@@ -1164,6 +1225,17 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
         dbg_print_hex32("[patch] song-select confirm skipped",
                         (uint32_t)confirm_rc);
     }
+
+    uint64_t result_tramp_off = align_u64(append_end, 4);
+    uint32_t result_tramp_va =
+        (uint32_t)(payload_va + (result_tramp_off - payload_off));
+    int result_rc = patch_result_table_null_guard(ctx, phdrs, phnum, fpt_va,
+                                                  result_tramp_off,
+                                                  result_tramp_va,
+                                                  next_load_off, &append_end);
+    if (result_rc != 0)
+        dbg_print_hex32("[patch] result table guard skipped",
+                        (uint32_t)result_rc);
 
     uint32_t resume_va = main_va + 16u;
     uint32_t main_w3 = load_be32(ctx->buf + main_off + 12u);

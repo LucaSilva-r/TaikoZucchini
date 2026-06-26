@@ -180,3 +180,12 @@ int taiko_fpt_request_song_select_launch(void) {
     __asm__ volatile("sync" ::: "memory");
     return 1;
 }
+
+int taiko_fpt_clear_song_select_launch(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 6u)
+        return 0;
+    t->song_select_launch_request = 0;
+    __asm__ volatile("sync" ::: "memory");
+    return 1;
+}

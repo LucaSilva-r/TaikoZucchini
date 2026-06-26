@@ -110,6 +110,7 @@ uintptr_t taiko_fpt_song_select_scene(void);
 uintptr_t taiko_fpt_table_address(void);
 uint32_t taiko_fpt_version_seen(void);
 int taiko_fpt_request_song_select_launch(void);
+int taiko_fpt_clear_song_select_launch(void);
 int taiko_fpt_available(void);
 
 #endif
