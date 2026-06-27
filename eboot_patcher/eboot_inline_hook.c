@@ -24,10 +24,59 @@ uint32_t eboot_inline_encode_branch(uint32_t from_va, uint32_t to_va,
            (link ? 1u : 0u);
 }
 
+static int decode_branch_target(uint32_t insn_va, uint32_t word,
+                                int link, uint32_t *out_target) {
+    uint32_t opcode = link ? 0x48000001u : 0x48000000u;
+    if ((word & 0xFC000003u) != opcode)
+        return 0;
+
+    int32_t disp = (int32_t)(word & 0x03FFFFFCu);
+    if (disp & 0x02000000)
+        disp |= (int32_t)0xFC000000u;
+    *out_target = (uint32_t)(insn_va + disp);
+    return 1;
+}
+
+static void log_actual_branch_target(uint32_t va, uint32_t word) {
+    uint32_t target = 0;
+    if (decode_branch_target(va, word, 0, &target) ||
+        decode_branch_target(va, word, 1, &target))
+        dbg_print_hex32("[patch] inline actual branch target", target);
+}
+
+static int signature_word_matches(const eboot_inline_signature_t *sig,
+                                  size_t i, uint32_t va,
+                                  uint32_t actual_word) {
+    eboot_inline_match_type_t match_type = EBOOT_INLINE_MATCH_WORD;
+    if (sig->match_types)
+        match_type = (eboot_inline_match_type_t)sig->match_types[i];
+
+    if (match_type == EBOOT_INLINE_MATCH_WORD) {
+        if (!sig->words)
+            return -1;
+        uint32_t mask = sig->masks ? sig->masks[i] : 0xFFFFFFFFu;
+        return ((actual_word & mask) == (sig->words[i] & mask)) ? 1 : 0;
+    }
+
+    if (match_type == EBOOT_INLINE_MATCH_BRANCH_TARGET ||
+        match_type == EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET) {
+        if (!sig->branch_targets)
+            return -1;
+
+        uint32_t target = 0;
+        int link = match_type == EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET;
+        if (!decode_branch_target(va, actual_word, link, &target))
+            return 0;
+        return target == sig->branch_targets[i] ? 1 : 0;
+    }
+
+    return -1;
+}
+
 static int signature_match(self_ctx_t *ctx, const elf_patch_view_t *view,
                            const eboot_inline_signature_t *sig,
                            int first_signature) {
-    if (!sig || !sig->words || sig->word_count == 0)
+    if (!sig || sig->word_count == 0)
         return -1;
 
     uint64_t off = 0;
@@ -41,12 +90,14 @@ static int signature_match(self_ctx_t *ctx, const elf_patch_view_t *view,
 
     int first_word_matched = 0;
     for (size_t i = 0; i < sig->word_count; i++) {
-        uint32_t mask = sig->masks ? sig->masks[i] : 0xFFFFFFFFu;
-        uint32_t expected = sig->words[i] & mask;
-        uint32_t actual = elf_patch_load_be32(ctx->buf + off + i * 4u) & mask;
-        if (i == 0 && actual == expected)
+        uint32_t va = sig->va + (uint32_t)i * 4u;
+        uint32_t actual_word = elf_patch_load_be32(ctx->buf + off + i * 4u);
+        int matched = signature_word_matches(sig, i, va, actual_word);
+        if (matched < 0)
+            return -4;
+        if (i == 0 && matched)
             first_word_matched = 1;
-        if (actual == expected)
+        if (matched)
             continue;
 
         if (first_signature && !first_word_matched)
@@ -55,10 +106,19 @@ static int signature_match(self_ctx_t *ctx, const elf_patch_view_t *view,
         dbg_print("[patch] inline signature mismatch: ");
         dbg_print(sig->label ? sig->label : "unnamed");
         dbg_print("\n");
-        dbg_print_hex32("[patch] inline sig VA", sig->va + (uint32_t)i * 4u);
-        dbg_print_hex32("[patch] inline expected", sig->words[i]);
-        dbg_print_hex32("[patch] inline actual",
-                        elf_patch_load_be32(ctx->buf + off + i * 4u));
+        dbg_print_hex32("[patch] inline sig VA", va);
+        if (sig->words)
+            dbg_print_hex32("[patch] inline expected", sig->words[i]);
+        eboot_inline_match_type_t match_type = EBOOT_INLINE_MATCH_WORD;
+        if (sig->match_types)
+            match_type = (eboot_inline_match_type_t)sig->match_types[i];
+        if (sig->branch_targets &&
+            (match_type == EBOOT_INLINE_MATCH_BRANCH_TARGET ||
+             match_type == EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET))
+            dbg_print_hex32("[patch] inline expected branch target",
+                            sig->branch_targets[i]);
+        dbg_print_hex32("[patch] inline actual", actual_word);
+        log_actual_branch_target(va, actual_word);
         return -3;
     }
 

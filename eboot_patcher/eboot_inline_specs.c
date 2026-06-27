@@ -10,12 +10,22 @@ extern const uint8_t taiko_white_dani_taikojuku_hook_end[];
 
 static const uint32_t WHITE_ROW_HOOK_WORDS[] = {
     0x3880000Du, /* li r4,0x0d */
-    0x4BFFF29Cu, /* b 0x0067de1c */
+    0x00000000u,
 };
 
 static const uint32_t WHITE_ROW_HOOK_MASKS[] = {
     0xFFFFFFFFu,
     0xFFFFFFFFu,
+};
+
+static const uint8_t WHITE_ROW_HOOK_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_BRANCH_TARGET,
+};
+
+static const uint32_t WHITE_ROW_HOOK_BRANCH_TARGETS[] = {
+    0u,
+    0x0067DE1Cu,
 };
 
 static const uint32_t WHITE_DANI_COUNT_GATE_WORDS[] = {
@@ -55,6 +65,8 @@ static const eboot_inline_signature_t WHITE_DANI_TAIKOJUKU_SIGNATURES[] = {
         WHITE_ROW_HOOK_WORDS,
         WHITE_ROW_HOOK_MASKS,
         sizeof(WHITE_ROW_HOOK_WORDS) / sizeof(WHITE_ROW_HOOK_WORDS[0]),
+        WHITE_ROW_HOOK_MATCH_TYPES,
+        WHITE_ROW_HOOK_BRANCH_TARGETS,
     },
     {
         "white dani count gate patched",
@@ -62,6 +74,8 @@ static const eboot_inline_signature_t WHITE_DANI_TAIKOJUKU_SIGNATURES[] = {
         WHITE_DANI_COUNT_GATE_WORDS,
         WHITE_DANI_COUNT_GATE_MASKS,
         sizeof(WHITE_DANI_COUNT_GATE_WORDS) / sizeof(WHITE_DANI_COUNT_GATE_WORDS[0]),
+        NULL,
+        NULL,
     },
     {
         "white dani emit gate patched",
@@ -69,6 +83,8 @@ static const eboot_inline_signature_t WHITE_DANI_TAIKOJUKU_SIGNATURES[] = {
         WHITE_DANI_EMIT_GATE_WORDS,
         WHITE_DANI_EMIT_GATE_MASKS,
         sizeof(WHITE_DANI_EMIT_GATE_WORDS) / sizeof(WHITE_DANI_EMIT_GATE_WORDS[0]),
+        NULL,
+        NULL,
     },
 };
 
