@@ -117,6 +117,7 @@ SRCS = core\main.c core\debug.c core\diag_log.c core\qr_encode.c \
        network\uri.c network\http_client.c network\version_check.c
 
 MAIN_OBJS = $(SRCS:.c=.o)
+ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o
 
 SPU_QR_ELF = $(BIN_DIR)\qr_spu.elf
 SPU_QR_ELF_SECTION = bin/qr_spu.elf
@@ -192,7 +193,7 @@ QUIRC_SRCS = $(QUIRC_DIR)\lib\quirc.c \
     $(QUIRC_DIR)\lib\version_db.c
 QUIRC_OBJS = $(QUIRC_SRCS:.c=.o)
 
-OBJS = $(MAIN_OBJS) $(SPU_QR_PPU_OBJ) $(MBEDTLS_OBJS) $(QUIRC_OBJS)
+OBJS = $(MAIN_OBJS) $(SPU_QR_PPU_OBJ) $(MBEDTLS_OBJS) $(QUIRC_OBJS) $(ASM_OBJS)
 
 all: check-token $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
 
@@ -274,9 +275,12 @@ ftp_eboot\menu_draw.o: ftp_eboot\menu_draw.c
 .c.o:
 	$(PPU_CC) $(CFLAGS) -c $< -o $@
 
+patches\asm\white_dani_taikojuku_hook.o: patches\asm\white_dani_taikojuku_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\white_dani_taikojuku_hook.S -o $@
+
 clean-prx:
 	-del /Q "$(SYM)" "$(PRX)" "$(SPRX)" "$(SPU_QR_ELF)" "$(SPU_QR_PPU_OBJ)" 2>NUL
-	-del /Q core\*.o config\*.o patches\*.o hooks\*.o input\*.o qr\*.o qr_spu\*.o network\*.o storage\*.o bpreader\*.o cards\*.o eboot_patcher\*.o mod_menu\*.o ftp\*.o vendor\mbedtls\library\*.o vendor\quirc\lib\*.o *.o 2>NUL
+	-del /Q core\*.o config\*.o patches\*.o patches\asm\*.o hooks\*.o input\*.o qr\*.o qr_spu\*.o network\*.o storage\*.o bpreader\*.o cards\*.o eboot_patcher\*.o mod_menu\*.o ftp\*.o vendor\mbedtls\library\*.o vendor\quirc\lib\*.o *.o 2>NUL
 	-del /Q "$(BIN_DIR)\*.spu.o" 2>NUL
 
 clean: clean-prx

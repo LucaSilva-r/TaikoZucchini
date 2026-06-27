@@ -126,6 +126,9 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_s
            hooks/video_out_hook.c \
            network/uri.c network/http_client.c network/version_check.c
 OBJS    := $(SRCS:.c=.o)
+ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S
+ASM_OBJS := $(ASM_SRCS:.S=.o)
+OBJS += $(ASM_OBJS)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf
 SPU_QR_PPU_OBJ := $(BIN_DIR)/qr_spu_elf.o
@@ -195,6 +198,9 @@ $(SPRX): $(PRX)
 %.o: %.c
 	$(PPU_CC) $(CFLAGS) -c $< -o $@
 
+%.o: %.S
+	$(PPU_CC) $(CFLAGS) -c $< -o $@
+
 $(BIN_DIR)/qr_spu_main.spu.o: qr_spu/qr_spu_main.c qr_spu/qr_spu_shared.h $(QUIRC_DIR)/lib/quirc.h $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
 	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
 
@@ -245,6 +251,7 @@ eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
 eboot_patcher/elf_patch_util.o: eboot_patcher/elf_patch_util.c eboot_patcher/elf_patch_util.h eboot_patcher/self_ctx.h eboot_patcher/self_format.h core/debug.h
 eboot_patcher/eboot_inline_hook.o: eboot_patcher/eboot_inline_hook.c eboot_patcher/eboot_inline_hook.h eboot_patcher/elf_patch_util.h eboot_patcher/self_ctx.h core/debug.h
 eboot_patcher/eboot_inline_specs.o: eboot_patcher/eboot_inline_specs.c eboot_patcher/eboot_inline_specs.h eboot_patcher/eboot_inline_hook.h config/runtime.h
+patches/asm/white_dani_taikojuku_hook.o: patches/asm/white_dani_taikojuku_hook.S
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h
@@ -285,11 +292,11 @@ install: $(SPRX)
 	@echo "installed -> $(RPCS3_PLUGIN_DIR)/zucchini.sprx"
 
 clean:
-	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(ASM_OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 	$(MAKE) -C bootstrap_eboot clean
 	$(MAKE) -C ftp_eboot clean
 
 clean-prx:
-	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(ASM_OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 
 .PHONY: all bootstrap ftp-eboot clean clean-prx install
