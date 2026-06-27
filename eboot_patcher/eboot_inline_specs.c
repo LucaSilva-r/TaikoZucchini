@@ -10,14 +10,10 @@ extern const uint8_t taiko_white_dani_taikojuku_hook_end[];
 
 static const uint32_t WHITE_ROW_HOOK_WORDS[] = {
     0x3880000Du, /* li r4,0x0d */
-    0x80BD0010u, /* lwz r5,0x10(r29) */
-    0x80DD0014u, /* lwz r6,0x14(r29) */
-    0x38E0FFFFu, /* li r7,-1 */
+    0x4BFFF29Cu, /* b 0x0067de1c */
 };
 
 static const uint32_t WHITE_ROW_HOOK_MASKS[] = {
-    0xFFFFFFFFu,
-    0xFFFFFFFFu,
     0xFFFFFFFFu,
     0xFFFFFFFFu,
 };
