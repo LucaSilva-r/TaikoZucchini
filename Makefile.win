@@ -100,6 +100,7 @@ SRCS = core\main.c core\debug.c core\diag_log.c core\qr_encode.c \
        eboot_patcher\elf_extract.c eboot_patcher\key_load.c \
        eboot_patcher\sce_bn.c eboot_patcher\sce_ecdsa.c \
        eboot_patcher\sce_curve.c eboot_patcher\sce_segmap.c \
+       eboot_patcher\elf_patch_util.c \
        eboot_patcher\sprx_loader_patch.c eboot_patcher\self_build.c \
        eboot_patcher\sce_rand.c eboot_patcher\eboot_flow.c \
        storage\data00000_redirect.c storage\usio_backup.c \
