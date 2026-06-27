@@ -104,7 +104,7 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_s
            eboot_patcher/elf_extract.c eboot_patcher/key_load.c \
            eboot_patcher/sce_bn.c eboot_patcher/sce_ecdsa.c \
            eboot_patcher/sce_curve.c eboot_patcher/sce_segmap.c \
-           eboot_patcher/elf_patch_util.c \
+           eboot_patcher/elf_patch_util.c eboot_patcher/eboot_inline_hook.c \
            eboot_patcher/sprx_loader_patch.c eboot_patcher/self_build.c \
            eboot_patcher/sce_rand.c eboot_patcher/eboot_flow.c \
            storage/data00000_redirect.c \
@@ -242,6 +242,7 @@ mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
 mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
 eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
 eboot_patcher/elf_patch_util.o: eboot_patcher/elf_patch_util.c eboot_patcher/elf_patch_util.h eboot_patcher/self_ctx.h eboot_patcher/self_format.h core/debug.h
+eboot_patcher/eboot_inline_hook.o: eboot_patcher/eboot_inline_hook.c eboot_patcher/eboot_inline_hook.h eboot_patcher/elf_patch_util.h eboot_patcher/self_ctx.h core/debug.h
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h
