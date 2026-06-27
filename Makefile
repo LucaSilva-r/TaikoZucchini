@@ -1,11 +1,14 @@
-# Cell SDK SPRX build (PSL1GHT path retired).
+# Cell SDK SPRX build for GNU Make (PSL1GHT path retired).
 #
-# Toolchain runs through Wine wrappers under cell/host-linux/ produced by
-# cell/setup_wine_wrappers.sh. The wrappers point CELL_HOST_PATH at the
-# Windows .exe binaries with $WINEPREFIX = repo's wine_prefix/.
+# This file supports either SDK layout:
+#   - host-win32/ native Windows tools when using GNU Make from Windows/MSYS
+#   - host-linux/ native Linux tools or wrapper scripts
+#
+# Visual Studio users can build without GNU Make via Makefile.win:
+#   nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=token
 #
 # Build:
-#   make CELL_SDK=$(realpath ../cell)
+#   make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=token
 # or set CELL_SDK in the environment.
 
 CELL_SDK     ?= $(abspath $(CURDIR)/../cell)
