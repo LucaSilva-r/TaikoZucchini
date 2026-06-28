@@ -78,6 +78,13 @@ static uintptr_t g_last_mm;
 static char g_pending_course[ESE_COURSE_ID_MAX];
 /* Worker-owned scratch buffer for the title currently being rendered. */
 static unsigned char g_title_fetch_buf[TITLE_IMAGE_BYTES];
+/* Worker-owned scratch for the selected song's title+subtitle detail image. */
+#define DETAIL_IMAGE_BYTES (TAIKO_OVL_DETAIL_W * TAIKO_OVL_DETAIL_H * 4u)
+static unsigned char g_detail_fetch_buf[DETAIL_IMAGE_BYTES];
+/* Worker-owned scratch + one-shot flag for the difficulty label textures. */
+#define DIFF_LABEL_BYTES (TAIKO_OVL_DIFF_LABEL_W * TAIKO_OVL_DIFF_LABEL_H * 4u)
+static unsigned char g_label_fetch_buf[DIFF_LABEL_BYTES];
+static int g_labels_done;
 
 static uint32_t read_game_word(uintptr_t addr) {
     if (addr < 0x10000u)
@@ -314,6 +321,13 @@ static struct {
     char want_title[TAIKO_OVL_TITLE_IMAGE_SLOTS][ESE_SONG_TITLE_MAX];
     char have_key[TAIKO_OVL_TITLE_IMAGE_SLOTS][RENDER_KEY_MAX];
     unsigned int want_outline[TAIKO_OVL_TITLE_IMAGE_SLOTS]; /* 0x00RRGGBB */
+    /* Selected song's title+subtitle detail image (rendered off the picker
+     * thread like the per-slot titles). */
+    char want_detail_key[RENDER_KEY_MAX];
+    char want_detail_title[ESE_SONG_TITLE_MAX];
+    char want_detail_sub[ESE_SONG_TITLE_MAX];
+    char have_detail_key[RENDER_KEY_MAX];
+    unsigned int want_detail_outline;
     volatile int active;
     volatile int lock;
 } g_render;
@@ -346,6 +360,17 @@ static void render_publish(int slot, const char *key, const char *title,
     render_unlock();
 }
 
+/* Publish the selected song's detail (title + subtitle). Empty key clears. */
+static void render_publish_detail(const char *key, const char *title,
+                                  const char *subtitle, unsigned int outline_rgb) {
+    render_lock();
+    snprintf(g_render.want_detail_key, RENDER_KEY_MAX, "%s", key ? key : "");
+    snprintf(g_render.want_detail_title, ESE_SONG_TITLE_MAX, "%s", title ? title : "");
+    snprintf(g_render.want_detail_sub, ESE_SONG_TITLE_MAX, "%s", subtitle ? subtitle : "");
+    g_render.want_detail_outline = outline_rgb;
+    render_unlock();
+}
+
 /* Slot is ready iff the worker has rendered the desired key. */
 static int render_ready(int slot, const char *key) {
     if (slot < 0 || slot >= TAIKO_OVL_TITLE_IMAGE_SLOTS || !key)
@@ -363,6 +388,9 @@ static void picker_clear_title_slots(void) {
         g_render.have_key[i][0] = 0;
         taiko_overlay_title_image_set(i, NULL, 0);
     }
+    g_render.want_detail_key[0] = 0;
+    g_render.have_detail_key[0] = 0;
+    taiko_overlay_song_detail_set(NULL, 0);
     render_unlock();
 }
 
@@ -372,6 +400,20 @@ static void title_render_worker(uint64_t arg) {
         if (!g_render.active) {
             sys_timer_usleep(50 * 1000);
             continue;
+        }
+        /* Difficulty labels (E/N/H/M/U) in the title font, rendered once. */
+        if (!g_labels_done) {
+            static const char *lbl[5] = { "E", "N", "H", "M", "U" };
+            int ok = 1;
+            for (int i = 0; i < 5; i++) {
+                if (taiko_title_render_argb(lbl[i], g_label_fetch_buf,
+                                            TAIKO_OVL_DIFF_LABEL_W,
+                                            TAIKO_OVL_DIFF_LABEL_H, 0x000000u))
+                    taiko_overlay_diff_label_set(i, g_label_fetch_buf, DIFF_LABEL_BYTES);
+                else
+                    ok = 0;
+            }
+            g_labels_done = ok;
         }
         int did = 0;
         for (int s = 0; s < TAIKO_OVL_TITLE_IMAGE_SLOTS; s++) {
@@ -408,6 +450,40 @@ static void title_render_worker(uint64_t arg) {
                 snprintf(g_render.have_key[s], RENDER_KEY_MAX, "%s", key);
             render_unlock();
             did = 1;
+        }
+
+        /* Selected song's title+subtitle detail image. */
+        {
+            char dkey[RENDER_KEY_MAX], dhave[RENDER_KEY_MAX];
+            char dtitle[ESE_SONG_TITLE_MAX], dsub[ESE_SONG_TITLE_MAX];
+            unsigned int doutline;
+            render_lock();
+            snprintf(dkey, sizeof dkey, "%s", g_render.want_detail_key);
+            snprintf(dhave, sizeof dhave, "%s", g_render.have_detail_key);
+            snprintf(dtitle, sizeof dtitle, "%s", g_render.want_detail_title);
+            snprintf(dsub, sizeof dsub, "%s", g_render.want_detail_sub);
+            doutline = g_render.want_detail_outline;
+            render_unlock();
+
+            if (dkey[0] == 0) {
+                if (dhave[0]) {
+                    taiko_overlay_song_detail_set(NULL, 0);
+                    render_lock(); g_render.have_detail_key[0] = 0; render_unlock();
+                }
+            } else if (strncmp(dkey, dhave, RENDER_KEY_MAX) != 0) {
+                const char *strs[2] = { dtitle, dsub };
+                if (taiko_title_render_columns_argb(strs, 2, g_detail_fetch_buf,
+                                                    TAIKO_OVL_DETAIL_W,
+                                                    TAIKO_OVL_DETAIL_H, doutline))
+                    taiko_overlay_song_detail_set(g_detail_fetch_buf, DETAIL_IMAGE_BYTES);
+                else
+                    taiko_overlay_song_detail_set(NULL, 0);
+                render_lock();
+                if (strncmp(g_render.want_detail_key, dkey, RENDER_KEY_MAX) == 0)
+                    snprintf(g_render.have_detail_key, RENDER_KEY_MAX, "%s", dkey);
+                render_unlock();
+                did = 1;
+            }
         }
         sys_timer_usleep(did ? 2 * 1000 : 16 * 1000);
     }
@@ -776,6 +852,7 @@ static int picker_render_songs(const ese_song_entry_t *songs, int count,
         row++;
     }
 
+    int song_base = row;   /* first carousel row that maps to songs[0] */
     for (int i = 0; i < count && row < TAIKO_OVL_CAROUSEL_MAX; i++, row++) {
         snprintf(labels[row], sizeof labels[row], "%s", songs[i].title[0]
                  ? songs[i].title : songs[i].id);
@@ -797,6 +874,25 @@ static int picker_render_songs(const ese_song_entry_t *songs, int count,
     int pages = total > 0 ? (total + ESE_SONG_PAGE_MAX - 1) / ESE_SONG_PAGE_MAX : 1;
     snprintf(footer, sizeof footer,
              "Page %d/%d   LEFT/RIGHT move  X select  O back", page, pages);
+    /* Push the selected song's per-difficulty star counts (straight from the
+     * index) so the overlay can draw the difficulty columns without converting. */
+    signed char diff_stars[5];
+    int sel_song = sel - song_base;
+    int have_sel = sel_song >= 0 && sel_song < count;
+    for (int d = 0; d < 5; d++)
+        diff_stars[d] = have_sel ? songs[sel_song].stars[d] : (signed char)-1;
+    taiko_overlay_carousel_set_diffs(diff_stars);
+
+    /* Selected song's title+subtitle detail (worker renders it off-thread). */
+    if (have_sel)
+        render_publish_detail(songs[sel_song].id,
+                              songs[sel_song].title[0] ? songs[sel_song].title
+                                                       : songs[sel_song].id,
+                              songs[sel_song].subtitle,
+                              outline_for_palette(category_palette));
+    else
+        render_publish_detail("", "", "", 0);
+
     taiko_overlay_carousel_set(title, lptrs, vptrs, palette, kinds,
                                image_slots, row, sel,
                                status ? status : "Select a song", footer);

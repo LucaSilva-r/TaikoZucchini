@@ -346,11 +346,11 @@ static void draw_cp_rotated(Buf *main, int cp, float cell_x, float top_y,
     buf_free(&temp);
 }
 
-/* Build the full vertical-text image (premultiplied) into *out_buf. */
-static int build_vertical(const char *title, Buf *out_buf) {
-    Item items[MAX_ITEMS];
-    int  n_items = 0;
-
+/* Parse a UTF-8 string into vertical-layout items and their stacked y origins
+ * (PAD-based). Returns the item count; fills *max_w_all with the widest item. */
+static int plan_items(const char *title, Item items[MAX_ITEMS],
+                      float ypos[MAX_ITEMS], float *max_w_all) {
+    int n_items = 0;
     int cps[128], ncp = 0;
     const char *p = title;
     while (ncp < (int)(sizeof cps / sizeof cps[0])) {
@@ -387,8 +387,8 @@ static int build_vertical(const char *title, Buf *out_buf) {
     float max_w = 0;
     for (int i = 0; i < n_items; i++)
         if (items[i].width > max_w) max_w = items[i].width;
+    *max_w_all = max_w;
 
-    float ypos[MAX_ITEMS];
     ypos[0] = PAD;
     float cur = PAD;
     for (int i = 1; i < n_items; i++) {
@@ -401,18 +401,29 @@ static int build_vertical(const char *title, Buf *out_buf) {
         cur += adv;
         ypos[i] = cur;
     }
+    return n_items;
+}
+
+/* Render items[lo..hi) as one vertical column (premultiplied) into *out_buf,
+ * its top at PAD. Column width tracks the widest item in the range. */
+static int render_range(const Item items[], const float ypos[], int lo, int hi,
+                        Buf *out_buf) {
+    if (hi <= lo) return 0;
+    float max_w = 0, y0 = ypos[lo];
+    for (int i = lo; i < hi; i++)
+        if (items[i].width > max_w) max_w = items[i].width;
 
     int img_w = (int)(max_w + 2 * PAD);
-    int img_h = (int)(ypos[n_items - 1] + g_char_h + PAD);
+    int img_h = (int)((ypos[hi - 1] - y0) + g_char_h + 2 * PAD);
     if (img_w <= 0 || img_h <= 0) return 0;
     if (img_w > 1024 || img_h > 8192) return 0;
     if (!buf_init(out_buf, img_w, img_h)) return 0;
 
     for (int pass = 0; pass < 2; pass++) {
         int outline = (pass == 0);
-        for (int i = 0; i < n_items; i++) {
-            Item *it = &items[i];
-            float y = ypos[i];
+        for (int i = lo; i < hi; i++) {
+            const Item *it = &items[i];
+            float y = (ypos[i] - y0) + PAD;
             if (it->is_hgroup) {
                 float cx = PAD + (max_w - it->width) / 2.0f;
                 for (int k = 0; k < it->n; k++) {
@@ -434,6 +445,86 @@ static int build_vertical(const char *title, Buf *out_buf) {
     }
     return 1;
 }
+
+/* Build the full single-column vertical-text image (premultiplied). */
+static int build_vertical(const char *title, Buf *out_buf) {
+    Item items[MAX_ITEMS];
+    float ypos[MAX_ITEMS], max_w;
+    int n = plan_items(title, items, ypos, &max_w);
+    if (n == 0) return 0;
+    return render_range(items, ypos, 0, n, out_buf);
+}
+
+#define MAX_COLS      4
+#define MAX_COL_ITEMS 11   /* cap a column's height; longer text is truncated… */
+
+/* Plan one string into a single column, capped at MAX_COL_ITEMS rows. Overflow
+ * is truncated and the last row becomes an ellipsis, so the text stays big
+ * instead of shrinking to fit a giant column. */
+static int plan_items_capped(const char *s, Item items[MAX_ITEMS],
+                             float ypos[MAX_ITEMS], float *max_w) {
+    int n = plan_items(s, items, ypos, max_w);
+    if (n > MAX_COL_ITEMS) {
+        n = MAX_COL_ITEMS;
+        Item *it = &items[n - 1];          /* replace last visible row with "…" */
+        it->n = 1;
+        it->is_hgroup = 0;
+        it->cps[0] = 0x2026;               /* U+2026 HORIZONTAL ELLIPSIS */
+        it->width = cp_advance(0x2026);
+        float mw = 0;                       /* widest item may have been dropped */
+        for (int i = 0; i < n; i++)
+            if (items[i].width > mw) mw = items[i].width;
+        *max_w = mw;
+    }
+    return n;
+}
+
+/* Build the multi-column image (premultiplied): each non-empty string becomes
+ * one vertical column, laid right-to-left (strings[0] rightmost), like the
+ * game's title + subtitle. Over-long strings are truncated with an ellipsis. */
+static int build_columns(const char *const *strings, int n, Buf *out_buf) {
+    Buf cols[MAX_COLS];
+    int ncol = 0;
+    for (int j = 0; j < n && ncol < MAX_COLS; j++) {
+        if (!strings[j] || !strings[j][0])
+            continue;
+        Item items[MAX_ITEMS];
+        float ypos[MAX_ITEMS], max_w;
+        int ni = plan_items_capped(strings[j], items, ypos, &max_w);
+        if (ni > 0 && render_range(items, ypos, 0, ni, &cols[ncol]))
+            ncol++;
+    }
+    if (ncol == 0) return 0;
+
+    int gap = (int)(g_char_h * 0.30f);
+    if (gap < 2) gap = 2;
+    /* Each successive (leftward) column is staggered down, like the game drops
+     * the subtitle below the title's start. */
+    int stagger = (int)(g_char_h * 1.4f);
+    int total_w = gap * (ncol - 1), max_h = 0;
+    for (int k = 0; k < ncol; k++) {
+        total_w += cols[k].w;
+        int bottom = k * stagger + cols[k].h;
+        if (bottom > max_h) max_h = bottom;
+    }
+    if (total_w <= 0 || max_h <= 0 || !buf_init(out_buf, total_w, max_h)) {
+        for (int k = 0; k < ncol; k++) buf_free(&cols[k]);
+        return 0;
+    }
+    /* strings[0]'s first column sits at the right edge; later columns to the left
+     * and progressively lower. */
+    int xr = total_w;
+    for (int k = 0; k < ncol; k++) {
+        xr -= cols[k].w;
+        blit_buf(out_buf, &cols[k], xr, k * stagger);
+        xr -= gap;
+        buf_free(&cols[k]);
+    }
+    return 1;
+}
+
+static void blit_scaled(const Buf *src, uint32_t *out, int ow,
+                        int dw, int dh, int ox0, int oy0);
 
 /* Box-downscale premultiplied src, aspect-fit into out (A8R8G8B8, straight). */
 static void fit_into_out(const Buf *src, uint32_t *out, int ow, int oh) {
@@ -458,7 +549,14 @@ static void fit_into_out(const Buf *src, uint32_t *out, int ow, int oh) {
     if (dh < 1) dh = 1;
     int ox0 = (ow - dw) / 2;  /* horizontally centred in the strip */
     int oy0 = TOP;
+    blit_scaled(src, out, ow, dw, dh, ox0, oy0);
+}
 
+/* Box-downscale `src` (premultiplied) to dw x dh and write straight A8R8G8B8 at
+ * (ox0,oy0) into the ow-stride output. Shared by the single- and multi-column
+ * fits. */
+static void blit_scaled(const Buf *src, uint32_t *out, int ow,
+                        int dw, int dh, int ox0, int oy0) {
     for (int dy = 0; dy < dh; dy++) {
         int sy0 = dy * src->h / dh, sy1 = (dy + 1) * src->h / dh;
         if (sy1 <= sy0) sy1 = sy0 + 1;
@@ -483,6 +581,24 @@ static void fit_into_out(const Buf *src, uint32_t *out, int ow, int oh) {
     }
 }
 
+/* Aspect-fit (contain) the whole premultiplied src into out: scale by the
+ * tighter axis, centre horizontally, top-align. Used for the multi-column
+ * title+subtitle detail image. */
+static void fit_contain(const Buf *src, uint32_t *out, int ow, int oh) {
+    memset(out, 0, (size_t)ow * oh * 4);
+    if (src->w <= 0 || src->h <= 0) return;
+    const int TOP = 2;
+    int avail_h = oh - TOP;
+    if (avail_h < 1) avail_h = 1;
+    float sw = (float)ow / src->w, sh = (float)avail_h / src->h;
+    float sc = sw < sh ? sw : sh;
+    if (sc > 1.0f) sc = 1.0f;                 /* never upscale past native */
+    int dw = (int)(src->w * sc), dh = (int)(src->h * sc);
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    blit_scaled(src, out, ow, dw, dh, (ow - dw) / 2, TOP);
+}
+
 int taiko_title_render_argb(const char *title, void *out,
                             unsigned int out_w, unsigned int out_h,
                             unsigned int outline_rgb) {
@@ -495,6 +611,22 @@ int taiko_title_render_argb(const char *title, void *out,
     Buf img;
     if (!build_vertical(title, &img)) return 0;
     fit_into_out(&img, (uint32_t *)out, (int)out_w, (int)out_h);
+    buf_free(&img);
+    return 1;
+}
+
+int taiko_title_render_columns_argb(const char *const *strings, int n,
+                                    void *out, unsigned int out_w,
+                                    unsigned int out_h, unsigned int outline_rgb) {
+    if (!strings || n <= 0 || !out) return 0;
+    if (!font_ready()) return 0;
+    OUT_R = (uint8_t)(outline_rgb >> 16);
+    OUT_G = (uint8_t)(outline_rgb >> 8);
+    OUT_B = (uint8_t)outline_rgb;
+
+    Buf img;
+    if (!build_columns(strings, n, &img)) return 0;
+    fit_contain(&img, (uint32_t *)out, (int)out_w, (int)out_h);
     buf_free(&img);
     return 1;
 }

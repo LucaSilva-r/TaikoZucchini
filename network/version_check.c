@@ -16,6 +16,7 @@
 
 #include "config/version.h"
 #include "config.h"
+#include "custom_song_client.h"
 #include "debug.h"
 #include "http_client.h"
 #include "kb_input.h"
@@ -530,22 +531,9 @@ static int wait_for_net_link(int max_seconds) {
     return 0;
 }
 
-static void version_check_thread(uint64_t arg) {
-    (void)arg;
-    sys_timer_sleep(8);
-
-#if TAIKO_UPDATE_LOCAL_TEST
-    dbg_print("[version] local update test enabled\n");
-    if (wait_for_update_combo(TAIKO_UPDATE_LOCAL_VERSION))
-        install_update_from_local_file(TAIKO_UPDATE_LOCAL_PATH);
-    sys_ppu_thread_exit(0);
-#endif
-
-    if (!wait_for_net_link(20)) {
-        dbg_print("[version] no IP after 20s; skipping update check\n");
-        sys_ppu_thread_exit(0);
-    }
-
+/* GitHub release check. Returns on any failure (or after prompting/installing
+ * an update). Installing an update reboots the process, so this never returns. */
+static void run_update_check(void) {
     taiko_overlay_show_message("Checking for updates...");
 
     http_response_t resp;
@@ -553,7 +541,7 @@ static void version_check_thread(uint64_t arg) {
     if (rc != 0 || resp.status < 200 || resp.status >= 300) {
         dbg_print("[version] update check failed\n");
         http_response_free(&resp);
-        sys_ppu_thread_exit(0);
+        return;
     }
 
     char latest[32];
@@ -575,6 +563,31 @@ static void version_check_thread(uint64_t arg) {
     }
 
     http_response_free(&resp);
+}
+
+static void version_check_thread(uint64_t arg) {
+    (void)arg;
+    sys_timer_sleep(8);
+
+#if TAIKO_UPDATE_LOCAL_TEST
+    dbg_print("[version] local update test enabled\n");
+    if (wait_for_update_combo(TAIKO_UPDATE_LOCAL_VERSION))
+        install_update_from_local_file(TAIKO_UPDATE_LOCAL_PATH);
+    sys_ppu_thread_exit(0);
+#endif
+
+    if (!wait_for_net_link(20)) {
+        dbg_print("[version] no IP after 20s; skipping update check\n");
+        sys_ppu_thread_exit(0);
+    }
+
+    run_update_check();
+
+    /* Warm the custom-song library at boot so opening the overlay is instant
+     * (the sync no longer runs on the overlay-open path). */
+    dbg_print("[version] warming custom-song library\n");
+    ese_library_sync();
+
     sys_ppu_thread_exit(0);
 }
 

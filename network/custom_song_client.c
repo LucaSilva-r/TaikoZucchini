@@ -292,6 +292,30 @@ static void lib_free(void) {
     g_lib_hash[0] = 0;
 }
 
+/* Parse a flat "e:5,n:7,h:9,m:10,x:10" diffs string into canonical star slots
+ * (Easy,Normal,Hard,Oni,Ura). Absent difficulties stay at their caller default. */
+static void parse_diffs_str(const char *s, signed char stars[ESE_DIFF_SLOTS]) {
+    while (*s) {
+        int slot;
+        switch (*s) {
+            case 'e': slot = 0; break;
+            case 'n': slot = 1; break;
+            case 'h': slot = 2; break;
+            case 'm': slot = 3; break;
+            case 'x': slot = 4; break;
+            default:  slot = -1; break;
+        }
+        while (*s && *s != ':' && *s != ',') s++;      /* skip the id token */
+        if (*s == ':') {
+            s++;
+            int v = 0, any = 0;
+            while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; any = 1; }
+            if (slot >= 0 && any) stars[slot] = (signed char)(v > 127 ? 127 : v);
+        }
+        while (*s == ',') s++;                          /* to next token */
+    }
+}
+
 /* Parse the /library payload into the in-memory arrays. Returns 1 on success. */
 static int parse_library(const unsigned char *body, size_t len) {
     const unsigned char *end = body + len;
@@ -345,10 +369,16 @@ static int parse_library(const unsigned char *body, size_t len) {
             continue;
         if (!json_get_string_after(idp, end, "\"title\"", s->title, sizeof s->title))
             snprintf(s->title, sizeof s->title, "%s", s->id);
+        json_get_string_after(idp, end, "\"subtitle\"", s->subtitle, sizeof s->subtitle);
         char catid[ESE_CATEGORY_ID_MAX];
         catid[0] = 0;
         json_get_string_after(idp, end, "\"category\"", catid, sizeof catid);
         g_lib_song_cat[g_lib_song_count] = (short)lib_cat_index(catid);
+        char diffs[64];
+        diffs[0] = 0;
+        for (int d = 0; d < ESE_DIFF_SLOTS; d++) s->stars[d] = -1;
+        if (json_get_string_after(idp, end, "\"diffs\"", diffs, sizeof diffs))
+            parse_diffs_str(diffs, s->stars);
         g_lib_song_count++;
     }
 
@@ -421,7 +451,10 @@ int ese_library_sync(void) {
 int ese_song_fetch_categories(ese_category_entry_t *out, int cap) {
     if (!out || cap <= 0)
         return -1;
-    ese_library_sync();
+    /* Boot warms the library (version_check thread); only sync here if that
+     * hasn't happened yet, so opening the overlay doesn't hit the network. */
+    if (!g_lib_loaded)
+        ese_library_sync();
     if (!g_lib_loaded)
         return -1;
     int n = g_lib_cat_count < cap ? g_lib_cat_count : cap;

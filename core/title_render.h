@@ -18,4 +18,12 @@ int taiko_title_render_argb(const char *title, void *out,
                             unsigned int out_w, unsigned int out_h,
                             unsigned int outline_rgb);
 
+/* Render up to `n` strings as adjacent vertical columns (right-to-left, like
+ * the game's title + subtitle), aspect-fit into `out` (W*H A8R8G8B8). Empty
+ * strings are skipped; a column too tall to read wraps into further columns.
+ * Returns 1 on success, 0 if the font is unavailable or all strings empty. */
+int taiko_title_render_columns_argb(const char *const *strings, int n,
+                                    void *out, unsigned int out_w,
+                                    unsigned int out_h, unsigned int outline_rgb);
+
 #endif

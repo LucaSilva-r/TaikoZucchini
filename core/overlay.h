@@ -56,6 +56,13 @@ void taiko_overlay_card_active(int on);
 #define TAIKO_OVL_TITLE_IMAGE_SLOTS 13
 #define TAIKO_OVL_TITLE_IMAGE_W 56
 #define TAIKO_OVL_TITLE_IMAGE_H 400
+/* Wider texture for the selected song's title+subtitle multi-column detail. */
+#define TAIKO_OVL_DETAIL_W 176
+#define TAIKO_OVL_DETAIL_H 400
+/* Small per-difficulty label textures (E/N/H/M/U), rendered with the title font. */
+#define TAIKO_OVL_DIFF_LABEL_W 44
+#define TAIKO_OVL_DIFF_LABEL_H 44
+#define TAIKO_OVL_DIFF_LABELS  5
 
 enum {
     TAIKO_OVL_CAROUSEL_CATEGORY = 0,
@@ -77,7 +84,17 @@ void taiko_overlay_carousel_set(const char *title,
                                 int selected,
                                 const char *status, const char *footer);
 void taiko_overlay_carousel_active(int on);
+/* Per-difficulty star counts shown on the selected song tile. Indices 0..4 =
+ * Easy,Normal,Hard,Oni,Ura; value < 0 = that difficulty is absent. Pass NULL or
+ * all -1 to draw none. */
+void taiko_overlay_carousel_set_diffs(const signed char stars[5]);
 void taiko_overlay_title_image_set(int slot, const void *argb, unsigned int bytes);
+/* Selected song's title+subtitle multi-column detail image (TAIKO_OVL_DETAIL_W x
+ * _H A8R8G8B8). Pass NULL/0 to clear. */
+void taiko_overlay_song_detail_set(const void *argb, unsigned int bytes);
+/* Difficulty label texture idx 0..4 (Easy..Ura), TAIKO_OVL_DIFF_LABEL_W x _H
+ * A8R8G8B8. Rendered once with the title font. NULL/0 clears. */
+void taiko_overlay_diff_label_set(int idx, const void *argb, unsigned int bytes);
 /* ARGB of the carousel tab colour for a palette index (matches the drawn tab). */
 unsigned int taiko_overlay_carousel_color_argb(int palette_index);
 

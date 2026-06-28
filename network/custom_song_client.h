@@ -11,9 +11,16 @@
 #define ESE_COURSE_LABEL_MAX   24
 #define ESE_COURSE_LIST_MAX    8
 
+/* Canonical difficulty slots in the index: Easy,Normal,Hard,Oni,Ura. */
+#define ESE_DIFF_SLOTS 5
 typedef struct {
     char id[ESE_SONG_ID_MAX];
     char title[ESE_SONG_TITLE_MAX];
+    /* TJA SUBTITLE (source/origin line, e.g. "「…」より"); empty if none. */
+    char subtitle[ESE_SONG_TITLE_MAX];
+    /* Star count per canonical difficulty, -1 = difficulty absent. Comes
+     * straight from the /library index (no conversion needed to see them). */
+    signed char stars[ESE_DIFF_SLOTS];
 } ese_song_entry_t;
 
 typedef struct {
