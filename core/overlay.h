@@ -51,4 +51,34 @@ void taiko_overlay_card_set(const char *title,
                             const char *footer, const char *qr_payload);
 void taiko_overlay_card_active(int on);
 
+#define TAIKO_OVL_CAROUSEL_MAX 13
+#define TAIKO_OVL_TITLE_IMAGE_NONE (-1)
+#define TAIKO_OVL_TITLE_IMAGE_SLOTS 13
+#define TAIKO_OVL_TITLE_IMAGE_W 56
+#define TAIKO_OVL_TITLE_IMAGE_H 400
+
+enum {
+    TAIKO_OVL_CAROUSEL_CATEGORY = 0,
+    TAIKO_OVL_CAROUSEL_SONG,
+    TAIKO_OVL_CAROUSEL_BACK,
+    TAIKO_OVL_CAROUSEL_MORE,
+};
+
+/* Taiko-style horizontal picker prototype. The caller supplies only the
+ * visible window; selected is relative to that window. Palette entries are
+ * small indices, not ARGB values, so the renderer can use pre-mapped swatches
+ * inside the flip hook. */
+void taiko_overlay_carousel_set(const char *title,
+                                const char *const *labels,
+                                const char *const *values,
+                                const unsigned char *palette,
+                                const unsigned char *kinds,
+                                const signed char *image_slots, int count,
+                                int selected,
+                                const char *status, const char *footer);
+void taiko_overlay_carousel_active(int on);
+void taiko_overlay_title_image_set(int slot, const void *argb, unsigned int bytes);
+/* ARGB of the carousel tab colour for a palette index (matches the drawn tab). */
+unsigned int taiko_overlay_carousel_color_argb(int palette_index);
+
 #endif

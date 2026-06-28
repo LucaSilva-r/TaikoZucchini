@@ -27,6 +27,7 @@ MAKE_FSELF    := $(CELL_HOST)/bin/make_fself
 
 MBEDTLS_DIR := vendor/mbedtls
 QUIRC_DIR   := vendor/quirc
+FREETYPE_DIR := vendor/freetype
 
 INCLUDES := -I$(CELL_SDK)/target/ppu/include \
             -I$(CELL_SDK)/target/common/include \
@@ -47,7 +48,8 @@ INCLUDES := -I$(CELL_SDK)/target/ppu/include \
             -Iftp \
             -I$(MBEDTLS_DIR)/include \
             -I$(MBEDTLS_DIR)/library \
-            -I$(QUIRC_DIR)/lib
+            -I$(QUIRC_DIR)/lib \
+            -I$(FREETYPE_DIR)/include
 
 # Signing target baked into the sprx: 1 = retail STD (HEN), 0 = debug (GEX).
 # build_sprx.sh compiles the sprx once per flavor.
@@ -90,7 +92,7 @@ SYM     := $(BIN_DIR)/$(TARGET_NAME).sym
 BOOTSTRAP_EBOOT := bootstrap_eboot/bin/eboot.elf
 FTP_EBOOT := ftp_eboot/bin/ftp_eboot.elf
 
-SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_override.c core/custom_song_launcher.c core/qr_encode.c core/libc_stubs.c core/patch_ui.c core/patch_warn.c core/write_probe.c core/rsx_init.c core/overlay.c eboot_fpt.c \
+SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_override.c core/custom_song_launcher.c core/qr_encode.c core/title_render.c core/libc_stubs.c core/patch_ui.c core/patch_warn.c core/write_probe.c core/rsx_init.c core/overlay.c eboot_fpt.c \
            mod_menu/menu.c mod_menu/menu_draw.c mod_menu/menu_pad.c mod_menu/menu_actions.c \
            mod_menu/menu_osk.c \
            ftp/ftp_server.c \
@@ -165,6 +167,20 @@ QUIRC_SRCS      := $(addprefix $(QUIRC_DIR)/lib/,$(QUIRC_SRC_NAMES))
 QUIRC_OBJS      := $(QUIRC_SRCS:.c=.o)
 OBJS            += $(QUIRC_OBJS)
 
+# FreeType: minimal TrueType-only build (sfnt + truetype + smooth rasterizer).
+# Custom ftmodule.h/ftoption.h in include/freetype/config trim everything else.
+# Compiled with FT2_BUILD_LIBRARY; we supply FT_Memory, so no ftsystem.c.
+FREETYPE_SRCS := $(FREETYPE_DIR)/src/base/ftbase.c \
+                 $(FREETYPE_DIR)/src/base/ftinit.c \
+                 $(FREETYPE_DIR)/src/base/ftdebug.c \
+                 $(FREETYPE_DIR)/src/base/ftsystem.c \
+                 $(FREETYPE_DIR)/src/base/ftbitmap.c \
+                 $(FREETYPE_DIR)/src/sfnt/sfnt.c \
+                 $(FREETYPE_DIR)/src/truetype/truetype.c \
+                 $(FREETYPE_DIR)/src/smooth/smooth.c
+FREETYPE_OBJS := $(FREETYPE_SRCS:.c=.o)
+OBJS          += $(FREETYPE_OBJS)
+
 all: $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
 
 bootstrap: $(BOOTSTRAP_EBOOT)
@@ -224,6 +240,11 @@ $(SPU_QR_PPU_OBJ): $(SPU_QR_ELF) | $(BIN_DIR)
 MBEDTLS_CONFIG_H := $(MBEDTLS_DIR)/include/mbedtls/mbedtls_config.h
 $(MBEDTLS_DIR)/library/%.o: $(MBEDTLS_DIR)/library/%.c $(MBEDTLS_CONFIG_H)
 	$(PPU_CC) $(CFLAGS) -Os -c $< -o $@
+
+# FreeType library units: need FT2_BUILD_LIBRARY; -Os for size. The amalgam
+# units #include sibling .c files relative to their own dir.
+$(FREETYPE_DIR)/src/%.o: $(FREETYPE_DIR)/src/%.c
+	$(PPU_CC) $(CFLAGS) -Os -DFT2_BUILD_LIBRARY -c $< -o $@
 
 # quirc: NDEBUG to neutralize asserts. -include quirc_math_shim.h to
 # substitute manual rint/fabs/sqrt; libm calls return the input register

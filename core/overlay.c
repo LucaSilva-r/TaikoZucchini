@@ -21,7 +21,7 @@
 #define OVERLAY_MESSAGE_BOX_FRAMES 600
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
-#define OVERLAY_MAP_SIZE       (8 * 1024 * 1024)
+#define OVERLAY_MAP_SIZE       (10 * 1024 * 1024)
 #define OVERLAY_CMD_RING_SLOTS 64
 #define OVERLAY_CMD_WORDS      16384
 
@@ -43,7 +43,11 @@
 /* Card/QR surface: a 64x64 ARGB texture holding the QR at 1px/module (QR is
  * 57 modules), nearest-neighbour scaled up on blit so it stays crisp. */
 #define OVERLAY_QR_TEX_DIM     64
+#define OVERLAY_GLOSS_DIM      16
+#define OVERLAY_GLOSS_TOP_A    0x60   /* top sheen alpha; lower = subtler */
+#define OVERLAY_GLOSS_DRAW_SLOT (-2)  /* img_draws sentinel: bind gloss texture */
 #define OVERLAY_CARD_LINES     8
+#define OVERLAY_CAROUSEL_ITEMS TAIKO_OVL_CAROUSEL_MAX
 
 #define UI_COLOR_BG       0xDC101010u
 #define UI_COLOR_PANEL    0xF0181818u
@@ -54,6 +58,25 @@
 #define UI_COLOR_GREEN    0xFF60E080u   /* toggle ON  */
 #define UI_COLOR_RED      0xFFE06060u   /* toggle OFF */
 #define UI_COLOR_SECTION  0xFF80C0FFu   /* category header */
+
+enum {
+    SWATCH_BG = 0,
+    SWATCH_PANEL,
+    SWATCH_ACCENT,
+    SWATCH_TEXT,
+    SWATCH_MUTED,
+    SWATCH_DARK,
+    SWATCH_TEAL,
+    SWATCH_CYAN,
+    SWATCH_PINK,
+    SWATCH_GREEN,
+    SWATCH_ORANGE,
+    SWATCH_YELLOW,
+    SWATCH_BROWN,
+    SWATCH_RED,
+    SWATCH_PALE,
+    SWATCH_COUNT
+};
 
 typedef int (*gcm_flip_command_fn)(void *ctx, uint8_t id);
 typedef int (*gcm_set_display_buffer_fn)(uint8_t id, uint32_t offset,
@@ -101,6 +124,25 @@ typedef struct {
 } overlay_card_state_t;
 
 typedef struct {
+    char title[OVERLAY_TEXT_CAP];
+    char labels[OVERLAY_CAROUSEL_ITEMS][OVERLAY_TEXT_CAP];
+    char values[OVERLAY_CAROUSEL_ITEMS][OVERLAY_VALUE_CAP];
+    unsigned char palette[OVERLAY_CAROUSEL_ITEMS];
+    unsigned char kinds[OVERLAY_CAROUSEL_ITEMS];
+    signed char image_slots[OVERLAY_CAROUSEL_ITEMS];
+    char status[OVERLAY_DESC_CAP];
+    char footer[OVERLAY_TEXT_CAP];
+    int count;
+    int selected;
+} overlay_carousel_state_t;
+
+typedef struct {
+    int slot;
+    int first;
+    int count;
+} overlay_image_draw_t;
+
+typedef struct {
     float pos[4];
     float color[4];
     float uv[2];
@@ -117,13 +159,28 @@ static uint32_t g_overlay_io;
 static uint32_t *g_overlay_cmd;
 static uint32_t g_overlay_cmd_io;
 static uint32_t g_font_tex_io;
-static uint32_t g_swatch_io[6];
+static uint32_t g_swatch_io[SWATCH_COUNT];
+/* Per-tab embossed-bevel tints: the 8 carousel colours (SWATCH_CYAN..PALE)
+ * lightened (top/left rim) and darkened (bottom/right rim), like the game. */
+#define TAB_PALETTE_N 8
+#define OVERLAY_BEVEL_DIM 16   /* corner-miter texture size */
+static uint32_t g_bevel_light_io[TAB_PALETTE_N];
+static uint32_t g_bevel_dark_io[TAB_PALETTE_N];
+/* Mitered corner: light upper-left triangle, dark lower-right, split on the
+ * anti-diagonal. Used for the top-right and bottom-left tab corners (the two
+ * where a light edge meets a dark edge) so the rim cuts at 45 deg. */
+static uint32_t g_bevel_corner_io[TAB_PALETTE_N];
 static uint32_t g_qr_tex_io;
+static uint32_t g_gloss_tex_io;
 static uint32_t *g_qr_tex;
+static uint32_t g_title_image_io[TAIKO_OVL_TITLE_IMAGE_SLOTS];
+static unsigned char *g_title_image[TAIKO_OVL_TITLE_IMAGE_SLOTS];
+static volatile int g_title_image_valid[TAIKO_OVL_TITLE_IMAGE_SLOTS];
 static overlay_vertex_t *g_text_vtx;
 static uint32_t g_text_vtx_io;
 static uint32_t g_text_vtx_next;
 static uint32_t g_fp_ucode_io;
+static uint32_t g_color_fp_ucode_io;
 static uint32_t g_pos_attr = 0;
 static uint32_t g_col_attr = 3;
 static uint32_t g_uv_attr = 8;
@@ -148,6 +205,11 @@ static volatile int g_card_active;
 static volatile int g_card_cur = -1;
 static volatile int g_card_reading = -1;
 static overlay_card_state_t g_card_state[2];
+
+static volatile int g_carousel_active;
+static volatile int g_carousel_cur = -1;
+static volatile int g_carousel_reading = -1;
+static overlay_carousel_state_t g_carousel_state[3];
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -209,6 +271,18 @@ static void build_text_atlas(uint8_t *dst) {
     }
 }
 
+/* Lighten (d>0) or darken (d<0) an ARGB colour by d/255, alpha kept. */
+static uint32_t shade_argb(uint32_t c, int d) {
+    int ch[3] = { (int)((c >> 16) & 0xff), (int)((c >> 8) & 0xff), (int)(c & 0xff) };
+    for (int i = 0; i < 3; i++) {
+        ch[i] += (d >= 0 ? (255 - ch[i]) : ch[i]) * d / 255;
+        if (ch[i] < 0) ch[i] = 0;
+        if (ch[i] > 255) ch[i] = 255;
+    }
+    return (c & 0xFF000000u) | ((uint32_t)ch[0] << 16) |
+           ((uint32_t)ch[1] << 8) | (uint32_t)ch[2];
+}
+
 static int ensure_overlay_mapped(void) {
     if (g_overlay_mapped)
         return 1;
@@ -244,7 +318,10 @@ static int ensure_overlay_mapped(void) {
     cursor = align_up_u32(cursor, 128);
     uint32_t swatches[] = {
         UI_COLOR_BG, UI_COLOR_PANEL, UI_COLOR_ACCENT,
-        UI_COLOR_TEXT, UI_COLOR_MUTED, UI_COLOR_DARK
+        UI_COLOR_TEXT, UI_COLOR_MUTED, UI_COLOR_DARK,
+        0xE0209AB0u, 0xFF18A8B8u, 0xFFFF4088u,
+        0xFF35C84Au, 0xFFFF9818u, 0xFFFFDA28u,
+        0xFFA96A20u, 0xFFE63A20u, 0xFFE8F1F8u
     };
     for (int i = 0; i < (int)(sizeof swatches / sizeof swatches[0]); i++) {
         g_swatch_io[i] = off + cursor;
@@ -254,10 +331,57 @@ static int ensure_overlay_mapped(void) {
         cursor += OVERLAY_SWATCH_W * OVERLAY_SWATCH_H * 4;
     }
 
+    /* Bevel tints: lighten/darken each tab colour for the embossed rim. */
+    for (int k = 0; k < TAB_PALETTE_N; k++) {
+        uint32_t base = swatches[SWATCH_CYAN + k];
+        uint32_t lt = shade_argb(base, +120), dk = shade_argb(base, -95);
+        uint32_t pair[2] = { lt, dk };
+        uint32_t *io[2] = { &g_bevel_light_io[k], &g_bevel_dark_io[k] };
+        for (int s = 0; s < 2; s++) {
+            *io[s] = off + cursor;
+            uint32_t *dst = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+            for (int j = 0; j < OVERLAY_SWATCH_W * OVERLAY_SWATCH_H; j++)
+                dst[j] = pair[s];
+            cursor += OVERLAY_SWATCH_W * OVERLAY_SWATCH_H * 4;
+        }
+        /* Mitered corner: light above the anti-diagonal, dark below. */
+        cursor = align_up_u32(cursor, 128);
+        g_bevel_corner_io[k] = off + cursor;
+        uint32_t *cd = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+        for (int r = 0; r < OVERLAY_BEVEL_DIM; r++)
+            for (int c = 0; c < OVERLAY_BEVEL_DIM; c++)
+                cd[r * OVERLAY_BEVEL_DIM + c] =
+                    (c + r) <= (OVERLAY_BEVEL_DIM - 1) ? lt : dk;
+        cursor += OVERLAY_BEVEL_DIM * OVERLAY_BEVEL_DIM * 4;
+    }
+
     cursor = align_up_u32(cursor, 128);
     g_qr_tex_io = off + cursor;
     g_qr_tex = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
     cursor += OVERLAY_QR_TEX_DIM * OVERLAY_QR_TEX_DIM * 4;
+
+    /* Gloss texture: white, alpha fading top->bottom. Drawn as an alpha-blended
+     * quad (SRC_ALPHA over) for the glossy tab sheen. Reusable gradient. */
+    cursor = align_up_u32(cursor, 128);
+    g_gloss_tex_io = off + cursor;
+    {
+        uint32_t *gl = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+        for (int r = 0; r < OVERLAY_GLOSS_DIM; r++) {
+            int a = OVERLAY_GLOSS_TOP_A * (OVERLAY_GLOSS_DIM - 1 - r) /
+                    (OVERLAY_GLOSS_DIM - 1);
+            uint32_t px = ((uint32_t)a << 24) | 0x00FFFFFFu; /* straight alpha */
+            for (int c = 0; c < OVERLAY_GLOSS_DIM; c++)
+                gl[r * OVERLAY_GLOSS_DIM + c] = px;
+        }
+    }
+    cursor += OVERLAY_GLOSS_DIM * OVERLAY_GLOSS_DIM * 4;
+
+    cursor = align_up_u32(cursor, 128);
+    for (int i = 0; i < TAIKO_OVL_TITLE_IMAGE_SLOTS; i++) {
+        g_title_image_io[i] = off + cursor;
+        g_title_image[i] = (unsigned char *)g_overlay_mem + cursor;
+        cursor += TAIKO_OVL_TITLE_IMAGE_W * TAIKO_OVL_TITLE_IMAGE_H * 4;
+    }
 
     cursor = align_up_u32(cursor, 128);
     CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
@@ -265,6 +389,14 @@ static int ensure_overlay_mapped(void) {
     memcpy((uint8_t *)g_overlay_mem + cursor,
            (const uint8_t *)fp + fp->ucode, fp->ucodeSize);
     cursor += fp->ucodeSize;
+
+    cursor = align_up_u32(cursor, 128);
+    CgBinaryProgram *color_fp = (CgBinaryProgram *)overlay_color_fp_cgb;
+    g_color_fp_ucode_io = off + cursor;
+    memcpy((uint8_t *)g_overlay_mem + cursor,
+           (const uint8_t *)color_fp + color_fp->ucode,
+           color_fp->ucodeSize);
+    cursor += color_fp->ucodeSize;
 
     cursor = align_up_u32(cursor, 128);
     g_text_vtx = (overlay_vertex_t *)((uint8_t *)g_overlay_mem + cursor);
@@ -384,7 +516,7 @@ static int append_scaled_blit(CellGcmContextData *cmd,
                               int src_w, int src_h,
                               int sx, int sy, int sw, int sh,
                               int dx, int dy, int dw, int dh,
-                              uint8_t interp) {
+                              uint8_t interp, uint8_t operation) {
     if (!cmd || !b || !b->valid || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
         return 0;
     if (src_w <= 0 || src_h <= 0 || sx < 0 || sy < 0 ||
@@ -410,7 +542,7 @@ static int append_scaled_blit(CellGcmContextData *cmd,
     memset(&scale, 0, sizeof scale);
     scale.conversion = CELL_GCM_TRANSFER_CONVERSION_TRUNCATE;
     scale.format     = CELL_GCM_TRANSFER_SCALE_FORMAT_A8R8G8B8;
-    scale.operation  = CELL_GCM_TRANSFER_OPERATION_SRCCOPY;
+    scale.operation  = operation;
     scale.clipX      = (uint16_t)dx;
     scale.clipY      = (uint16_t)dy;
     scale.clipW      = (uint16_t)dw;
@@ -443,14 +575,56 @@ static int append_scaled_blit(CellGcmContextData *cmd,
     return 1;
 }
 
-static int append_rect(CellGcmContextData *cmd, const overlay_buffer_t *b,
-                       int x, int y, int w, int h, int swatch) {
-    return append_scaled_blit(cmd, b, g_swatch_io[swatch],
+static int append_rect_io(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                          int x, int y, int w, int h, uint32_t swatch_io) {
+    return append_scaled_blit(cmd, b, swatch_io,
                               OVERLAY_SWATCH_W * 4,
                               OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
                               0, 0, OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
                               x, y, w, h,
-                              CELL_GCM_TRANSFER_INTERPOLATOR_ZOH);
+                              CELL_GCM_TRANSFER_INTERPOLATOR_ZOH,
+                              CELL_GCM_TRANSFER_OPERATION_SRCCOPY);
+}
+
+static int append_rect(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                       int x, int y, int w, int h, int swatch) {
+    if (swatch < 0 || swatch >= SWATCH_COUNT)
+        swatch = SWATCH_PANEL;
+    return append_rect_io(cmd, b, x, y, w, h, g_swatch_io[swatch]);
+}
+
+/* Embossed bevel frame of thickness t: light rim top+left, dark rim
+ * bottom+right (the tab colour lightened/darkened). The two mixed corners
+ * (top-right, bottom-left) use a baked anti-diagonal texture so the light/dark
+ * edges meet at a 45-deg miter; the matching corners are solid. */
+static int append_bevel(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                        int x, int y, int w, int h, int t, int pal,
+                        uint32_t lt_io, uint32_t dk_io) {
+    if (t * 2 > w) t = w / 2;
+    if (t * 2 > h) t = h / 2;
+    if (t < 1) return 1;
+    uint32_t corner_io = g_bevel_corner_io[pal];
+    /* edges, inset by t so corners own the t-by-t cells */
+    if (!append_rect_io(cmd, b, x + t, y, w - 2 * t, t, lt_io) ||         /* top    */
+        !append_rect_io(cmd, b, x, y + t, t, h - 2 * t, lt_io) ||         /* left   */
+        !append_rect_io(cmd, b, x + t, y + h - t, w - 2 * t, t, dk_io) || /* bottom */
+        !append_rect_io(cmd, b, x + w - t, y + t, t, h - 2 * t, dk_io) || /* right  */
+        !append_rect_io(cmd, b, x, y, t, t, lt_io) ||                     /* TL solid light */
+        !append_rect_io(cmd, b, x + w - t, y + h - t, t, t, dk_io))       /* BR solid dark  */
+        return 0;
+    /* TR + BL: mitered diagonal (light upper-left, dark lower-right) */
+    return append_scaled_blit(cmd, b, corner_io, OVERLAY_BEVEL_DIM * 4,
+                              OVERLAY_BEVEL_DIM, OVERLAY_BEVEL_DIM,
+                              0, 0, OVERLAY_BEVEL_DIM, OVERLAY_BEVEL_DIM,
+                              x + w - t, y, t, t,
+                              CELL_GCM_TRANSFER_INTERPOLATOR_FOH,
+                              CELL_GCM_TRANSFER_OPERATION_SRCCOPY) &&
+           append_scaled_blit(cmd, b, corner_io, OVERLAY_BEVEL_DIM * 4,
+                              OVERLAY_BEVEL_DIM, OVERLAY_BEVEL_DIM,
+                              0, 0, OVERLAY_BEVEL_DIM, OVERLAY_BEVEL_DIM,
+                              x, y + h - t, t, t,
+                              CELL_GCM_TRANSFER_INTERPOLATOR_FOH,
+                              CELL_GCM_TRANSFER_OPERATION_SRCCOPY);
 }
 
 static int boot_window_open(void) {
@@ -593,6 +767,118 @@ static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b
                               CELL_GCM_LOCATION_MAIN,
                               vtx_io + offsetof(overlay_vertex_t, uv));
     cellGcmSetDrawArrays(cmd, CELL_GCM_PRIMITIVE_TRIANGLES, 0, (uint32_t)vtx_count);
+    append_blend_state(cmd, 0);
+    cellGcmSetDepthMask(cmd, CELL_GCM_TRUE);
+}
+
+static void append_title_image_batch(CellGcmContextData *cmd,
+                                     const overlay_buffer_t *b,
+                                     uint32_t vtx_io,
+                                     const overlay_image_draw_t *draws,
+                                     int draw_count) {
+    if (!cmd || !b || !draws || draw_count <= 0)
+        return;
+
+    CellGcmSurface surf;
+    memset(&surf, 0, sizeof surf);
+    surf.type = CELL_GCM_SURFACE_PITCH;
+    surf.antialias = CELL_GCM_SURFACE_CENTER_1;
+    surf.colorFormat = CELL_GCM_SURFACE_A8R8G8B8;
+    surf.colorTarget = CELL_GCM_SURFACE_TARGET_0;
+    for (int i = 0; i < CELL_GCM_MRT_MAXCOUNT; i++) {
+        surf.colorLocation[i] = CELL_GCM_LOCATION_LOCAL;
+        surf.colorOffset[i] = b->offset;
+        surf.colorPitch[i] = b->pitch;
+    }
+    surf.depthFormat = CELL_GCM_SURFACE_Z24S8;
+    surf.depthLocation = CELL_GCM_LOCATION_LOCAL;
+    surf.depthOffset = 0;
+    surf.depthPitch = 64;
+    surf.width = (uint16_t)b->width;
+    surf.height = (uint16_t)b->height;
+    surf.x = 0;
+    surf.y = 0;
+    cellGcmSetSurface(cmd, &surf);
+
+    float scale[4] = { (float)b->width * 0.5f, -(float)b->height * 0.5f, 0.5f, 0.0f };
+    float offset[4] = { (float)b->width * 0.5f,  (float)b->height * 0.5f, 0.5f, 0.0f };
+    cellGcmSetViewport(cmd, 0, 0, (uint16_t)b->width, (uint16_t)b->height,
+                       0.0f, 1.0f, scale, offset);
+    cellGcmSetDepthTestEnable(cmd, CELL_GCM_FALSE);
+    cellGcmSetDepthMask(cmd, CELL_GCM_FALSE);
+    cellGcmSetCullFaceEnable(cmd, CELL_GCM_FALSE);
+
+    append_blend_state(cmd, 1);
+    cellGcmSetVertexProgram(cmd, (CGprogram)overlay_quad_vp_cgb,
+                            (const uint8_t *)overlay_quad_vp_cgb +
+                            ((CgBinaryProgram *)overlay_quad_vp_cgb)->ucode);
+    cellGcmSetFragmentProgramOffset(cmd, (CGprogram)overlay_color_fp_cgb,
+                                    g_color_fp_ucode_io,
+                                    CELL_GCM_LOCATION_MAIN);
+    cellGcmSetFragmentProgramControl(cmd, (CGprogram)overlay_color_fp_cgb,
+                                     0, 1, 0);
+
+    cellGcmSetVertexDataArray(cmd, (uint8_t)g_pos_attr, 0,
+                              sizeof(overlay_vertex_t), 4, CELL_GCM_VERTEX_F,
+                              CELL_GCM_LOCATION_MAIN, vtx_io);
+    cellGcmSetVertexDataArray(cmd, (uint8_t)g_col_attr, 0,
+                              sizeof(overlay_vertex_t), 4, CELL_GCM_VERTEX_F,
+                              CELL_GCM_LOCATION_MAIN,
+                              vtx_io + offsetof(overlay_vertex_t, color));
+    cellGcmSetVertexDataArray(cmd, (uint8_t)g_uv_attr, 0,
+                              sizeof(overlay_vertex_t), 2, CELL_GCM_VERTEX_F,
+                              CELL_GCM_LOCATION_MAIN,
+                              vtx_io + offsetof(overlay_vertex_t, uv));
+
+    for (int i = 0; i < draw_count; i++) {
+        int slot = draws[i].slot;
+        int gloss = (slot == OVERLAY_GLOSS_DRAW_SLOT);
+        if (draws[i].count <= 0)
+            continue;
+        if (!gloss && (slot < 0 || slot >= TAIKO_OVL_TITLE_IMAGE_SLOTS ||
+                       !g_title_image_valid[slot]))
+            continue;
+
+        CellGcmTexture tex;
+        memset(&tex, 0, sizeof tex);
+        tex.format = CELL_GCM_TEXTURE_A8R8G8B8 | CELL_GCM_TEXTURE_LN;
+        tex.mipmap = 1;
+        tex.dimension = CELL_GCM_TEXTURE_DIMENSION_2;
+        tex.cubemap = CELL_GCM_FALSE;
+        tex.remap = CELL_GCM_REMAP_MODE(CELL_GCM_TEXTURE_REMAP_ORDER_XYXY,
+                                        CELL_GCM_TEXTURE_REMAP_FROM_A,
+                                        CELL_GCM_TEXTURE_REMAP_FROM_R,
+                                        CELL_GCM_TEXTURE_REMAP_FROM_G,
+                                        CELL_GCM_TEXTURE_REMAP_FROM_B,
+                                        CELL_GCM_TEXTURE_REMAP_REMAP,
+                                        CELL_GCM_TEXTURE_REMAP_REMAP,
+                                        CELL_GCM_TEXTURE_REMAP_REMAP,
+                                        CELL_GCM_TEXTURE_REMAP_REMAP);
+        tex.width = gloss ? OVERLAY_GLOSS_DIM : TAIKO_OVL_TITLE_IMAGE_W;
+        tex.height = gloss ? OVERLAY_GLOSS_DIM : TAIKO_OVL_TITLE_IMAGE_H;
+        tex.depth = 1;
+        tex.location = CELL_GCM_LOCATION_MAIN;
+        tex.pitch = (gloss ? OVERLAY_GLOSS_DIM : TAIKO_OVL_TITLE_IMAGE_W) * 4;
+        tex.offset = gloss ? g_gloss_tex_io : g_title_image_io[slot];
+        cellGcmSetTexture(cmd, (uint8_t)g_tex_unit, &tex);
+        cellGcmSetTextureControl(cmd, (uint8_t)g_tex_unit, CELL_GCM_TRUE,
+                                 0 << 8, 12 << 8,
+                                 CELL_GCM_TEXTURE_MAX_ANISO_1);
+        cellGcmSetTextureFilter(cmd, (uint8_t)g_tex_unit, 0,
+                                CELL_GCM_TEXTURE_LINEAR,
+                                CELL_GCM_TEXTURE_LINEAR,
+                                CELL_GCM_TEXTURE_CONVOLUTION_QUINCUNX);
+        cellGcmSetTextureAddress(cmd, (uint8_t)g_tex_unit,
+                                 CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
+                                 CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
+                                 CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
+                                 CELL_GCM_TEXTURE_UNSIGNED_REMAP_NORMAL,
+                                 CELL_GCM_TEXTURE_ZFUNC_LESS, 0);
+        cellGcmSetDrawArrays(cmd, CELL_GCM_PRIMITIVE_TRIANGLES,
+                             (uint32_t)draws[i].first,
+                             (uint32_t)draws[i].count);
+    }
+
     append_blend_state(cmd, 0);
     cellGcmSetDepthMask(cmd, CELL_GCM_TRUE);
 }
@@ -1035,7 +1321,8 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
                                 OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
                                 0, 0, OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
                                 qx, qy, qr_px, qr_px,
-                                CELL_GCM_TRANSFER_INTERPOLATOR_ZOH))
+                                CELL_GCM_TRANSFER_INTERPOLATOR_ZOH,
+                                CELL_GCM_TRANSFER_OPERATION_SRCCOPY))
             return;
     }
 
@@ -1065,6 +1352,311 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
     (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
 }
 
+static int append_centered_text(overlay_vertex_t *v, int *count, int max_vtx,
+                                uint32_t fb_w, uint32_t fb_h,
+                                int x, int y, int w, text_color_t color,
+                                const char *s) {
+    int tx;
+    if (!s)
+        s = "";
+    tx = x + (w - text_width(s)) / 2;
+    return append_text_vertices(v, count, max_vtx, fb_w, fb_h,
+                                tx, y, color, s);
+}
+
+static int append_stacked_text(overlay_vertex_t *v, int *count, int max_vtx,
+                               uint32_t fb_w, uint32_t fb_h,
+                               int cx, int y, int max_h,
+                               text_color_t color, const char *s) {
+    char ch[2];
+    int line_h = 22;
+    int rows = max_h / line_h;
+    int used = 0;
+
+    if (!s || rows <= 0)
+        return 1;
+    ch[1] = 0;
+    for (const unsigned char *p = (const unsigned char *)s;
+         *p && used < rows; p++) {
+        if (*p == ' ')
+            continue;
+        ch[0] = (char)*p;
+        int tw = text_width(ch);
+        if (!append_text_vertices(v, count, max_vtx, fb_w, fb_h,
+                                  cx - tw / 2, y + used * line_h,
+                                  color, ch))
+            return 0;
+        used++;
+    }
+    return 1;
+}
+
+static int append_title_image_vertices(overlay_vertex_t *v, int *count,
+                                       int max_vtx, uint32_t fb_w,
+                                       uint32_t fb_h, int x, int y,
+                                       int w, int h) {
+    if (!v || !count || w <= 0 || h <= 0 || *count + 6 > max_vtx)
+        return 0;
+    uint32_t color = 0xFFFFFFFFu;
+    float x0 = (float)x;
+    float y0 = (float)y;
+    float x1 = (float)(x + w);
+    float y1 = (float)(y + h);
+    text_push_vertex(v, count, x0, y0, 0.0f, 0.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y0, 1.0f, 0.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y0, 1.0f, 0.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y1, 1.0f, 1.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, color, fb_w, fb_h);
+    return 1;
+}
+
+static void maybe_draw_carousel(void *ctx, uint8_t id) {
+    if (!g_carousel_active || !ensure_overlay_mapped())
+        return;
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end)
+        return;
+
+    int cur = g_carousel_cur;
+    if (cur < 0)
+        return;
+    g_carousel_reading = cur;
+    overlay_carousel_state_t m = g_carousel_state[cur];
+    g_carousel_reading = -1;
+    if (m.count <= 0)
+        return;
+
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    uint32_t vtx_io = 0;
+    int max_vtx = 0;
+    int vtx_count = 0;
+    overlay_vertex_t *vtx = text_begin(&vtx_io, &max_vtx);
+    if (!vtx)
+        return;
+
+    uint32_t img_vtx_io = 0;
+    int img_max_vtx = 0;
+    int img_vtx_count = 0;
+    overlay_vertex_t *img_vtx = text_begin(&img_vtx_io, &img_max_vtx);
+    /* Up to one gloss quad + one title image per tile. */
+    overlay_image_draw_t img_draws[OVERLAY_CAROUSEL_ITEMS * 2];
+    int img_draw_count = 0;
+    if (!img_vtx)
+        return;
+
+    int pad = 34;
+    int gap = (b.width >= 1200) ? 12 : 8;
+    int sel_w = (b.width >= 1200) ? 340 : 260;
+    int strip_w = (b.width >= 1200) ? 82 : 56;
+    int tile_h = (int)b.height * 58 / 100;
+    if (tile_h > 440) tile_h = 440;
+    if (tile_h < 250) tile_h = 250;
+    if (tile_h > (int)b.height - 180) tile_h = (int)b.height - 180;
+    if (tile_h < 160)
+        return;
+
+    int strip_n = m.count - 1;
+    int total_w = sel_w + strip_n * strip_w + (m.count - 1) * gap;
+    int max_w = (int)b.width - pad * 2;
+    if (total_w > max_w && strip_n > 0) {
+        strip_w = (max_w - sel_w - (m.count - 1) * gap) / strip_n;
+        if (strip_w < 36)
+            strip_w = 36;
+        total_w = sel_w + strip_n * strip_w + (m.count - 1) * gap;
+    }
+    if (total_w > max_w) {
+        sel_w = max_w - strip_n * strip_w - (m.count - 1) * gap;
+        if (sel_w < 180)
+            sel_w = 180;
+        total_w = sel_w + strip_n * strip_w + (m.count - 1) * gap;
+    }
+
+    int x = ((int)b.width - total_w) / 2;
+    int y = ((int)b.height - tile_h) / 2 - 8;
+    if (y < 82)
+        y = 82;
+
+    if (!append_rect(&cmd, &b, 0, 0, (int)b.width, (int)b.height,
+                     SWATCH_TEAL))
+        return;
+
+    int title_w = (int)b.width / 3;
+    if (title_w < 260) title_w = 260;
+    if (title_w > 460) title_w = 460;
+    int title_x = ((int)b.width - title_w) / 2;
+    if (!append_rect(&cmd, &b, title_x, 20, title_w, 50, SWATCH_PANEL) ||
+        !append_rect(&cmd, &b, title_x, 20, title_w, 3, SWATCH_ACCENT))
+        return;
+    if (!append_centered_text(vtx, &vtx_count, max_vtx, b.width, b.height,
+                              title_x, 34, title_w, TEXT_WHITE, m.title))
+        return;
+
+    for (int i = 0; i < m.count; i++) {
+        int selected = i == m.selected;
+        int w = selected ? sel_w : strip_w;
+        int sw = m.palette[i] % 8;
+        int color = SWATCH_CYAN + sw;
+        int kind = m.kinds[i];
+        int image_slot = m.image_slots[i];
+        int image_valid = image_slot >= 0 &&
+                          image_slot < TAIKO_OVL_TITLE_IMAGE_SLOTS &&
+                          g_title_image_valid[image_slot];
+        text_color_t label_c = selected ? TEXT_DARK : TEXT_WHITE;
+
+        if (kind == TAIKO_OVL_CAROUSEL_BACK)
+            color = SWATCH_BROWN;
+        else if (kind == TAIKO_OVL_CAROUSEL_MORE)
+            color = SWATCH_PALE;
+
+        if (!append_rect(&cmd, &b, x + 5, y + 5, w, tile_h, SWATCH_DARK) ||
+            !append_rect(&cmd, &b, x, y, w, tile_h, SWATCH_DARK) ||
+            !append_rect(&cmd, &b, x + 4, y + 4, w - 8, tile_h - 8, color))
+            return;
+        /* Embossed bevel: tab colour lightened (top/left) and darkened
+         * (bottom/right) for a 3D rim, like the game. Drawn inside the fill,
+         * under the gloss. Bevel index = tab palette slot (color - SWATCH_CYAN). */
+        {
+            int bx = x + 4, by = y + 4, bw = w - 8, bh = tile_h - 8;
+            int bsw = color - SWATCH_CYAN;
+            if (bsw < 0 || bsw >= TAB_PALETTE_N) bsw = 0;
+            if (!append_bevel(&cmd, &b, bx, by, bw, bh, 9, bsw,
+                              g_bevel_light_io[bsw], g_bevel_dark_io[bsw]))
+                return;
+        }
+
+        if (selected) {
+            if (!append_rect(&cmd, &b, x + 10, y + 10, w - 20, 3,
+                             SWATCH_TEXT))
+                return;
+            if (image_valid && (kind == TAIKO_OVL_CAROUSEL_SONG ||
+                                kind == TAIKO_OVL_CAROUSEL_CATEGORY)) {
+                int ih = tile_h - 86;
+                int iw;
+                if (ih < 120) ih = tile_h - 30;
+                iw = ih * TAIKO_OVL_TITLE_IMAGE_W / TAIKO_OVL_TITLE_IMAGE_H;
+                if (iw < 32) iw = 32;
+                if (iw > 82) iw = 82;
+                int first = img_vtx_count;
+                if (!append_title_image_vertices(img_vtx, &img_vtx_count,
+                                                 img_max_vtx, b.width,
+                                                 b.height,
+                                                 x + w - iw - 24, y + 58,
+                                                 iw, ih))
+                    return;
+                if (img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+                    img_draws[img_draw_count].slot = image_slot;
+                    img_draws[img_draw_count].first = first;
+                    img_draws[img_draw_count].count = img_vtx_count - first;
+                    img_draw_count++;
+                }
+            }
+            if (!append_centered_text(vtx, &vtx_count, max_vtx,
+                                      b.width, b.height, x + 18, y + 26,
+                                      w - 36, label_c, m.labels[i]))
+                return;
+            if (m.values[i][0] &&
+                !append_centered_text(vtx, &vtx_count, max_vtx,
+                                      b.width, b.height, x + 18, y + 58,
+                                      w - 36, label_c, m.values[i]))
+                return;
+
+            if (kind == TAIKO_OVL_CAROUSEL_SONG && !image_valid) {
+                int art = tile_h / 3;
+                if (art > w - 70) art = w - 70;
+                if (art > 150) art = 150;
+                if (art > 50) {
+                    int ax = x + (w - art) / 2;
+                    int ay = y + tile_h / 2 - art / 2;
+                    if (!append_rect(&cmd, &b, ax, ay, art, art,
+                                     SWATCH_ORANGE) ||
+                        !append_rect(&cmd, &b, ax + 8, ay + 8,
+                                     art - 16, art - 16, SWATCH_ACCENT))
+                        return;
+                    append_centered_text(vtx, &vtx_count, max_vtx,
+                                         b.width, b.height, ax, ay + art / 2 - 10,
+                                         art, TEXT_DARK, "TITLE");
+                }
+            } else {
+                char lines[OVERLAY_DESC_LINES][OVERLAY_TEXT_CAP];
+                int ln = wrap_text(m.status, w - 42, OVERLAY_DESC_LINES, lines);
+                int ty = y + tile_h / 2 - (ln * 22) / 2;
+                for (int k = 0; k < ln; k++) {
+                    if (!append_centered_text(vtx, &vtx_count, max_vtx,
+                                              b.width, b.height, x + 20,
+                                              ty + k * 22, w - 40,
+                                              label_c, lines[k]))
+                        return;
+                }
+            }
+        } else {
+            int drew_image = 0;
+            if (image_valid) {
+                int ih = tile_h - 24;
+                int iw = ih * TAIKO_OVL_TITLE_IMAGE_W /
+                         TAIKO_OVL_TITLE_IMAGE_H;
+                if (iw > w - 12) {
+                    iw = w - 12;
+                    ih = iw * TAIKO_OVL_TITLE_IMAGE_H /
+                         TAIKO_OVL_TITLE_IMAGE_W;
+                }
+                if (iw > 0 && ih > 0) {
+                    int first = img_vtx_count;
+                    drew_image = append_title_image_vertices(
+                        img_vtx, &img_vtx_count, img_max_vtx,
+                        b.width, b.height,
+                        x + (w - iw) / 2, y + (tile_h - ih) / 2,
+                        iw, ih);
+                    if (drew_image && img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+                        img_draws[img_draw_count].slot = image_slot;
+                        img_draws[img_draw_count].first = first;
+                        img_draws[img_draw_count].count = img_vtx_count - first;
+                        img_draw_count++;
+                    }
+                }
+            }
+            if (!drew_image &&
+                !append_stacked_text(vtx, &vtx_count, max_vtx,
+                                     b.width, b.height, x + w / 2,
+                                     y + 18, tile_h - 36,
+                                     TEXT_WHITE, m.labels[i]))
+                    return;
+        }
+        x += w + gap;
+    }
+
+    if (m.footer[0]) {
+        int footer_w = (int)b.width - 2 * pad;
+        int fy = (int)b.height - 42;
+        if (!append_rect(&cmd, &b, pad, fy - 8, footer_w, 34, SWATCH_PANEL))
+            return;
+        if (!append_centered_text(vtx, &vtx_count, max_vtx, b.width, b.height,
+                                  pad, fy, footer_w, TEXT_WHITE, m.footer))
+            return;
+    }
+
+    if (img_vtx_count > 0) {
+        flush_dcache(img_vtx, (size_t)img_vtx_count * sizeof(*img_vtx));
+        append_title_image_batch(&cmd, &b, img_vtx_io, img_draws,
+                                 img_draw_count);
+    }
+    flush_dcache(vtx, (size_t)vtx_count * sizeof(*vtx));
+    append_text_batch(&cmd, &b, vtx_io, vtx_count);
+    (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
     if (!g_local_base) {
         CellGcmConfig cfg;
@@ -1074,6 +1666,8 @@ static int hk_flip_command(void *ctx, uint8_t id) {
     }
     if (g_card_active)
         maybe_draw_card(ctx, id);
+    else if (g_carousel_active)
+        maybe_draw_carousel(ctx, id);
     else if (g_menu_active)
         maybe_draw_menu(ctx, id);
     else if (g_message_box_frames > 0)
@@ -1256,6 +1850,80 @@ void taiko_overlay_card_active(int on) {
     if (!on)
         g_card_cur = -1;
     g_card_active = on ? 1 : 0;
+}
+
+void taiko_overlay_carousel_set(const char *title,
+                                const char *const *labels,
+                                const char *const *values,
+                                const unsigned char *palette,
+                                const unsigned char *kinds,
+                                const signed char *image_slots, int count,
+                                int selected,
+                                const char *status, const char *footer) {
+    if (count < 0)
+        count = 0;
+    if (count > OVERLAY_CAROUSEL_ITEMS)
+        count = OVERLAY_CAROUSEL_ITEMS;
+    if (selected < 0)
+        selected = 0;
+    if (selected >= count && count > 0)
+        selected = count - 1;
+
+    int slot = 0;
+    while (slot == g_carousel_cur || slot == g_carousel_reading)
+        slot++;
+    if (slot >= 3)
+        slot = (g_carousel_cur + 1) % 3;
+    overlay_carousel_state_t *m = &g_carousel_state[slot];
+
+    copy_str(m->title, sizeof m->title, title);
+    for (int i = 0; i < count; i++) {
+        copy_str(m->labels[i], sizeof m->labels[i],
+                 (labels && labels[i]) ? labels[i] : "");
+        copy_str(m->values[i], sizeof m->values[i],
+                 (values && values[i]) ? values[i] : "");
+        m->palette[i] = palette ? palette[i] : (unsigned char)i;
+        m->kinds[i] = kinds ? kinds[i] :
+            (unsigned char)TAIKO_OVL_CAROUSEL_CATEGORY;
+        m->image_slots[i] = image_slots ? image_slots[i] :
+            (signed char)TAIKO_OVL_TITLE_IMAGE_NONE;
+    }
+    m->count = count;
+    m->selected = selected;
+    copy_str(m->status, sizeof m->status, status);
+    copy_str(m->footer, sizeof m->footer, footer);
+    g_carousel_cur = slot;
+}
+
+void taiko_overlay_carousel_active(int on) {
+    if (!on)
+        g_carousel_cur = -1;
+    g_carousel_active = on ? 1 : 0;
+}
+
+unsigned int taiko_overlay_carousel_color_argb(int palette_index) {
+    /* Mirror of swatches[SWATCH_CYAN..SWATCH_PALE] used by the carousel draw. */
+    static const unsigned int c[8] = {
+        0xFF18A8B8u, 0xFFFF4088u, 0xFF35C84Au, 0xFFFF9818u,
+        0xFFFFDA28u, 0xFFA96A20u, 0xFFE63A20u, 0xFFE8F1F8u
+    };
+    return c[((palette_index % 8) + 8) % 8];
+}
+
+void taiko_overlay_title_image_set(int slot, const void *argb,
+                                   unsigned int bytes) {
+    unsigned int need = TAIKO_OVL_TITLE_IMAGE_W *
+                        TAIKO_OVL_TITLE_IMAGE_H * 4;
+    if (slot < 0 || slot >= TAIKO_OVL_TITLE_IMAGE_SLOTS)
+        return;
+    g_title_image_valid[slot] = 0;
+    if (!argb || bytes != need)
+        return;
+    if (!ensure_overlay_mapped())
+        return;
+    memcpy(g_title_image[slot], argb, need);
+    flush_dcache(g_title_image[slot], need);
+    g_title_image_valid[slot] = 1;
 }
 
 void taiko_overlay_hooks_install(void) {

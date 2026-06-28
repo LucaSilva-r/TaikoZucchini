@@ -29,6 +29,9 @@ typedef struct {
 } ese_course_entry_t;
 
 int ese_song_service_ready(void);
+/* Sync the in-memory library from tjarepo (/library), hash-gated + disk-cached.
+ * Returns 1 if a usable library is loaded. Categories/pages are served from it. */
+int ese_library_sync(void);
 int ese_song_fetch_categories(ese_category_entry_t *out, int cap);
 int ese_song_fetch_page(const char *category_id, int offset, int limit,
                         ese_song_entry_t *out, int cap, int *out_total);

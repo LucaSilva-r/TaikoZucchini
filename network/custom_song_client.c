@@ -27,6 +27,11 @@ typedef struct {
     char path[ESE_ASSET_PATH_MAX];
 } ese_asset_path_t;
 
+static int append_path(char *out, size_t cap, const char *a, const char *b);
+static int ensure_custom_song_dirs(const char *song_id, const char *asset_path);
+static int ensure_dir(const char *path);
+static int write_file(const char *path, const unsigned char *buf, size_t len);
+
 static void copy_limited(char *out, size_t cap, const char *src,
                          size_t max_chars) {
     size_t n = 0;
@@ -229,59 +234,205 @@ static int url_encode_append(char *out, size_t cap, size_t *n,
     return 1;
 }
 
-int ese_song_fetch_categories(ese_category_entry_t *out, int cap) {
-    http_response_t resp;
-    int count = 0;
+/* --- in-memory library ----------------------------------------------------
+ * The whole library (categories + songs id/title/category) is downloaded once
+ * and cached to disk; we only re-download when the server's library hash
+ * changes. Categories/song-pages are then served from RAM with no per-page
+ * network round-trips, so navigation is instant. */
+#define ESE_LIB_JSON_PATH ESE_CUSTOM_ROOT "/library.json"
+#define ESE_LIB_HASH_MAX  48
 
-    if (!out || cap <= 0)
-        return -1;
-    memset(out, 0, sizeof(out[0]) * (size_t)cap);
+static ese_category_entry_t g_lib_cats[ESE_CATEGORY_LIST_MAX];
+static int                  g_lib_cat_count;
+static ese_song_entry_t    *g_lib_songs;     /* malloc[g_lib_song_count] */
+static short               *g_lib_song_cat;  /* malloc[]: index into g_lib_cats */
+static int                  g_lib_song_count;
+static int                  g_lib_loaded;
+static char                 g_lib_hash[ESE_LIB_HASH_MAX];
 
-    taiko_overlay_show_prompt("Fetching categories...");
-    memset(&resp, 0, sizeof resp);
-    int rc = api_request("GET", ESE_API_CATEGORIES_PATH, &resp);
-    if (rc != 0 || resp.status != 200 || !resp.body) {
-        dbg_print("[ese] category request failed\n");
-        if (rc != 0)
-            dbg_print_hex32("[ese] http rc", (uint32_t)rc);
-        dbg_print_hex32("[ese] status", (uint32_t)resp.status);
-        http_response_free(&resp);
-        return -1;
+static int lib_cat_index(const char *id) {
+    for (int i = 0; i < g_lib_cat_count; i++)
+        if (strncmp(g_lib_cats[i].id, id, sizeof g_lib_cats[i].id) == 0)
+            return i;
+    return -1;
+}
+
+/* Read a file fully into a freshly malloc'd, NUL-terminated buffer. */
+static unsigned char *read_file_alloc(const char *path, size_t *out_len) {
+    CellFsStat st;
+    int fd = -1;
+    if (cellFsStat(path, &st) != CELL_FS_SUCCEEDED || st.st_size == 0 ||
+        st.st_size > HTTP_CLIENT_BODY_MAX)
+        return NULL;
+    if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+        return NULL;
+    size_t len = (size_t)st.st_size;
+    unsigned char *buf = (unsigned char *)malloc(len + 1);
+    if (!buf) { cellFsClose(fd); return NULL; }
+    uint64_t off = 0;
+    while (off < len) {
+        uint64_t n = 0;
+        if (cellFsRead(fd, buf + off, len - off, &n) != CELL_FS_SUCCEEDED || n == 0)
+            break;
+        off += n;
     }
+    cellFsClose(fd);
+    if (off != len) { free(buf); return NULL; }
+    buf[len] = 0;
+    if (out_len) *out_len = len;
+    return buf;
+}
 
-    const unsigned char *p = resp.body;
-    const unsigned char *end = resp.body + resp.body_len;
-    while (count < cap) {
-        const unsigned char *idp =
-            find_bytes(p, (size_t)(end - p), "\"id\"");
-        if (!idp)
+static void lib_free(void) {
+    free(g_lib_songs);     g_lib_songs = NULL;
+    free(g_lib_song_cat);  g_lib_song_cat = NULL;
+    g_lib_song_count = 0;
+    g_lib_cat_count = 0;
+    g_lib_loaded = 0;
+    g_lib_hash[0] = 0;
+}
+
+/* Parse the /library payload into the in-memory arrays. Returns 1 on success. */
+static int parse_library(const unsigned char *body, size_t len) {
+    const unsigned char *end = body + len;
+    const unsigned char *songs_key = find_bytes(body, len, "\"songs\"");
+    const unsigned char *cats_key  = find_bytes(body, len, "\"categories\"");
+    if (!songs_key || !cats_key)
+        return 0;
+
+    lib_free();
+    json_get_string_after(body, end, "\"hash\"", g_lib_hash, sizeof g_lib_hash);
+
+    /* categories live between the "categories" key and the "songs" key */
+    const unsigned char *p = cats_key;
+    while (g_lib_cat_count < ESE_CATEGORY_LIST_MAX) {
+        const unsigned char *idp = find_bytes(p, (size_t)(songs_key - p), "\"id\"");
+        if (!idp) break;
+        ese_category_entry_t *c = &g_lib_cats[g_lib_cat_count];
+        memset(c, 0, sizeof *c);
+        if (!json_get_string_after(idp, songs_key, "\"id\"", c->id, sizeof c->id))
             break;
-        if (!json_get_string_after(idp, end, "\"id\"",
-                                   out[count].id, sizeof out[count].id))
-            break;
-        if (!json_get_string_after(idp, end, "\"title\"",
-                                   out[count].title,
-                                   sizeof out[count].title)) {
-            snprintf(out[count].title, sizeof out[count].title, "%s",
-                     out[count].id);
-        }
-        json_get_int_after(idp, end, "\"song_count\"",
-                           &out[count].song_count);
-        count++;
+        if (!json_get_string_after(idp, songs_key, "\"title\"", c->title, sizeof c->title))
+            snprintf(c->title, sizeof c->title, "%s", c->id);
+        json_get_int_after(idp, songs_key, "\"song_count\"", &c->song_count);
+        g_lib_cat_count++;
         p = idp + 4;
     }
 
+    /* count songs, then allocate exactly */
+    int nsong = 0;
+    for (p = songs_key; ; ) {
+        const unsigned char *idp = find_bytes(p, (size_t)(end - p), "\"id\"");
+        if (!idp) break;
+        nsong++;
+        p = idp + 4;
+    }
+    if (nsong > 0) {
+        g_lib_songs = (ese_song_entry_t *)malloc(sizeof(ese_song_entry_t) * (size_t)nsong);
+        g_lib_song_cat = (short *)malloc(sizeof(short) * (size_t)nsong);
+        if (!g_lib_songs || !g_lib_song_cat) { lib_free(); return 0; }
+    }
+
+    for (p = songs_key; g_lib_song_count < nsong; ) {
+        const unsigned char *idp = find_bytes(p, (size_t)(end - p), "\"id\"");
+        if (!idp) break;
+        p = idp + 4;
+        ese_song_entry_t *s = &g_lib_songs[g_lib_song_count];
+        memset(s, 0, sizeof *s);
+        if (!json_get_string_after(idp, end, "\"id\"", s->id, sizeof s->id))
+            break;
+        if (strncmp(s->id, "ese_", 4) != 0)
+            continue;
+        if (!json_get_string_after(idp, end, "\"title\"", s->title, sizeof s->title))
+            snprintf(s->title, sizeof s->title, "%s", s->id);
+        char catid[ESE_CATEGORY_ID_MAX];
+        catid[0] = 0;
+        json_get_string_after(idp, end, "\"category\"", catid, sizeof catid);
+        g_lib_song_cat[g_lib_song_count] = (short)lib_cat_index(catid);
+        g_lib_song_count++;
+    }
+
+    g_lib_loaded = (g_lib_cat_count > 0);
+    return g_lib_loaded;
+}
+
+/* Ensure the in-memory library is current. Polls the cheap hash endpoint; only
+ * re-downloads the full payload when the hash differs from the disk cache. */
+int ese_library_sync(void) {
+    http_response_t resp;
+    char server_hash[ESE_LIB_HASH_MAX];
+    int have_server = 0;
+
+    memset(&resp, 0, sizeof resp);
+    if (api_request("GET", "/api/tjarepo/library/hash", &resp) == 0 &&
+        resp.status == 200 && resp.body) {
+        const unsigned char *e = resp.body + resp.body_len;
+        if (json_get_string_after(resp.body, e, "\"hash\"",
+                                  server_hash, sizeof server_hash))
+            have_server = 1;
+    }
     http_response_free(&resp);
-    return count;
+
+    if (have_server && g_lib_loaded &&
+        strncmp(g_lib_hash, server_hash, sizeof g_lib_hash) == 0)
+        return 1; /* already current in RAM */
+
+    /* try the disk cache (covers offline + unchanged-since-last-boot) */
+    if (!g_lib_loaded || (have_server &&
+        strncmp(g_lib_hash, server_hash, sizeof g_lib_hash) != 0)) {
+        size_t dlen = 0;
+        unsigned char *disk = read_file_alloc(ESE_LIB_JSON_PATH, &dlen);
+        if (disk) {
+            char disk_hash[ESE_LIB_HASH_MAX];
+            disk_hash[0] = 0;
+            json_get_string_after(disk, disk + dlen, "\"hash\"",
+                                  disk_hash, sizeof disk_hash);
+            if (!have_server ||
+                strncmp(disk_hash, server_hash, sizeof disk_hash) == 0)
+                parse_library(disk, dlen);
+            free(disk);
+            if (g_lib_loaded && (!have_server ||
+                strncmp(g_lib_hash, server_hash, sizeof g_lib_hash) == 0))
+                return 1;
+        }
+    }
+
+    if (!have_server)
+        return g_lib_loaded; /* offline, no cache improvement possible */
+
+    /* download the full library and refresh the disk cache */
+    taiko_overlay_show_prompt("Syncing song library...");
+    memset(&resp, 0, sizeof resp);
+    int rc = api_request("GET", "/api/tjarepo/library", &resp);
+    if (rc != 0 || resp.status != 200 || !resp.body) {
+        dbg_print("[ese] library download failed\n");
+        http_response_free(&resp);
+        return g_lib_loaded;
+    }
+    int ok = parse_library(resp.body, resp.body_len);
+    if (ok) {
+        ensure_dir(ESE_CUSTOM_ROOT);
+        write_file(ESE_LIB_JSON_PATH, resp.body, resp.body_len);
+    }
+    http_response_free(&resp);
+    return ok;
+}
+
+int ese_song_fetch_categories(ese_category_entry_t *out, int cap) {
+    if (!out || cap <= 0)
+        return -1;
+    ese_library_sync();
+    if (!g_lib_loaded)
+        return -1;
+    int n = g_lib_cat_count < cap ? g_lib_cat_count : cap;
+    memset(out, 0, sizeof(out[0]) * (size_t)cap);
+    for (int i = 0; i < n; i++)
+        out[i] = g_lib_cats[i];
+    return n;
 }
 
 int ese_song_fetch_page(const char *category_id, int offset, int limit,
                         ese_song_entry_t *out, int cap, int *out_total) {
-    http_response_t resp;
-    int count = 0;
-    char path[192];
-    size_t n = 0;
-
     if (!out || cap <= 0)
         return -1;
     if (limit <= 0 || limit > cap)
@@ -291,64 +442,26 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
     memset(out, 0, sizeof(out[0]) * (size_t)cap);
     if (out_total)
         *out_total = 0;
-
-    taiko_overlay_show_prompt("Fetching songs...");
-    int wrote = snprintf(path, sizeof path,
-                         "/api/tjarepo/songs?limit=%d&offset=%d",
-                         limit, offset);
-    if (wrote <= 0 || (size_t)wrote >= sizeof path)
+    if (!g_lib_loaded && !ese_library_sync())
         return -1;
-    n = (size_t)wrote;
-    if (category_id && category_id[0]) {
-        if (n + sizeof("&category=") >= sizeof path)
-            return -1;
-        memcpy(path + n, "&category=", sizeof("&category=") - 1);
-        n += sizeof("&category=") - 1;
-        path[n] = 0;
-        if (!url_encode_append(path, sizeof path, &n, category_id))
-            return -1;
-    }
 
-    memset(&resp, 0, sizeof resp);
-    int rc = api_request("GET", path, &resp);
-    if (rc != 0 || resp.status != 200 || !resp.body) {
-        dbg_print("[ese] song list request failed\n");
-        if (rc != 0)
-            dbg_print_hex32("[ese] http rc", (uint32_t)rc);
-        dbg_print_hex32("[ese] status", (uint32_t)resp.status);
-        http_response_free(&resp);
-        return -1;
-    }
+    int cat = (category_id && category_id[0]) ? lib_cat_index(category_id) : -1;
 
-    const unsigned char *p = resp.body;
-    const unsigned char *end = resp.body + resp.body_len;
-    if (out_total)
-        json_get_int_after(resp.body, end, "\"total\"", out_total);
-    while (count < cap) {
-        const unsigned char *idp =
-            find_bytes(p, (size_t)(end - p), "\"id\"");
-        if (!idp)
-            break;
-        if (!json_get_string_after(idp, end, "\"id\"",
-                                   out[count].id, sizeof out[count].id))
-            break;
-        if (strncmp(out[count].id, "ese_", 4) != 0) {
-            p = idp + 4;
+    int total = 0, count = 0;
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (cat >= 0 && g_lib_song_cat[i] != cat)
             continue;
-        }
-        if (!json_get_string_after(idp, end, "\"title\"",
-                                   out[count].title,
-                                   sizeof out[count].title)) {
-            snprintf(out[count].title, sizeof out[count].title, "%s",
-                     out[count].id);
-        }
-        count++;
-        p = idp + 4;
+        if (total >= offset && count < limit)
+            out[count++] = g_lib_songs[i];
+        total++;
     }
-
-    http_response_free(&resp);
+    if (out_total)
+        *out_total = total;
     return count;
 }
+
+/* Song titles are now rendered on-device (see core/title_render.c); the
+ * tjarepo title-image endpoint and its on-disk cache are no longer used. */
 
 static int append_path(char *out, size_t cap, const char *a, const char *b) {
     int n = snprintf(out, cap, "%s/%s", a, b);

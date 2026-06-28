@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <cell/keyboard/kb_codes.h>
 #include <sys/ppu_thread.h>
@@ -16,6 +17,7 @@
 #include "network/custom_song_client.h"
 #include "overlay.h"
 #include "taiko_frame.h"
+#include "title_render.h"
 
 #define TICK_US              (4 * 1000)
 #define OPEN_HOLD_TICKS      200
@@ -24,6 +26,7 @@
 
 #define PICKER_VISIBLE_ROWS 12
 #define ESE_CUSTOM_ROOT "/dev_hdd0/plugins/taiko/custom_songs"
+#define TITLE_IMAGE_BYTES (TAIKO_OVL_TITLE_IMAGE_W * TAIKO_OVL_TITLE_IMAGE_H * 4u)
 
 #define SONG_RECORD_STRIDE 0x90u
 #define SONG_RECORD_ID_OFF 0x04u
@@ -73,6 +76,8 @@ static selection_seed_t g_seed;
 static seed_source_t g_seed_source;
 static uintptr_t g_last_mm;
 static char g_pending_course[ESE_COURSE_ID_MAX];
+/* Worker-owned scratch buffer for the title currently being rendered. */
+static unsigned char g_title_fetch_buf[TITLE_IMAGE_BYTES];
 
 static uint32_t read_game_word(uintptr_t addr) {
     if (addr < 0x10000u)
@@ -245,40 +250,265 @@ static int picker_move(int sel, int delta, int count) {
     return sel;
 }
 
-static void picker_render_categories(const ese_category_entry_t *cats,
-                                     int count, int sel, int top,
-                                     const char *status) {
-    static char labels[PICKER_VISIBLE_ROWS][ESE_SONG_TITLE_MAX];
-    static char values[PICKER_VISIBLE_ROWS][16];
-    static unsigned char kinds[PICKER_VISIBLE_ROWS];
-    const char *lptrs[PICKER_VISIBLE_ROWS];
-    const char *vptrs[PICKER_VISIBLE_ROWS];
+static int picker_window_start(int count, int sel, int max_visible) {
+    int first;
 
-    int visible = count - top;
-    if (visible > PICKER_VISIBLE_ROWS)
-        visible = PICKER_VISIBLE_ROWS;
+    if (count <= max_visible)
+        return 0;
+    first = sel - max_visible / 2;
+    if (first < 0)
+        first = 0;
+    if (first + max_visible > count)
+        first = count - max_visible;
+    return first;
+}
+
+static int ascii_contains_ci(const char *s, const char *needle) {
+    if (!s || !needle || !needle[0])
+        return 0;
+    for (; *s; s++) {
+        const char *a = s;
+        const char *b = needle;
+        while (*a && *b) {
+            char ca = *a;
+            char cb = *b;
+            if (ca >= 'A' && ca <= 'Z') ca = (char)(ca + ('a' - 'A'));
+            if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + ('a' - 'A'));
+            if (ca != cb)
+                break;
+            a++;
+            b++;
+        }
+        if (!*b)
+            return 1;
+    }
+    return 0;
+}
+
+static unsigned char picker_category_palette(const ese_category_entry_t *cat,
+                                             int idx) {
+    const char *id = cat ? cat->id : "";
+    const char *title = cat ? cat->title : "";
+
+    if (ascii_contains_ci(id, "anime") || ascii_contains_ci(title, "anime"))
+        return 3; /* orange */
+    if (ascii_contains_ci(id, "vocaloid") ||
+        ascii_contains_ci(title, "vocaloid"))
+        return 7; /* pale */
+    if (ascii_contains_ci(id, "game") || ascii_contains_ci(title, "game"))
+        return 2; /* green */
+    if (ascii_contains_ci(id, "pop") || ascii_contains_ci(title, "pop"))
+        return 0; /* cyan */
+
+    return (unsigned char)(idx % 7);
+}
+
+/* --- background title-render worker --------------------------------------
+ * The picker thread only *publishes* the desired visible window (slot -> key +
+ * title text); a dedicated worker thread renders any slot whose desired key
+ * differs from what it last rendered. This keeps input responsive and lets all
+ * visible titles appear together instead of dripping in one per tick. */
+#define RENDER_KEY_MAX ESE_CATEGORY_ID_MAX  /* widest key (category id) */
+static struct {
+    char want_key[TAIKO_OVL_TITLE_IMAGE_SLOTS][RENDER_KEY_MAX];
+    char want_title[TAIKO_OVL_TITLE_IMAGE_SLOTS][ESE_SONG_TITLE_MAX];
+    char have_key[TAIKO_OVL_TITLE_IMAGE_SLOTS][RENDER_KEY_MAX];
+    unsigned int want_outline[TAIKO_OVL_TITLE_IMAGE_SLOTS]; /* 0x00RRGGBB */
+    volatile int active;
+    volatile int lock;
+} g_render;
+
+/* Darken a tab's ARGB to ~45% for the glyph outline, like the game. */
+static unsigned int outline_for_palette(int palette_index) {
+    unsigned int c = taiko_overlay_carousel_color_argb(palette_index);
+    unsigned int r = ((c >> 16) & 0xff) * 45 / 100;
+    unsigned int g = ((c >> 8) & 0xff) * 45 / 100;
+    unsigned int b = (c & 0xff) * 45 / 100;
+    return (r << 16) | (g << 8) | b;
+}
+
+static void render_lock(void) {
+    while (__sync_lock_test_and_set(&g_render.lock, 1))
+        sys_ppu_thread_yield();
+}
+static void render_unlock(void) { __sync_lock_release(&g_render.lock); }
+
+/* Publish slot i's desired content (key + title + outline). Empty key clears. */
+static void render_publish(int slot, const char *key, const char *title,
+                           unsigned int outline_rgb) {
+    if (slot < 0 || slot >= TAIKO_OVL_TITLE_IMAGE_SLOTS)
+        return;
+    render_lock();
+    snprintf(g_render.want_key[slot], RENDER_KEY_MAX, "%s", key ? key : "");
+    snprintf(g_render.want_title[slot], ESE_SONG_TITLE_MAX, "%s",
+             title ? title : "");
+    g_render.want_outline[slot] = outline_rgb;
+    render_unlock();
+}
+
+/* Slot is ready iff the worker has rendered the desired key. */
+static int render_ready(int slot, const char *key) {
+    if (slot < 0 || slot >= TAIKO_OVL_TITLE_IMAGE_SLOTS || !key)
+        return 0;
+    render_lock();
+    int r = strncmp(g_render.have_key[slot], key, RENDER_KEY_MAX) == 0;
+    render_unlock();
+    return r;
+}
+
+static void picker_clear_title_slots(void) {
+    render_lock();
+    for (int i = 0; i < TAIKO_OVL_TITLE_IMAGE_SLOTS; i++) {
+        g_render.want_key[i][0] = 0;
+        g_render.have_key[i][0] = 0;
+        taiko_overlay_title_image_set(i, NULL, 0);
+    }
+    render_unlock();
+}
+
+static void title_render_worker(uint64_t arg) {
+    (void)arg;
+    for (;;) {
+        if (!g_render.active) {
+            sys_timer_usleep(50 * 1000);
+            continue;
+        }
+        int did = 0;
+        for (int s = 0; s < TAIKO_OVL_TITLE_IMAGE_SLOTS; s++) {
+            char key[RENDER_KEY_MAX], title[ESE_SONG_TITLE_MAX], have[RENDER_KEY_MAX];
+            unsigned int outline;
+            render_lock();
+            snprintf(key, sizeof key, "%s", g_render.want_key[s]);
+            snprintf(title, sizeof title, "%s", g_render.want_title[s]);
+            snprintf(have, sizeof have, "%s", g_render.have_key[s]);
+            outline = g_render.want_outline[s];
+            render_unlock();
+
+            if (key[0] == 0) {
+                if (have[0]) {
+                    taiko_overlay_title_image_set(s, NULL, 0);
+                    render_lock(); g_render.have_key[s][0] = 0; render_unlock();
+                }
+                continue;
+            }
+            if (strncmp(key, have, RENDER_KEY_MAX) == 0)
+                continue;
+
+            if (taiko_title_render_argb(title, g_title_fetch_buf,
+                                        TAIKO_OVL_TITLE_IMAGE_W,
+                                        TAIKO_OVL_TITLE_IMAGE_H, outline))
+                taiko_overlay_title_image_set(s, g_title_fetch_buf, TITLE_IMAGE_BYTES);
+            else
+                taiko_overlay_title_image_set(s, NULL, 0);
+
+            /* Mark rendered (even on failure) only if still the wanted key, so a
+             * navigation that changed the slot meanwhile gets re-rendered. */
+            render_lock();
+            if (strncmp(g_render.want_key[s], key, RENDER_KEY_MAX) == 0)
+                snprintf(g_render.have_key[s], RENDER_KEY_MAX, "%s", key);
+            render_unlock();
+            did = 1;
+        }
+        sys_timer_usleep(did ? 2 * 1000 : 16 * 1000);
+    }
+}
+
+/* Publish the visible category window (slot i = category at window pos first+i). */
+static void picker_publish_category_titles(const ese_category_entry_t *cats,
+                                           int count, int sel) {
+    int first = picker_window_start(count, sel, TAIKO_OVL_CAROUSEL_MAX);
+    for (int i = 0; i < TAIKO_OVL_TITLE_IMAGE_SLOTS; i++) {
+        int idx = first + i;
+        if (idx < count)
+            render_publish(i, cats[idx].id,
+                           cats[idx].title[0] ? cats[idx].title : cats[idx].id,
+                           outline_for_palette(picker_category_palette(&cats[idx], idx)));
+        else
+            render_publish(i, "", "", 0);
+    }
+}
+
+/* Song mode slot map: songs occupy 0..ESE_SONG_PAGE_MAX-1, the three nav
+ * buttons take the top slots. ESE_SONG_PAGE_MAX(10) == SLOTS-3, so no overlap. */
+#define SONG_NAV_PREV (TAIKO_OVL_TITLE_IMAGE_SLOTS - 3)
+#define SONG_NAV_BACK (TAIKO_OVL_TITLE_IMAGE_SLOTS - 2)
+#define SONG_NAV_NEXT (TAIKO_OVL_TITLE_IMAGE_SLOTS - 1)
+
+/* Publish the visible song window (slot i = song index i) plus the nav labels.
+ * Songs take the category's tab colour; nav buttons match their drawn tab
+ * colour (PALE for Previous/Next, BROWN for Back). */
+static void picker_publish_song_titles(const ese_song_entry_t *songs, int count,
+                                       int has_prev, int has_next,
+                                       unsigned char category_palette) {
+    unsigned int song_outline = outline_for_palette(category_palette);
+    unsigned int pale_outline  = outline_for_palette(7); /* SWATCH_PALE */
+    unsigned int brown_outline = outline_for_palette(5); /* SWATCH_BROWN */
+    for (int i = 0; i < ESE_SONG_PAGE_MAX; i++) {
+        if (i < count && songs[i].id[0])
+            render_publish(i, songs[i].id,
+                           songs[i].title[0] ? songs[i].title : songs[i].id,
+                           song_outline);
+        else
+            render_publish(i, "", "", 0);
+    }
+    render_publish(SONG_NAV_PREV, has_prev ? "Previous" : "", "Previous", pale_outline);
+    render_publish(SONG_NAV_BACK, "Back", "Back", brown_outline);
+    render_publish(SONG_NAV_NEXT, has_next ? "Next" : "", "Next", pale_outline);
+}
+
+static signed char nav_slot_ready(int slot, const char *label) {
+    return render_ready(slot, label) ? (signed char)slot
+                                     : (signed char)TAIKO_OVL_TITLE_IMAGE_NONE;
+}
+
+static signed char picker_title_slot_for_song(const ese_song_entry_t *songs,
+                                              int idx, int count) {
+    if (!songs || idx < 0 || idx >= count ||
+        idx >= TAIKO_OVL_TITLE_IMAGE_SLOTS || !songs[idx].id[0])
+        return (signed char)TAIKO_OVL_TITLE_IMAGE_NONE;
+    return render_ready(idx, songs[idx].id)
+           ? (signed char)idx : (signed char)TAIKO_OVL_TITLE_IMAGE_NONE;
+}
+
+static void picker_render_categories(const ese_category_entry_t *cats,
+                                     int count, int sel,
+                                     const char *status) {
+    static char labels[TAIKO_OVL_CAROUSEL_MAX][ESE_SONG_TITLE_MAX];
+    static char values[TAIKO_OVL_CAROUSEL_MAX][24];
+    static unsigned char palette[TAIKO_OVL_CAROUSEL_MAX];
+    static unsigned char kinds[TAIKO_OVL_CAROUSEL_MAX];
+    static signed char image_slots[TAIKO_OVL_CAROUSEL_MAX];
+    const char *lptrs[TAIKO_OVL_CAROUSEL_MAX];
+    const char *vptrs[TAIKO_OVL_CAROUSEL_MAX];
+
+    int first = picker_window_start(count, sel, TAIKO_OVL_CAROUSEL_MAX);
+    int visible = count - first;
+    if (visible > TAIKO_OVL_CAROUSEL_MAX)
+        visible = TAIKO_OVL_CAROUSEL_MAX;
     if (visible < 0)
         visible = 0;
 
     for (int i = 0; i < visible; i++) {
-        int idx = top + i;
+        int idx = first + i;
         snprintf(labels[i], sizeof labels[i], "%s", cats[idx].title[0]
                  ? cats[idx].title : cats[idx].id);
-        snprintf(values[i], sizeof values[i], "%d", cats[idx].song_count);
-        kinds[i] = TAIKO_OVL_ROW_ACTION;
+        snprintf(values[i], sizeof values[i], "%d songs",
+                 cats[idx].song_count);
+        palette[i] = picker_category_palette(&cats[idx], idx);
+        kinds[i] = TAIKO_OVL_CAROUSEL_CATEGORY;
+        /* Window slot i carries this category's rendered title once ready. */
+        image_slots[i] = (i < TAIKO_OVL_TITLE_IMAGE_SLOTS &&
+                          render_ready(i, cats[idx].id))
+                         ? (signed char)i : (signed char)TAIKO_OVL_TITLE_IMAGE_NONE;
         lptrs[i] = labels[i];
         vptrs[i] = values[i];
     }
 
-    taiko_overlay_menu_set("Custom Songs", lptrs, vptrs, kinds,
-                           visible, sel - top, 0,
-                           status ? status : cats[sel].id,
-                           "UP/DOWN move  X open  O close");
-    taiko_overlay_menu_active(1);
-}
-
-static int song_row_to_index(int row, int has_prev) {
-    return row - (has_prev ? 1 : 0);
+    taiko_overlay_carousel_set("Custom Songs", lptrs, vptrs, palette, kinds,
+                               image_slots, visible, sel - first,
+                               status ? status : cats[sel].id,
+                               "LEFT/RIGHT move  X open  O close");
+    taiko_overlay_carousel_active(1);
 }
 
 static int build_cached_song_root(char *out, unsigned int cap,
@@ -467,6 +697,7 @@ static int prepare_selected_song(const ese_song_entry_t *song) {
     /* Hide the song list; ese_song_prepare_and_cache drives a centred
      * loading-bar card while it converts/downloads. */
     taiko_overlay_menu_active(0);
+    taiko_overlay_carousel_active(0);
     rc = ese_song_prepare_and_cache(song->id, song->title[0]
                                     ? song->title : song->id,
                                     courses, ESE_COURSE_LIST_MAX,
@@ -496,54 +727,80 @@ static int prepare_selected_song(const ese_song_entry_t *song) {
 static int picker_render_songs(const ese_song_entry_t *songs, int count,
                                int total, int offset, int sel,
                                const char *category_title,
+                               unsigned char category_palette,
                                const char *status) {
-    static char labels[PICKER_VISIBLE_ROWS][ESE_SONG_TITLE_MAX];
-    static char values[PICKER_VISIBLE_ROWS][16];
-    static unsigned char kinds[PICKER_VISIBLE_ROWS];
+    static char labels[TAIKO_OVL_CAROUSEL_MAX][ESE_SONG_TITLE_MAX];
+    static char values[TAIKO_OVL_CAROUSEL_MAX][24];
+    static unsigned char palette[TAIKO_OVL_CAROUSEL_MAX];
+    static unsigned char kinds[TAIKO_OVL_CAROUSEL_MAX];
+    static signed char image_slots[TAIKO_OVL_CAROUSEL_MAX];
     char title[96];
     char short_category[73];
-    const char *lptrs[PICKER_VISIBLE_ROWS];
-    const char *vptrs[PICKER_VISIBLE_ROWS];
+    const char *lptrs[TAIKO_OVL_CAROUSEL_MAX];
+    const char *vptrs[TAIKO_OVL_CAROUSEL_MAX];
     int row = 0;
     int has_prev = offset > 0;
     int has_next = offset + count < total;
 
-    if (has_prev && row < PICKER_VISIBLE_ROWS) {
-        snprintf(labels[row], sizeof labels[row], "< Previous page");
+    if (has_prev && row < TAIKO_OVL_CAROUSEL_MAX) {
+        snprintf(labels[row], sizeof labels[row], "Previous");
         values[row][0] = 0;
-        kinds[row] = TAIKO_OVL_ROW_ACTION;
+        palette[row] = 8;
+        kinds[row] = TAIKO_OVL_CAROUSEL_MORE;
+        image_slots[row] = nav_slot_ready(SONG_NAV_PREV, "Previous");
         lptrs[row] = labels[row];
         vptrs[row] = values[row];
         row++;
     }
 
-    for (int i = 0; i < count && row < PICKER_VISIBLE_ROWS; i++, row++) {
+    if (row < TAIKO_OVL_CAROUSEL_MAX) {
+        snprintf(labels[row], sizeof labels[row], "Back");
+        values[row][0] = 0;
+        palette[row] = 6;
+        kinds[row] = TAIKO_OVL_CAROUSEL_BACK;
+        image_slots[row] = nav_slot_ready(SONG_NAV_BACK, "Back");
+        lptrs[row] = labels[row];
+        vptrs[row] = values[row];
+        row++;
+    }
+
+    /* Next sits right beside Back so paging is a quick flick, not a long scroll. */
+    if (has_next && row < TAIKO_OVL_CAROUSEL_MAX) {
+        snprintf(labels[row], sizeof labels[row], "Next");
+        values[row][0] = 0;
+        palette[row] = 8;
+        kinds[row] = TAIKO_OVL_CAROUSEL_MORE;
+        image_slots[row] = nav_slot_ready(SONG_NAV_NEXT, "Next");
+        lptrs[row] = labels[row];
+        vptrs[row] = values[row];
+        row++;
+    }
+
+    for (int i = 0; i < count && row < TAIKO_OVL_CAROUSEL_MAX; i++, row++) {
         snprintf(labels[row], sizeof labels[row], "%s", songs[i].title[0]
                  ? songs[i].title : songs[i].id);
         snprintf(values[row], sizeof values[row], "%d/%d",
                  offset + i + 1, total);
-        kinds[row] = TAIKO_OVL_ROW_ACTION;
+        palette[row] = category_palette;
+        kinds[row] = TAIKO_OVL_CAROUSEL_SONG;
+        image_slots[row] = picker_title_slot_for_song(songs, i, count);
         lptrs[row] = labels[row];
         vptrs[row] = values[row];
-    }
-
-    if (has_next && row < PICKER_VISIBLE_ROWS) {
-        snprintf(labels[row], sizeof labels[row], "Next page >");
-        values[row][0] = 0;
-        kinds[row] = TAIKO_OVL_ROW_ACTION;
-        lptrs[row] = labels[row];
-        vptrs[row] = values[row];
-        row++;
     }
 
     copy_limited(short_category, sizeof short_category,
                  category_title ? category_title : "Songs", 72);
     snprintf(title, sizeof title, "Custom Songs - %s", short_category);
-    taiko_overlay_menu_set(title, lptrs, vptrs, kinds, row,
-                           sel, 0,
-                           status ? status : "Select a song to inspect its id",
-                           "UP/DOWN move  LEFT/RIGHT page  X select  O back");
-    taiko_overlay_menu_active(1);
+
+    char footer[96];
+    int page  = total > 0 ? offset / ESE_SONG_PAGE_MAX + 1 : 1;
+    int pages = total > 0 ? (total + ESE_SONG_PAGE_MAX - 1) / ESE_SONG_PAGE_MAX : 1;
+    snprintf(footer, sizeof footer,
+             "Page %d/%d   LEFT/RIGHT move  X select  O back", page, pages);
+    taiko_overlay_carousel_set(title, lptrs, vptrs, palette, kinds,
+                               image_slots, row, sel,
+                               status ? status : "Select a song", footer);
+    taiko_overlay_carousel_active(1);
     return row;
 }
 
@@ -552,7 +809,6 @@ static int custom_song_picker_run(void) {
     ese_song_entry_t songs[ESE_SONG_PAGE_MAX];
     int cat_count;
     int cat_sel = 0;
-    int cat_top = 0;
     int song_count = 0;
     int song_total = 0;
     int song_offset = 0;
@@ -569,11 +825,14 @@ static int custom_song_picker_run(void) {
 
     taiko_frame_set_gated(1);
     (void)menu_pad_pressed();
+    picker_clear_title_slots();
+    g_render.active = 1; /* wake the render worker for this picker session */
 
     cat_count = ese_song_fetch_categories(cats, ESE_CATEGORY_LIST_MAX);
     if (cat_count <= 0) {
         taiko_overlay_show_prompt("Categories failed");
         taiko_overlay_menu_active(0);
+        taiko_overlay_carousel_active(0);
         taiko_frame_set_gated(0);
         (void)menu_pad_pressed();
         return 0;
@@ -583,34 +842,35 @@ static int custom_song_picker_run(void) {
         uint32_t edge;
 
         if (mode == 0) {
-            if (cat_sel < cat_top)
-                cat_top = cat_sel;
-            if (cat_sel >= cat_top + PICKER_VISIBLE_ROWS)
-                cat_top = cat_sel - PICKER_VISIBLE_ROWS + 1;
-            picker_render_categories(cats, cat_count, cat_sel, cat_top,
+            picker_render_categories(cats, cat_count, cat_sel,
                                      status_buf[0] ? status_buf : NULL);
         } else {
             song_rows = picker_render_songs(songs, song_count, song_total,
                                             song_offset, song_sel,
                                             cats[cat_sel].title,
+                                            picker_category_palette(
+                                                &cats[cat_sel], cat_sel),
                                             status_buf[0] ? status_buf : NULL);
         }
 
         edge = menu_pad_pressed();
-        if (mode == 0 && (edge & MENU_BTN_UP))
+        if (mode == 0 && (edge & (MENU_BTN_LEFT | MENU_BTN_UP)))
             cat_sel = picker_move(cat_sel, -1, cat_count);
-        if (mode == 0 && (edge & MENU_BTN_DOWN))
+        if (mode == 0 && (edge & (MENU_BTN_RIGHT | MENU_BTN_DOWN)))
             cat_sel = picker_move(cat_sel, 1, cat_count);
-        if (mode == 1 && (edge & MENU_BTN_UP))
+        if (mode == 1 && (edge & (MENU_BTN_LEFT | MENU_BTN_UP)))
             song_sel = picker_move(song_sel, -1, song_rows);
-        if (mode == 1 && (edge & MENU_BTN_DOWN))
+        if (mode == 1 && (edge & (MENU_BTN_RIGHT | MENU_BTN_DOWN)))
             song_sel = picker_move(song_sel, 1, song_rows);
         if (edge & MENU_BTN_CIRCLE) {
             status_buf[0] = 0;
             if (mode == 1) {
                 mode = 0;
+                picker_clear_title_slots();
             } else {
                 taiko_overlay_menu_active(0);
+                taiko_overlay_carousel_active(0);
+                picker_clear_title_slots();
                 taiko_frame_set_gated(0);
                 (void)menu_pad_pressed();
                 return 0;
@@ -634,11 +894,16 @@ static int custom_song_picker_run(void) {
                 } else {
                     status_buf[0] = 0;
                     mode = 1;
+                    picker_clear_title_slots(); /* drop category images */
                 }
             } else {
                 int has_prev = song_offset > 0;
                 int has_next = song_offset + song_count < song_total;
-                int song_idx = song_row_to_index(song_sel, has_prev);
+                /* Row layout: [Previous?][Back][Next?][songs...] */
+                int back_row = has_prev ? 1 : 0;
+                int next_row = has_next ? back_row + 1 : -1;
+                int first_song_row = back_row + 1 + (has_next ? 1 : 0);
+                int song_idx = song_sel - first_song_row;
                 if (has_prev && song_sel == 0) {
                     song_offset -= ESE_SONG_PAGE_MAX;
                     if (song_offset < 0)
@@ -650,48 +915,40 @@ static int custom_song_picker_run(void) {
                                                      songs, ESE_SONG_PAGE_MAX,
                                                      &song_total);
                     status_buf[0] = 0;
-                } else if (has_next && song_idx >= song_count) {
-                    song_offset += ESE_SONG_PAGE_MAX;
+                } else if (song_sel == back_row) {
+                    status_buf[0] = 0;
+                    mode = 0;
                     song_sel = 0;
+                    picker_clear_title_slots();
+                } else if (song_sel == next_row) {
+                    song_offset += ESE_SONG_PAGE_MAX;
                     song_count = ese_song_fetch_page(cats[cat_sel].id,
                                                      song_offset,
                                                      ESE_SONG_PAGE_MAX,
                                                      songs, ESE_SONG_PAGE_MAX,
                                                      &song_total);
+                    /* Stay on Next (row 2 = [Prev][Back][Next]) so X spams pages;
+                     * if this is the last page, fall back to Back (row 1). */
+                    song_sel = (song_offset + song_count < song_total) ? 2 : 1;
                     status_buf[0] = 0;
                 } else if (song_idx >= 0 && song_idx < song_count) {
                     int ok = prepare_selected_song(&songs[song_idx]);
                     taiko_overlay_menu_active(0);
+                    taiko_overlay_carousel_active(0);
+                    picker_clear_title_slots();
                     taiko_frame_set_gated(0);
                     (void)menu_pad_pressed();
                     return ok;
                 }
             }
         }
-        if (mode == 1 && (edge & (MENU_BTN_LEFT | MENU_BTN_RIGHT))) {
-            if ((edge & MENU_BTN_LEFT) && song_offset > 0) {
-                song_offset -= ESE_SONG_PAGE_MAX;
-                if (song_offset < 0)
-                    song_offset = 0;
-                song_sel = 0;
-                song_count = ese_song_fetch_page(cats[cat_sel].id,
-                                                 song_offset,
-                                                 ESE_SONG_PAGE_MAX,
-                                                 songs, ESE_SONG_PAGE_MAX,
-                                                 &song_total);
-                status_buf[0] = 0;
-            } else if ((edge & MENU_BTN_RIGHT) &&
-                       song_offset + song_count < song_total) {
-                song_offset += ESE_SONG_PAGE_MAX;
-                song_sel = 0;
-                song_count = ese_song_fetch_page(cats[cat_sel].id,
-                                                 song_offset,
-                                                 ESE_SONG_PAGE_MAX,
-                                                 songs, ESE_SONG_PAGE_MAX,
-                                                 &song_total);
-                status_buf[0] = 0;
-            }
-        }
+
+        if (mode == 1)
+            picker_publish_song_titles(songs, song_count, song_offset > 0,
+                                       song_offset + song_count < song_total,
+                                       picker_category_palette(&cats[cat_sel], cat_sel));
+        else
+            picker_publish_category_titles(cats, cat_count, cat_sel);
 
         sys_timer_usleep(30 * 1000);
     }
@@ -767,6 +1024,7 @@ static void custom_song_launcher_thread(uint64_t arg) {
 
             if (f6_edge && launch_retry == 0) {
                 int picker_rc = custom_song_picker_run();
+                g_render.active = 0; /* idle the worker until next open */
                 armed = picker_rc > 0;
                 saw_gameplay = 0;
                 launch_requested = picker_rc == 2;
@@ -776,6 +1034,7 @@ static void custom_song_launcher_thread(uint64_t arg) {
             } else if (combo_held) {
                 if (++hold >= OPEN_HOLD_TICKS) {
                     int picker_rc = custom_song_picker_run();
+                    g_render.active = 0; /* idle the worker until next open */
                     armed = picker_rc > 0;
                     saw_gameplay = 0;
                     launch_requested = picker_rc == 2;
@@ -808,4 +1067,11 @@ void custom_song_launcher_start(void) {
                                    "taiko_custom_song");
     if (rc != 0)
         dbg_print_hex32("[custom_song] thread create rc", (uint32_t)rc);
+
+    /* Dedicated title-render worker (FreeType); keeps the picker responsive. */
+    sys_ppu_thread_t rtid = 0;
+    rc = sys_ppu_thread_create(&rtid, title_render_worker, 0,
+                               1002, 128 * 1024, 0, "taiko_title_render");
+    if (rc != 0)
+        dbg_print_hex32("[custom_song] render thread create rc", (uint32_t)rc);
 }
