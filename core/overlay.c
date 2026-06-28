@@ -176,6 +176,8 @@ static uint32_t *g_qr_tex;
 static uint32_t g_title_image_io[TAIKO_OVL_TITLE_IMAGE_SLOTS];
 static unsigned char *g_title_image[TAIKO_OVL_TITLE_IMAGE_SLOTS];
 static volatile int g_title_image_valid[TAIKO_OVL_TITLE_IMAGE_SLOTS];
+/* µs timestamp when a slot's image became valid; drives the reveal animation. */
+static volatile uint64_t g_title_image_ready_us[TAIKO_OVL_TITLE_IMAGE_SLOTS];
 static overlay_vertex_t *g_text_vtx;
 static uint32_t g_text_vtx_io;
 static uint32_t g_text_vtx_next;
@@ -1391,17 +1393,33 @@ static int append_stacked_text(overlay_vertex_t *v, int *count, int max_vtx,
     return 1;
 }
 
+/* Reveal animation: title slides ~16px down into place while fading in, over
+ * REVEAL_US, starting when the slot's image became ready. Returns alpha (0=not
+ * yet visible) and a downward y offset (negative = still above its resting y). */
+#define REVEAL_US     120000
+#define REVEAL_SLIDE  16
+static uint8_t title_reveal(int slot, int *dy) {
+    uint64_t r = g_title_image_ready_us[slot];
+    uint64_t now = (uint64_t)sys_time_get_system_time();
+    if (!r || now < r) { *dy = -REVEAL_SLIDE; return 0; }
+    uint64_t e = now - r;
+    if (e >= REVEAL_US) { *dy = 0; return 255; }
+    int p = (int)(e * 256 / REVEAL_US);             /* 0..255 progress */
+    *dy = -(REVEAL_SLIDE * (256 - p) / 256);        /* slides up->0 */
+    return (uint8_t)(p ? p : 1);                    /* never fully invisible once started */
+}
+
 static int append_title_image_vertices(overlay_vertex_t *v, int *count,
                                        int max_vtx, uint32_t fb_w,
                                        uint32_t fb_h, int x, int y,
-                                       int w, int h) {
-    if (!v || !count || w <= 0 || h <= 0 || *count + 6 > max_vtx)
+                                       int w, int h, uint8_t alpha, int dy) {
+    if (!v || !count || w <= 0 || h <= 0 || alpha == 0 || *count + 6 > max_vtx)
         return 0;
-    uint32_t color = 0xFFFFFFFFu;
+    uint32_t color = ((uint32_t)alpha << 24) | 0x00FFFFFFu;
     float x0 = (float)x;
-    float y0 = (float)y;
+    float y0 = (float)(y + dy);
     float x1 = (float)(x + w);
-    float y1 = (float)(y + h);
+    float y1 = (float)(y + dy + h);
     text_push_vertex(v, count, x0, y0, 0.0f, 0.0f, color, fb_w, fb_h);
     text_push_vertex(v, count, x1, y0, 1.0f, 0.0f, color, fb_w, fb_h);
     text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, color, fb_w, fb_h);
@@ -1549,14 +1567,14 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                 iw = ih * TAIKO_OVL_TITLE_IMAGE_W / TAIKO_OVL_TITLE_IMAGE_H;
                 if (iw < 32) iw = 32;
                 if (iw > 82) iw = 82;
+                int rdy; uint8_t ralpha = title_reveal(image_slot, &rdy);
                 int first = img_vtx_count;
-                if (!append_title_image_vertices(img_vtx, &img_vtx_count,
+                if (append_title_image_vertices(img_vtx, &img_vtx_count,
                                                  img_max_vtx, b.width,
                                                  b.height,
                                                  x + w - iw - 24, y + 58,
-                                                 iw, ih))
-                    return;
-                if (img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+                                                 iw, ih, ralpha, rdy) &&
+                    img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
                     img_draws[img_draw_count].slot = image_slot;
                     img_draws[img_draw_count].first = first;
                     img_draws[img_draw_count].count = img_vtx_count - first;
@@ -1573,23 +1591,9 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                                       w - 36, label_c, m.values[i]))
                 return;
 
-            if (kind == TAIKO_OVL_CAROUSEL_SONG && !image_valid) {
-                int art = tile_h / 3;
-                if (art > w - 70) art = w - 70;
-                if (art > 150) art = 150;
-                if (art > 50) {
-                    int ax = x + (w - art) / 2;
-                    int ay = y + tile_h / 2 - art / 2;
-                    if (!append_rect(&cmd, &b, ax, ay, art, art,
-                                     SWATCH_ORANGE) ||
-                        !append_rect(&cmd, &b, ax + 8, ay + 8,
-                                     art - 16, art - 16, SWATCH_ACCENT))
-                        return;
-                    append_centered_text(vtx, &vtx_count, max_vtx,
-                                         b.width, b.height, ax, ay + art / 2 - 10,
-                                         art, TEXT_DARK, "TITLE");
-                }
-            } else {
+            /* Songs: the vertical title image slides/fades in when ready; no
+             * legacy placeholder. Other kinds keep their status text. */
+            if (kind != TAIKO_OVL_CAROUSEL_SONG) {
                 char lines[OVERLAY_DESC_LINES][OVERLAY_TEXT_CAP];
                 int ln = wrap_text(m.status, w - 42, OVERLAY_DESC_LINES, lines);
                 int ty = y + tile_h / 2 - (ln * 22) / 2;
@@ -1613,12 +1617,13 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                          TAIKO_OVL_TITLE_IMAGE_W;
                 }
                 if (iw > 0 && ih > 0) {
+                    int rdy; uint8_t ralpha = title_reveal(image_slot, &rdy);
                     int first = img_vtx_count;
                     drew_image = append_title_image_vertices(
                         img_vtx, &img_vtx_count, img_max_vtx,
                         b.width, b.height,
                         x + (w - iw) / 2, y + (tile_h - ih) / 2,
-                        iw, ih);
+                        iw, ih, ralpha, rdy);
                     if (drew_image && img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
                         img_draws[img_draw_count].slot = image_slot;
                         img_draws[img_draw_count].first = first;
@@ -1627,7 +1632,9 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                     }
                 }
             }
-            if (!drew_image &&
+            /* Songs reveal via the fading image only (no legacy stacked text).
+             * Other kinds keep the text fallback until their image is ready. */
+            if (!drew_image && kind != TAIKO_OVL_CAROUSEL_SONG &&
                 !append_stacked_text(vtx, &vtx_count, max_vtx,
                                      b.width, b.height, x + w / 2,
                                      y + 18, tile_h - 36,
@@ -1917,12 +1924,15 @@ void taiko_overlay_title_image_set(int slot, const void *argb,
     if (slot < 0 || slot >= TAIKO_OVL_TITLE_IMAGE_SLOTS)
         return;
     g_title_image_valid[slot] = 0;
-    if (!argb || bytes != need)
+    if (!argb || bytes != need) {
+        g_title_image_ready_us[slot] = 0;   /* cleared: replay reveal next time */
         return;
+    }
     if (!ensure_overlay_mapped())
         return;
     memcpy(g_title_image[slot], argb, need);
     flush_dcache(g_title_image[slot], need);
+    g_title_image_ready_us[slot] = (uint64_t)sys_time_get_system_time();
     g_title_image_valid[slot] = 1;
 }
 

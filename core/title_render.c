@@ -90,6 +90,9 @@ static float beside_y_off(int cp, float ch) {
     return (cp == '\'' || cp == '"') ? ch * 0.7f : 0.0f;
 }
 
+/* Fast, exact truncating x/255 for x in [0,65535] (avoids slow PPE divide). */
+static inline uint8_t div255(unsigned x) { return (uint8_t)((x * 0x8081u) >> 23); }
+
 /* --- premultiplied RGBA working buffer ------------------------------------ */
 typedef struct { uint8_t *px; int w, h; } Buf;
 
@@ -113,10 +116,10 @@ static void blit_glyph(Buf *dst, const unsigned char *a, int aw, int ah, int pit
             if (!cov) continue;
             uint8_t *p = dst->px + ((size_t)oy * dst->w + ox) * 4;
             int ia = 255 - cov;
-            p[0] = (uint8_t)((cr * cov + p[0] * ia) / 255);
-            p[1] = (uint8_t)((cg * cov + p[1] * ia) / 255);
-            p[2] = (uint8_t)((cb * cov + p[2] * ia) / 255);
-            p[3] = (uint8_t)((cov * 255 + p[3] * ia) / 255);
+            p[0] = div255(cr * cov + p[0] * ia);
+            p[1] = div255(cg * cov + p[1] * ia);
+            p[2] = div255(cb * cov + p[2] * ia);
+            p[3] = div255(cov * 255 + p[3] * ia);
         }
     }
 }
@@ -133,10 +136,10 @@ static void blit_buf(Buf *dst, const Buf *src, int dx, int dy) {
             if (!s[3]) continue;
             uint8_t *p = dst->px + ((size_t)oy * dst->w + ox) * 4;
             int ia = 255 - s[3];
-            p[0] = (uint8_t)(s[0] + p[0] * ia / 255);
-            p[1] = (uint8_t)(s[1] + p[1] * ia / 255);
-            p[2] = (uint8_t)(s[2] + p[2] * ia / 255);
-            p[3] = (uint8_t)(s[3] + p[3] * ia / 255);
+            p[0] = (uint8_t)(s[0] + div255(p[0] * ia));
+            p[1] = (uint8_t)(s[1] + div255(p[1] * ia));
+            p[2] = (uint8_t)(s[2] + div255(p[2] * ia));
+            p[3] = (uint8_t)(s[3] + div255(p[3] * ia));
         }
     }
 }
@@ -169,35 +172,160 @@ typedef struct {
     float width;
 } Item;
 
-static float cp_advance(int cp) {
-    if (FT_Load_Char(g_face, (FT_ULong)cp, FT_LOAD_DEFAULT) != 0) return 0;
-    return (float)(g_face->glyph->advance.x) / 64.0f;
+/* Precomputed disk-kernel offsets for the outline dilation (radius OUTLINE). */
+static signed char g_disk_dx[(2 * OUTLINE + 1) * (2 * OUTLINE + 1)];
+static signed char g_disk_dy[(2 * OUTLINE + 1) * (2 * OUTLINE + 1)];
+static int g_disk_n;
+static void disk_init(void) {
+    if (g_disk_n) return;
+    for (int oy = -OUTLINE; oy <= OUTLINE; oy++)
+        for (int ox = -OUTLINE; ox <= OUTLINE; ox++)
+            if (ox * ox + oy * oy <= OUTLINE * OUTLINE) {
+                g_disk_dx[g_disk_n] = (signed char)ox;
+                g_disk_dy[g_disk_n] = (signed char)oy;
+                g_disk_n++;
+            }
 }
 
-/* Draw one codepoint at cell (x, top_y); 16-stamp circle for the outline pass. */
-static void draw_cp(Buf *buf, int cp, float x, float top_y, int outline) {
-    if (FT_Load_Char(g_face, (FT_ULong)cp, FT_LOAD_RENDER) != 0) return;
-    FT_GlyphSlot g = g_face->glyph;
-    FT_Bitmap *bm = &g->bitmap;
-    if (!bm->buffer || bm->width == 0 || bm->rows == 0) return;
-    const unsigned char *a = bm->buffer;
-    int gw = (int)bm->width, gh = (int)bm->rows, pitch = bm->pitch;
-    float base_x = x + g->bitmap_left;
-    float base_y = top_y + g_ascent_px - g->bitmap_top;
-    if (outline) {
-        /* Disk dilation: stamp the glyph at every offset within radius OUTLINE
-         * for a solid, gap-free thick outline (the ring approach leaves gaps
-         * at large radius). */
-        for (int oy = -OUTLINE; oy <= OUTLINE; oy++)
-            for (int ox = -OUTLINE; ox <= OUTLINE; ox++) {
-                if (ox * ox + oy * oy > OUTLINE * OUTLINE) continue;
-                blit_glyph(buf, a, gw, gh, pitch, (int)base_x + ox,
-                           (int)base_y + oy, OUT_R, OUT_G, OUT_B);
+/* Single-threaded (title worker only): scratch for a transient dilated mask. */
+#define DIL_MAX 192
+static unsigned char g_dil[DIL_MAX * DIL_MAX];
+
+/* Disk-dilate 8bpp coverage `a` (gw x gh, stride `pitch`) into `out` (stride
+ * gw+2*OUTLINE), via cheap byte-max. Caller guarantees out is sized for the
+ * (gw+2R) x (gh+2R) result. */
+static void dilate_disk(unsigned char *out, const unsigned char *a,
+                        int gw, int gh, int pitch) {
+    disk_init();
+    int mw = gw + 2 * OUTLINE, mh = gh + 2 * OUTLINE;
+    memset(out, 0, (size_t)mw * mh);
+    for (int sy = 0; sy < gh; sy++)
+        for (int sx = 0; sx < gw; sx++) {
+            unsigned char c = a[sy * pitch + sx];
+            if (!c) continue;
+            for (int k = 0; k < g_disk_n; k++) {
+                int idx = (sy + OUTLINE + g_disk_dy[k]) * mw +
+                          (sx + OUTLINE + g_disk_dx[k]);
+                if (c > out[idx]) out[idx] = c;
             }
-    } else {
-        blit_glyph(buf, a, gw, gh, pitch, (int)base_x, (int)base_y,
-                   FILL_R, FILL_G, FILL_B);
+        }
+}
+
+/* --- per-codepoint glyph cache -------------------------------------------
+ * The dominant cost was rasterizing every glyph with FreeType ~3x per char per
+ * title (advance + outline pass + fill pass), and re-rasterizing shared letters
+ * for every title. Cache the FT coverage and the (deterministic) dilated outline
+ * mask by codepoint; FT then runs once per unique glyph and titles become pure
+ * composites of cached bitmaps. */
+typedef struct {
+    int   cp;               /* -1 = empty slot */
+    float adv;
+    short w, h, left, top;  /* glyph metrics; w==0 => blank (space etc.) */
+    unsigned char *cov;     /* w*h coverage, stride w; NULL if blank */
+    short mw, mh;           /* dilated mask dims; 0 => not built / unbuildable */
+    unsigned char *dil;     /* mw*mh outline mask, built lazily on first outline */
+} Glyph;
+
+#define GCAP  256           /* power of two; open-addressed by codepoint */
+#define GFULL (GCAP * 3 / 4)
+static Glyph g_glyphs[GCAP];
+static Glyph g_scratch;             /* transient slot when cache is full */
+static unsigned char g_scratch_cov[DIL_MAX * DIL_MAX];
+static int g_glyph_count;
+static int g_glyph_init;
+
+/* Rasterize cp via FreeType into *g; coverage copied into cov_dst (stride w). */
+static void glyph_raster(int cp, Glyph *g, unsigned char *cov_dst) {
+    g->cp = cp; g->adv = 0; g->w = g->h = g->left = g->top = 0;
+    g->cov = NULL; g->mw = g->mh = 0; g->dil = NULL;
+    if (FT_Load_Char(g_face, (FT_ULong)cp, FT_LOAD_RENDER) != 0) return;
+    FT_GlyphSlot fg = g_face->glyph;
+    FT_Bitmap *bm = &fg->bitmap;
+    g->adv  = (float)fg->advance.x / 64.0f;
+    g->left = (short)fg->bitmap_left;
+    g->top  = (short)fg->bitmap_top;
+    int gw = (int)bm->width, gh = (int)bm->rows;
+    if (!bm->buffer || gw == 0 || gh == 0) return;   /* blank glyph */
+    g->w = (short)gw; g->h = (short)gh;
+    for (int y = 0; y < gh; y++)
+        memcpy(cov_dst + (size_t)y * gw, bm->buffer + (size_t)y * bm->pitch, gw);
+    g->cov = cov_dst;
+}
+
+static const Glyph *glyph_get(int cp) {
+    if (!g_glyph_init) {
+        for (int i = 0; i < GCAP; i++) g_glyphs[i].cp = -1;
+        g_glyph_init = 1;
     }
+    unsigned mask = GCAP - 1, h = (unsigned)cp & mask;
+    Glyph *slot = NULL;
+    for (unsigned i = 0; i < GCAP; i++) {
+        Glyph *s = &g_glyphs[(h + i) & mask];
+        if (s->cp == cp) return s;            /* hit */
+        if (s->cp == -1) { slot = s; break; } /* miss; insert here */
+    }
+    if (slot && g_glyph_count < GFULL) {
+        unsigned char *cov = NULL;
+        /* Peek size first via a raster into scratch, then copy to a right-sized
+         * malloc. Simpler: raster into scratch, then dup. */
+        glyph_raster(cp, &g_scratch, g_scratch_cov);
+        if (g_scratch.cov) {
+            cov = (unsigned char *)malloc((size_t)g_scratch.w * g_scratch.h);
+            if (cov) memcpy(cov, g_scratch_cov, (size_t)g_scratch.w * g_scratch.h);
+        }
+        *slot = g_scratch;
+        slot->cov = g_scratch.cov ? cov : NULL;   /* NULL if blank or malloc fail */
+        if (g_scratch.cov && !cov) { slot->w = slot->h = 0; } /* malloc fail: blank */
+        slot->dil = NULL; slot->mw = slot->mh = 0;
+        g_glyph_count++;
+        return slot;
+    }
+    /* Cache full: transient raster, valid only until the next glyph_get. */
+    glyph_raster(cp, &g_scratch, g_scratch_cov);
+    return &g_scratch;
+}
+
+static float cp_advance(int cp) { return glyph_get(cp)->adv; }
+
+/* Draw one codepoint at cell (x, top_y). Outline pass uses the cached dilated
+ * mask (built once per glyph); fill pass blits the cached coverage. */
+static void draw_cp(Buf *buf, int cp, float x, float top_y, int outline) {
+    const Glyph *g = glyph_get(cp);
+    if (!g->cov || g->w == 0 || g->h == 0) return;
+    int gw = g->w, gh = g->h;
+    float base_x = x + g->left;
+    float base_y = top_y + g_ascent_px - g->top;
+    if (!outline) {
+        blit_glyph(buf, g->cov, gw, gh, gw, (int)base_x, (int)base_y,
+                   FILL_R, FILL_G, FILL_B);
+        return;
+    }
+    int mw = gw + 2 * OUTLINE, mh = gh + 2 * OUTLINE;
+    if (mw > DIL_MAX || mh > DIL_MAX) {
+        /* Oversized glyph: stamp the disk directly (uncached path). */
+        disk_init();
+        for (int k = 0; k < g_disk_n; k++)
+            blit_glyph(buf, g->cov, gw, gh, gw, (int)base_x + g_disk_dx[k],
+                       (int)base_y + g_disk_dy[k], OUT_R, OUT_G, OUT_B);
+        return;
+    }
+    const unsigned char *m;
+    if (g != &g_scratch) {
+        /* Persistent glyph: build & cache the dilated mask once. */
+        Glyph *gw_ = (Glyph *)g;
+        if (!gw_->dil) {
+            unsigned char *d = (unsigned char *)malloc((size_t)mw * mh);
+            if (d) { dilate_disk(d, g->cov, gw, gh, gw);
+                     gw_->dil = d; gw_->mw = (short)mw; gw_->mh = (short)mh; }
+        }
+        if (gw_->dil) m = gw_->dil;
+        else { dilate_disk(g_dil, g->cov, gw, gh, gw); m = g_dil; } /* malloc fail */
+    } else {
+        dilate_disk(g_dil, g->cov, gw, gh, gw);   /* transient glyph */
+        m = g_dil;
+    }
+    blit_glyph(buf, m, mw, mh, mw, (int)base_x - OUTLINE, (int)base_y - OUTLINE,
+               OUT_R, OUT_G, OUT_B);
 }
 
 /* Rotate-set char: render glyph upright in a cell, rotate 90 CW, center. */
