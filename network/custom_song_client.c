@@ -18,7 +18,10 @@
 
 #define ESE_API_CATEGORIES_PATH "/api/tjarepo/songs/categories"
 #define ESE_CUSTOM_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
-#define ESE_DOWNLOAD_CHUNK     (512 * 1024)
+/* Small chunks keep each download's peak heap low: the glyph cache fragments
+ * the 3 MB libc heap, so a big contiguous chunk+TLS alloc on a later chunk fails
+ * (asset download status=0). 128 KB stays well clear. */
+#define ESE_DOWNLOAD_CHUNK     (128 * 1024)
 #define ESE_ASSET_MAX         16
 #define ESE_ASSET_PATH_MAX    128
 #define ESE_MANIFEST_MAX      HTTP_CLIENT_BODY_MAX
@@ -51,6 +54,14 @@ static void copy_limited(char *out, size_t cap, const char *src,
  * (no percentage). ponytail: per-asset/per-poll granularity, no chunk-level
  * progress. */
 static void loading_screen(const char *message, int num, int den) {
+    /* When the difficulty page is open, show progress there (a real bar) instead
+     * of the popup card. */
+    if (taiko_overlay_diffmode_is_on()) {
+        int pct = (den > 0 && num >= 0) ? num * 100 / den : -1;
+        taiko_overlay_diffmode_busy(message, pct);
+        return;
+    }
+
     static unsigned spin;            /* advances each indeterminate frame */
     char bar[48];
     int determinate = (den > 0 && num >= 0);
@@ -766,6 +777,20 @@ static int write_local_manifest(const char *song_id,
     return write_file(path, body, len);
 }
 
+int ese_song_is_cached(const char *song_id) {
+    char root[192], path[256];
+    int fd = -1;
+    if (!song_id || !song_id[0])
+        return 0;
+    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+        !append_path(path, sizeof path, root, "manifest.json"))
+        return 0;
+    if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+        return 0;
+    cellFsClose(fd);
+    return 1;
+}
+
 int ese_song_prepare_and_cache(const char *song_id, const char *title,
                                ese_course_entry_t *courses, int course_cap,
                                int *out_course_count) {
@@ -784,6 +809,59 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
         *out_course_count = 0;
     if (courses && course_cap > 0)
         memset(courses, 0, sizeof(courses[0]) * (size_t)course_cap);
+
+    /* Fast path: a local manifest.json is only written after a full successful
+     * convert+download. Reuse it unless a cheap one-shot hash check proves the
+     * source changed — so cached launches skip /prepare + status polling and are
+     * near-instant, while edited songs still re-download. Offline (hash request
+     * fails) keeps the local cache. */
+    if (courses && course_cap > 0 && out_course_count) {
+        char froot[192], fpath[256];
+        size_t mlen = 0;
+        unsigned char *local = NULL;
+        if (append_path(froot, sizeof froot, ESE_CUSTOM_ROOT, song_id) &&
+            append_path(fpath, sizeof fpath, froot, "manifest.json"))
+            local = read_file_alloc(fpath, &mlen);
+        if (local) {
+            char lhash[64];
+            lhash[0] = 0;
+            json_get_string_after(local, local + mlen, "\"source_hash\"",
+                                  lhash, sizeof lhash);
+
+            int stale = 0;
+            char hpath[160];
+            http_response_t hr;
+            if (lhash[0] &&
+                snprintf(hpath, sizeof hpath,
+                         "/api/tjarepo/songs/%s/hash", song_id) > 0) {
+                memset(&hr, 0, sizeof hr);
+                if (api_request("GET", hpath, &hr) == 0 && hr.status == 200 &&
+                    hr.body) {
+                    char shash[64];
+                    shash[0] = 0;
+                    json_get_string_after(hr.body, hr.body + hr.body_len,
+                                          "\"source_hash\"", shash, sizeof shash);
+                    if (shash[0] && strncmp(shash, lhash, sizeof lhash) != 0)
+                        stale = 1;   /* source changed -> re-download */
+                }
+                http_response_free(&hr);
+            }
+
+            if (!stale) {
+                int pc = parse_courses(local, mlen, courses, course_cap);
+                free(local);
+                if (pc > 0) {
+                    *out_course_count = pc;
+                    dbg_print("[ese] local cache fresh; skipping prepare\n");
+                    return 1;
+                }
+                memset(courses, 0, sizeof(courses[0]) * (size_t)course_cap);
+            } else {
+                free(local);
+                dbg_print("[ese] cache stale; re-downloading\n");
+            }
+        }
+    }
 
     loading_screen("Preparing...", -1, -1);
     int n = snprintf(path, sizeof path, "/api/tjarepo/songs/%s/prepare",

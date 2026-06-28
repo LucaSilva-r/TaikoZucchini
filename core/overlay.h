@@ -88,6 +88,15 @@ void taiko_overlay_carousel_active(int on);
  * Easy,Normal,Hard,Oni,Ura; value < 0 = that difficulty is absent. Pass NULL or
  * all -1 to draw none. */
 void taiko_overlay_carousel_set_diffs(const signed char stars[5]);
+/* Difficulty-select mode on the carousel: the selected song box expands to
+ * fill the screen and `sel` is the cursor (-1 = Back, 0..n-1 = present diff in
+ * canonical order). Turning it on starts the expand animation. */
+void taiko_overlay_carousel_diffmode(int on, int sel, int cached);
+/* Show a download/convert progress bar (pct<0 = indeterminate) or an error on
+ * the difficulty page instead of the popup card. */
+int  taiko_overlay_diffmode_is_on(void);
+void taiko_overlay_diffmode_busy(const char *msg, int pct);
+void taiko_overlay_diffmode_error(const char *msg);
 void taiko_overlay_title_image_set(int slot, const void *argb, unsigned int bytes);
 /* Selected song's title+subtitle multi-column detail image (TAIKO_OVL_DETAIL_W x
  * _H A8R8G8B8). Pass NULL/0 to clear. */
@@ -95,6 +104,14 @@ void taiko_overlay_song_detail_set(const void *argb, unsigned int bytes);
 /* Difficulty label texture idx 0..4 (Easy..Ura), TAIKO_OVL_DIFF_LABEL_W x _H
  * A8R8G8B8. Rendered once with the title font. NULL/0 clears. */
 void taiko_overlay_diff_label_set(int idx, const void *argb, unsigned int bytes);
+
+/* Prebaked digit/percent glyph atlas in the title font: idx 0..9 = digits,
+ * 10 = '%'. Each TAIKO_OVL_DIGIT_W x _H A8R8G8B8; `w` = actual pixel width.
+ * Composed into numbers at draw time (no per-frame FreeType). */
+#define TAIKO_OVL_DIGITS  11
+#define TAIKO_OVL_DIGIT_W 32
+#define TAIKO_OVL_DIGIT_H 40
+void taiko_overlay_digit_set(int idx, const void *argb, unsigned int bytes, int w);
 /* ARGB of the carousel tab colour for a palette index (matches the drawn tab). */
 unsigned int taiko_overlay_carousel_color_argb(int palette_index);
 

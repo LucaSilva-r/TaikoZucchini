@@ -26,4 +26,10 @@ int taiko_title_render_columns_argb(const char *const *strings, int n,
                                     void *out, unsigned int out_w,
                                     unsigned int out_h, unsigned int outline_rgb);
 
+/* Render `utf8` as a single horizontal line (white fill + outline) into `out`,
+ * a max_w x h A8R8G8B8 buffer, height-fit. Returns the actual pixel width used
+ * (<= max_w), or 0 on failure. For overlay UI labels in the title font. */
+int taiko_text_render_argb(const char *utf8, void *out, unsigned int max_w,
+                           unsigned int h, unsigned int outline_rgb);
+
 #endif

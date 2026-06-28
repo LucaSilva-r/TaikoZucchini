@@ -83,8 +83,10 @@ static unsigned char g_title_fetch_buf[TITLE_IMAGE_BYTES];
 static unsigned char g_detail_fetch_buf[DETAIL_IMAGE_BYTES];
 /* Worker-owned scratch + one-shot flag for the difficulty label textures. */
 #define DIFF_LABEL_BYTES (TAIKO_OVL_DIFF_LABEL_W * TAIKO_OVL_DIFF_LABEL_H * 4u)
-static unsigned char g_label_fetch_buf[DIFF_LABEL_BYTES];
+static unsigned char g_label_fetch_buf[DIFF_LABEL_BYTES];  /* >= digit cell too */
 static int g_labels_done;
+#define DIGIT_IMAGE_BYTES (TAIKO_OVL_DIGIT_W * TAIKO_OVL_DIGIT_H * 4u)
+static int g_digits_done;
 
 static uint32_t read_game_word(uintptr_t addr) {
     if (addr < 0x10000u)
@@ -415,6 +417,23 @@ static void title_render_worker(uint64_t arg) {
             }
             g_labels_done = ok;
         }
+        /* Digit/percent atlas (0..9, '%') in the title font, rendered once. */
+        if (!g_digits_done) {
+            static const char *dg[TAIKO_OVL_DIGITS] = {
+                "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%" };
+            int ok = 1;
+            for (int i = 0; i < TAIKO_OVL_DIGITS; i++) {
+                int w = taiko_text_render_argb(dg[i], g_label_fetch_buf,
+                                               TAIKO_OVL_DIGIT_W,
+                                               TAIKO_OVL_DIGIT_H, 0x000000u);
+                if (w > 0)
+                    taiko_overlay_digit_set(i, g_label_fetch_buf,
+                                            DIGIT_IMAGE_BYTES, w);
+                else
+                    ok = 0;
+            }
+            g_digits_done = ok;
+        }
         int did = 0;
         for (int s = 0; s < TAIKO_OVL_TITLE_IMAGE_SLOTS; s++) {
             char key[RENDER_KEY_MAX], title[ESE_SONG_TITLE_MAX], have[RENDER_KEY_MAX];
@@ -528,7 +547,7 @@ static void picker_publish_song_titles(const ese_song_entry_t *songs, int count,
             render_publish(i, "", "", 0);
     }
     render_publish(SONG_NAV_PREV, has_prev ? "Previous" : "", "Previous", pale_outline);
-    render_publish(SONG_NAV_BACK, "Back", "Back", brown_outline);
+    render_publish(SONG_NAV_BACK, "Back", "Categories", brown_outline);
     render_publish(SONG_NAV_NEXT, has_next ? "Next" : "", "Next", pale_outline);
 }
 
@@ -761,6 +780,80 @@ static int arm_selected_song(const ese_song_entry_t *song,
     return 1;
 }
 
+/* Build a course list from the index star counts (no conversion needed), so the
+ * difficulty can be chosen before the slow convert/download step. */
+static int courses_from_index(const ese_song_entry_t *song,
+                              ese_course_entry_t *out, int cap) {
+    static const char *ids[ESE_DIFF_SLOTS]    = { "e", "n", "h", "m", "x" };
+    static const char *labels[ESE_DIFF_SLOTS] = { "Easy", "Normal", "Hard",
+                                                  "Oni", "Ura" };
+    int n = 0;
+    for (int d = 0; d < ESE_DIFF_SLOTS && n < cap; d++) {
+        if (song->stars[d] < 0)
+            continue;
+        memset(&out[n], 0, sizeof out[n]);
+        copy_limited(out[n].id, sizeof out[n].id, ids[d], ESE_COURSE_ID_MAX - 1);
+        copy_limited(out[n].label, sizeof out[n].label, labels[d],
+                     ESE_COURSE_LABEL_MAX - 1);
+        out[n].stars = song->stars[d];
+        n++;
+    }
+    return n;
+}
+
+/* prepare_selected_song returns this when the player backs out of the difficulty
+ * selector, so the caller stays on the song list instead of closing the picker. */
+#define PREPARE_CANCELLED (-1)
+
+/* Drive the fullscreen difficulty selector (carousel diff-select mode). The
+ * selected song box expands; the cursor moves over the difficulty gauges and a
+ * Back button. Returns the chosen difficulty index (0..n-1) or -1 to cancel. */
+static int diffselect_run(int n, int cached) {
+    int sel = 0;   /* -1 = Back, 0..n-1 = difficulty (0 = easiest, leftmost) */
+    if (n <= 0)
+        return -1;
+    (void)menu_pad_pressed();
+    for (;;) {
+        taiko_overlay_carousel_diffmode(1, sel, cached);
+        uint32_t edge = menu_pad_pressed();
+        if (edge & (MENU_BTN_LEFT | MENU_BTN_UP)) {
+            sel--;
+            if (sel < -1) sel = -1;
+        }
+        if (edge & (MENU_BTN_RIGHT | MENU_BTN_DOWN)) {
+            sel++;
+            if (sel >= n) sel = n - 1;
+        }
+        if (edge & MENU_BTN_CROSS) {
+            if (sel < 0) {                       /* Back tile */
+                taiko_overlay_carousel_diffmode(0, 0, 0);
+                return -1;
+            }
+            return sel;                          /* keep panel up for progress */
+        }
+        if (edge & MENU_BTN_CIRCLE) {
+            taiko_overlay_carousel_diffmode(0, 0, 0);
+            return -1;
+        }
+        sys_timer_usleep(20 * 1000);
+    }
+}
+
+/* Show an error on the difficulty page and wait for the player to dismiss it,
+ * then close the page. Returns PREPARE_CANCELLED so the caller stays on songs. */
+static int diffmode_error_wait(const char *msg) {
+    taiko_overlay_diffmode_error(msg);
+    (void)menu_pad_pressed();
+    for (;;) {
+        uint32_t e = menu_pad_pressed();
+        if (e & (MENU_BTN_CIRCLE | MENU_BTN_CROSS))
+            break;
+        sys_timer_usleep(20 * 1000);
+    }
+    taiko_overlay_carousel_diffmode(0, 0, 0);
+    return PREPARE_CANCELLED;
+}
+
 static int prepare_selected_song(const ese_song_entry_t *song) {
     ese_course_entry_t courses[ESE_COURSE_LIST_MAX];
     int course_count = 0;
@@ -770,32 +863,69 @@ static int prepare_selected_song(const ese_song_entry_t *song) {
     if (!song || !song->id[0])
         return 0;
 
-    /* Hide the song list; ese_song_prepare_and_cache drives a centred
-     * loading-bar card while it converts/downloads. */
-    taiko_overlay_menu_active(0);
-    taiko_overlay_carousel_active(0);
+    /* Choose the difficulty UP FRONT from the index stars — no conversion yet.
+     * The convert/download (the slow part) only fires after the player confirms. */
+    char chosen_id[ESE_COURSE_ID_MAX];
+    chosen_id[0] = 0;
+    int diff_ui = 0;   /* difficulty page open -> progress/errors shown on it */
+    ese_course_entry_t idx_courses[ESE_DIFF_SLOTS];
+    int idx_n = courses_from_index(song, idx_courses, ESE_DIFF_SLOTS);
+    if (idx_n > 0) {
+        int cached = ese_song_is_cached(song->id);
+        int s = diffselect_run(idx_n, cached);   /* fullscreen difficulty selector */
+        if (s < 0)                       /* Back / cancel: stay on the song list */
+            return PREPARE_CANCELLED;
+        copy_limited(chosen_id, sizeof chosen_id, idx_courses[s].id,
+                     ESE_COURSE_ID_MAX - 1);
+        diff_ui = 1;                     /* page stays up; show progress on it */
+        taiko_overlay_diffmode_busy("Preparing...", -1);
+    }
+
+    /* Convert/download. Progress goes to the difficulty page (loading_screen
+     * routes there); otherwise the popup card. */
+    if (!diff_ui) {
+        taiko_overlay_menu_active(0);
+        taiko_overlay_carousel_active(0);
+    }
     rc = ese_song_prepare_and_cache(song->id, song->title[0]
                                     ? song->title : song->id,
                                     courses, ESE_COURSE_LIST_MAX,
                                     &course_count);
-    taiko_overlay_card_active(0);
-    if (rc <= 0) {
-        char msg[96];
-        snprintf(msg, sizeof msg, "Prepare failed %d", rc);
-        taiko_overlay_show_prompt(msg);
-        return 0;
-    }
-    if (course_count <= 0) {
-        taiko_overlay_show_prompt("No supported charts");
+    if (!diff_ui)
+        taiko_overlay_card_active(0);
+
+    if (rc <= 0 || course_count <= 0) {
+        const char *emsg = (rc <= 0) ? "Download / convert failed"
+                                     : "No supported charts";
+        if (diff_ui)
+            return diffmode_error_wait(emsg);
+        taiko_overlay_show_prompt(emsg);
         return 0;
     }
 
-    course_sel = choose_course(song, courses, course_count);
+    /* Match the pre-chosen difficulty to a converted course. */
+    course_sel = -1;
+    if (chosen_id[0])
+        for (int i = 0; i < course_count; i++)
+            if (strncmp(courses[i].id, chosen_id, ESE_COURSE_ID_MAX) == 0) {
+                course_sel = i;
+                break;
+            }
     if (course_sel < 0) {
-        taiko_overlay_show_prompt("Launch cancelled");
-        return 0;
+        if (diff_ui)
+            return diffmode_error_wait("Difficulty unavailable");
+        /* Older cache without index stars: pick from the converted list. */
+        course_sel = choose_course(song, courses, course_count);
+        if (course_sel < 0) {
+            taiko_overlay_show_prompt("Launch cancelled");
+            return 0;
+        }
     }
 
+    if (diff_ui) {
+        taiko_overlay_carousel_diffmode(0, 0, 0);
+        taiko_overlay_carousel_active(0);   /* let the arm prompt show */
+    }
     taiko_overlay_menu_active(0);
     return arm_selected_song(song, &courses[course_sel]);
 }
@@ -830,7 +960,7 @@ static int picker_render_songs(const ese_song_entry_t *songs, int count,
     }
 
     if (row < TAIKO_OVL_CAROUSEL_MAX) {
-        snprintf(labels[row], sizeof labels[row], "Back");
+        snprintf(labels[row], sizeof labels[row], "Categories");
         values[row][0] = 0;
         palette[row] = 6;
         kinds[row] = TAIKO_OVL_CAROUSEL_BACK;
@@ -1029,12 +1159,17 @@ static int custom_song_picker_run(void) {
                     status_buf[0] = 0;
                 } else if (song_idx >= 0 && song_idx < song_count) {
                     int ok = prepare_selected_song(&songs[song_idx]);
-                    taiko_overlay_menu_active(0);
-                    taiko_overlay_carousel_active(0);
-                    picker_clear_title_slots();
-                    taiko_frame_set_gated(0);
-                    (void)menu_pad_pressed();
-                    return ok;
+                    if (ok == PREPARE_CANCELLED) {
+                        /* Backed out of difficulty select: stay on the song list. */
+                        status_buf[0] = 0;
+                    } else {
+                        taiko_overlay_menu_active(0);
+                        taiko_overlay_carousel_active(0);
+                        picker_clear_title_slots();
+                        taiko_frame_set_gated(0);
+                        (void)menu_pad_pressed();
+                        return ok;
+                    }
                 }
             }
         }

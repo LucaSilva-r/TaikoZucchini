@@ -14,6 +14,7 @@
 #include "menu_font_20.h"
 #include "overlay_quad_shaders.h"
 #include "qr_encode.h"
+#include "title_render.h"
 #include "video_out_hook.h"
 
 #define OVERLAY_BOOT_WINDOW_US (60ULL * 1000ULL * 1000ULL)
@@ -21,7 +22,7 @@
 #define OVERLAY_MESSAGE_BOX_FRAMES 600
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
-#define OVERLAY_MAP_SIZE       (10 * 1024 * 1024)
+#define OVERLAY_MAP_SIZE       (16 * 1024 * 1024)
 #define OVERLAY_CMD_RING_SLOTS 64
 #define OVERLAY_CMD_WORDS      16384
 
@@ -48,6 +49,16 @@
 #define OVERLAY_GLOSS_DRAW_SLOT (-2)  /* img_draws sentinel: bind gloss texture */
 #define OVERLAY_DETAIL_DRAW_SLOT (-3) /* img_draws sentinel: bind song-detail texture */
 #define OVERLAY_DIFFLABEL_SLOT0  (-10) /* img_draws sentinel base: difficulty label idx = -10 - slot */
+#define OVERLAY_UITEXT_SLOT0     (-100) /* img_draws sentinel base: UI-text cache idx = -100 - slot */
+#define OVERLAY_DIGIT_SLOT0      (-200) /* img_draws sentinel base: digit atlas idx = -200 - slot */
+
+/* Cached FreeType (title-font) UI-text textures: render-once, draw as quads. */
+#define UITEXT_N     48
+#define UITEXT_MAXW  384
+#define UITEXT_H     36
+#define UITEXT_OUTLINE 0x000000u  /* white fill, thick black outline */
+/* Image-batch draw budget per frame (title images + diff labels + UI text). */
+#define OVERLAY_IMG_DRAW_MAX 96
 #define OVERLAY_CARD_LINES     8
 #define OVERLAY_CAROUSEL_ITEMS TAIKO_OVL_CAROUSEL_MAX
 
@@ -189,6 +200,17 @@ static volatile uint64_t g_detail_ready_us;
 static uint32_t g_difflabel_io[TAIKO_OVL_DIFF_LABELS];
 static unsigned char *g_difflabel_tex[TAIKO_OVL_DIFF_LABELS];
 static volatile int g_difflabel_valid[TAIKO_OVL_DIFF_LABELS];
+/* UI-text texture cache (title font), keyed by string with LRU eviction. */
+static uint32_t g_uitext_io[UITEXT_N];
+static unsigned char *g_uitext_tex[UITEXT_N];
+static char g_uitext_key[UITEXT_N][64];
+static int g_uitext_w[UITEXT_N];        /* rendered width; 0 = empty slot */
+static uint32_t g_uitext_seq[UITEXT_N];
+static uint32_t g_uitext_clock;
+/* Prebaked digit/percent glyph atlas (0..9, '%'). */
+static uint32_t g_digit_io[TAIKO_OVL_DIGITS];
+static unsigned char *g_digit_tex[TAIKO_OVL_DIGITS];
+static int g_digit_w[TAIKO_OVL_DIGITS]; /* rendered px width; 0 = not ready */
 static overlay_vertex_t *g_text_vtx;
 static uint32_t g_text_vtx_io;
 static uint32_t g_text_vtx_next;
@@ -223,6 +245,15 @@ static volatile int g_carousel_active;
 static volatile int g_carousel_cur = -1;
 static volatile int g_carousel_reading = -1;
 static overlay_carousel_state_t g_carousel_state[3];
+/* Difficulty-select mode: the selected song box expands to (near) fullscreen and
+ * a cursor moves over the difficulty columns + a Back button. */
+static volatile int g_diffmode;            /* 0/1 */
+static volatile int g_diffmode_sel;        /* -1 = Back, 0..n-1 = present diff */
+static volatile int g_diffmode_cached;     /* 1 = song already on disk */
+static volatile uint64_t g_diffmode_us;    /* expand-animation start */
+static volatile int g_diffmode_stage;      /* 0 select, 1 busy, 2 error */
+static volatile int g_diffmode_pct;        /* -1 indeterminate, else 0..100 */
+static char g_diffmode_msg[80];
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -406,6 +437,20 @@ static int ensure_overlay_mapped(void) {
         g_difflabel_io[i] = off + cursor;
         g_difflabel_tex[i] = (unsigned char *)g_overlay_mem + cursor;
         cursor += TAIKO_OVL_DIFF_LABEL_W * TAIKO_OVL_DIFF_LABEL_H * 4;
+    }
+
+    for (int i = 0; i < UITEXT_N; i++) {
+        cursor = align_up_u32(cursor, 128);
+        g_uitext_io[i] = off + cursor;
+        g_uitext_tex[i] = (unsigned char *)g_overlay_mem + cursor;
+        cursor += UITEXT_MAXW * UITEXT_H * 4;
+    }
+
+    for (int i = 0; i < TAIKO_OVL_DIGITS; i++) {
+        cursor = align_up_u32(cursor, 128);
+        g_digit_io[i] = off + cursor;
+        g_digit_tex[i] = (unsigned char *)g_overlay_mem + cursor;
+        cursor += TAIKO_OVL_DIGIT_W * TAIKO_OVL_DIGIT_H * 4;
     }
 
     cursor = align_up_u32(cursor, 128);
@@ -862,10 +907,22 @@ static void append_title_image_batch(CellGcmContextData *cmd,
         int lidx = (slot <= OVERLAY_DIFFLABEL_SLOT0 &&
                     slot > OVERLAY_DIFFLABEL_SLOT0 - TAIKO_OVL_DIFF_LABELS)
                    ? (OVERLAY_DIFFLABEL_SLOT0 - slot) : -1;
+        int uidx = (slot <= OVERLAY_UITEXT_SLOT0 &&
+                    slot > OVERLAY_UITEXT_SLOT0 - UITEXT_N)
+                   ? (OVERLAY_UITEXT_SLOT0 - slot) : -1;
+        int didx = (slot <= OVERLAY_DIGIT_SLOT0 &&
+                    slot > OVERLAY_DIGIT_SLOT0 - TAIKO_OVL_DIGITS)
+                   ? (OVERLAY_DIGIT_SLOT0 - slot) : -1;
         if (draws[i].count <= 0)
             continue;
         if (detail) {
             if (!g_detail_valid)
+                continue;
+        } else if (didx >= 0) {
+            if (g_digit_w[didx] <= 0)
+                continue;
+        } else if (uidx >= 0) {
+            if (g_uitext_w[uidx] <= 0)
                 continue;
         } else if (lidx >= 0) {
             if (!g_difflabel_valid[lidx])
@@ -891,9 +948,13 @@ static void append_title_image_batch(CellGcmContextData *cmd,
                                         CELL_GCM_TEXTURE_REMAP_REMAP);
         int tw = gloss ? OVERLAY_GLOSS_DIM
                  : detail ? TAIKO_OVL_DETAIL_W
+                 : didx >= 0 ? TAIKO_OVL_DIGIT_W
+                 : uidx >= 0 ? UITEXT_MAXW
                  : lidx >= 0 ? TAIKO_OVL_DIFF_LABEL_W : TAIKO_OVL_TITLE_IMAGE_W;
         int th = gloss ? OVERLAY_GLOSS_DIM
                  : detail ? TAIKO_OVL_DETAIL_H
+                 : didx >= 0 ? TAIKO_OVL_DIGIT_H
+                 : uidx >= 0 ? UITEXT_H
                  : lidx >= 0 ? TAIKO_OVL_DIFF_LABEL_H : TAIKO_OVL_TITLE_IMAGE_H;
         tex.width = tw;
         tex.height = th;
@@ -902,6 +963,8 @@ static void append_title_image_batch(CellGcmContextData *cmd,
         tex.pitch = tw * 4;
         tex.offset = gloss ? g_gloss_tex_io
                      : detail ? g_detail_tex_io
+                     : didx >= 0 ? g_digit_io[didx]
+                     : uidx >= 0 ? g_uitext_io[uidx]
                      : lidx >= 0 ? g_difflabel_io[lidx] : g_title_image_io[slot];
         cellGcmSetTexture(cmd, (uint8_t)g_tex_unit, &tex);
         cellGcmSetTextureControl(cmd, (uint8_t)g_tex_unit, CELL_GCM_TRUE,
@@ -1472,6 +1535,112 @@ static int append_title_image_vertices(overlay_vertex_t *v, int *count,
     return 1;
 }
 
+/* Look up (or render+cache) a UI-text texture for `s`. Returns the cache index
+ * or -1. Rendering is serialized inside title_render, so it's safe to call from
+ * the flip hook alongside the title worker. */
+static int ui_text(const char *s) {
+    if (!s || !s[0])
+        return -1;
+    int freei = -1, lru = 0;
+    uint32_t lru_seq = 0xffffffffu;
+    for (int i = 0; i < UITEXT_N; i++) {
+        if (g_uitext_w[i] > 0 && strncmp(g_uitext_key[i], s, sizeof g_uitext_key[i]) == 0) {
+            g_uitext_seq[i] = ++g_uitext_clock;
+            return i;
+        }
+        if (g_uitext_w[i] == 0 && freei < 0)
+            freei = i;
+        if (g_uitext_seq[i] < lru_seq) { lru_seq = g_uitext_seq[i]; lru = i; }
+    }
+    int slot = freei >= 0 ? freei : lru;
+    int w = taiko_text_render_argb(s, g_uitext_tex[slot], UITEXT_MAXW, UITEXT_H,
+                                   UITEXT_OUTLINE);
+    if (w <= 0) { g_uitext_w[slot] = 0; return -1; }
+    flush_dcache(g_uitext_tex[slot], UITEXT_MAXW * UITEXT_H * 4);
+    copy_str(g_uitext_key[slot], sizeof g_uitext_key[slot], s);
+    g_uitext_w[slot] = w;
+    g_uitext_seq[slot] = ++g_uitext_clock;
+    return slot;
+}
+
+/* Quad with a custom u1 (UI-text textures only fill part of their cell width). */
+static int append_uitext_vertices(overlay_vertex_t *v, int *count, int max_vtx,
+                                   uint32_t fb_w, uint32_t fb_h, int x, int y,
+                                   int w, int h, float u1) {
+    if (!v || !count || w <= 0 || h <= 0 || *count + 6 > max_vtx)
+        return 0;
+    uint32_t c = 0xFFFFFFFFu;
+    float x0 = (float)x, y0 = (float)y, x1 = (float)(x + w), y1 = (float)(y + h);
+    text_push_vertex(v, count, x0, y0, 0.0f, 0.0f, c, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y0, u1,   0.0f, c, fb_w, fb_h);
+    text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, c, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y0, u1,   0.0f, c, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y1, u1,   1.0f, c, fb_w, fb_h);
+    text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, c, fb_w, fb_h);
+    return 1;
+}
+
+/* Draw `s` in the title font, centred in [x, x+w], at pixel height `dh`, top at
+ * `y`. Goes through the image batch (img_vtx / img_draws). */
+static void append_ui_text(overlay_vertex_t *img_vtx, int *img_vtx_count,
+                           int img_max_vtx, overlay_image_draw_t *img_draws,
+                           int *img_draw_count, int draw_cap,
+                           uint32_t fb_w, uint32_t fb_h,
+                           int x, int y, int w, int dh, const char *s) {
+    int idx = ui_text(s);
+    if (idx < 0)
+        return;
+    int tw = g_uitext_w[idx] * dh / UITEXT_H;     /* scale to requested height */
+    if (tw > w) {                                  /* clamp; squish to fit */
+        tw = w;
+    }
+    int tx = x + (w - tw) / 2;
+    float u1 = (float)g_uitext_w[idx] / (float)UITEXT_MAXW;
+    int first = *img_vtx_count;
+    if (append_uitext_vertices(img_vtx, img_vtx_count, img_max_vtx, fb_w, fb_h,
+                               tx, y, tw, dh, u1) &&
+        *img_draw_count < draw_cap) {
+        img_draws[*img_draw_count].slot = OVERLAY_UITEXT_SLOT0 - idx;
+        img_draws[*img_draw_count].first = first;
+        img_draws[*img_draw_count].count = *img_vtx_count - first;
+        (*img_draw_count)++;
+    }
+}
+
+/* Compose a number/percent string `s` from the prebaked digit atlas, centred in
+ * [x, x+w] at pixel height `dh`. No per-frame FreeType (atlas baked once). */
+static void append_digits(overlay_vertex_t *img_vtx, int *img_vtx_count,
+                          int img_max_vtx, overlay_image_draw_t *img_draws,
+                          int *img_draw_count, int draw_cap, uint32_t fb_w,
+                          uint32_t fb_h, int x, int y, int w, int dh,
+                          const char *s) {
+    int gap = 2, total = 0;
+    for (const char *p = s; *p; p++) {
+        int idx = (*p >= '0' && *p <= '9') ? *p - '0' : (*p == '%') ? 10 : -1;
+        if (idx < 0 || g_digit_w[idx] <= 0) continue;
+        total += g_digit_w[idx] * dh / TAIKO_OVL_DIGIT_H + gap;
+    }
+    if (total <= 0) return;
+    total -= gap;
+    int cx = x + (w - total) / 2;
+    for (const char *p = s; *p; p++) {
+        int idx = (*p >= '0' && *p <= '9') ? *p - '0' : (*p == '%') ? 10 : -1;
+        if (idx < 0 || g_digit_w[idx] <= 0) continue;
+        int tw = g_digit_w[idx] * dh / TAIKO_OVL_DIGIT_H;
+        float u1 = (float)g_digit_w[idx] / (float)TAIKO_OVL_DIGIT_W;
+        int first = *img_vtx_count;
+        if (append_uitext_vertices(img_vtx, img_vtx_count, img_max_vtx, fb_w, fb_h,
+                                   cx, y, tw, dh, u1) &&
+            *img_draw_count < draw_cap) {
+            img_draws[*img_draw_count].slot = OVERLAY_DIGIT_SLOT0 - idx;
+            img_draws[*img_draw_count].first = first;
+            img_draws[*img_draw_count].count = *img_vtx_count - first;
+            (*img_draw_count)++;
+        }
+        cx += tw + gap;
+    }
+}
+
 /* Star counts for the selected song's difficulty columns (canonical 5; -1=none);
  * set via taiko_overlay_carousel_set_diffs, read by the carousel draw. */
 static volatile signed char g_sel_diff_stars[5] = { -1, -1, -1, -1, -1 };
@@ -1529,7 +1698,7 @@ static void draw_diff_columns(CellGcmContextData *cmd, const overlay_buffer_t *b
         if (g_difflabel_valid[d] &&
             append_title_image_vertices(img_vtx, img_vtx_count, img_max_vtx,
                                         b->width, b->height, lx, ly, lw, lh, 255, 0) &&
-            *img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+            *img_draw_count < OVERLAY_IMG_DRAW_MAX) {
             img_draws[*img_draw_count].slot = OVERLAY_DIFFLABEL_SLOT0 - d;
             img_draws[*img_draw_count].first = first;
             img_draws[*img_draw_count].count = *img_vtx_count - first;
@@ -1544,8 +1713,194 @@ static void draw_diff_columns(CellGcmContextData *cmd, const overlay_buffer_t *b
             append_rect(cmd, b, cx, top + barh - fillh, cw, fillh, SWATCH_TEXT);
         char num[4];
         small_uitoa(num, g_sel_diff_stars[d]);
-        append_centered_text(vtx, vtx_count, max_vtx, b->width, b->height,
-                             cx - 4, top + barh - 26, cw + 8, TEXT_DARK, num);
+        append_digits(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                      img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width, b->height,
+                      cx - 6, top + barh - 30, cw + 12, 24, num);
+        cx += cw + gap;
+    }
+}
+
+static void draw_cursor_border(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                               int x, int y, int w, int h) {
+    int t = 5;
+    append_rect(cmd, b, x, y, w, t, SWATCH_RED);
+    append_rect(cmd, b, x, y + h - t, w, t, SWATCH_RED);
+    append_rect(cmd, b, x, y, t, h, SWATCH_RED);
+    append_rect(cmd, b, x + w - t, y, t, h, SWATCH_RED);
+}
+
+/* Thick dark frame just outside (x,y,w,h), like the game's heavy black outlines. */
+static void draw_outline(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                         int x, int y, int w, int h, int t) {
+    append_rect(cmd, b, x - t, y - t, w + 2 * t, t, SWATCH_DARK);
+    append_rect(cmd, b, x - t, y + h, w + 2 * t, t, SWATCH_DARK);
+    append_rect(cmd, b, x - t, y, t, h, SWATCH_DARK);
+    append_rect(cmd, b, x + w, y, t, h, SWATCH_DARK);
+}
+
+/* Fullscreen-ish difficulty selector drawn into the expanding box: Back button
+ * (left), difficulty gauges (centre) with a red cursor on `diffsel`, and the
+ * title+subtitle detail (right). Reuses g_sel_diff_stars / g_detail_tex / the
+ * difficulty label textures already prepared for the selected song. */
+static void draw_diffselect_panel(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                                  overlay_vertex_t *vtx, int *vtx_count, int max_vtx,
+                                  overlay_vertex_t *img_vtx, int *img_vtx_count,
+                                  int img_max_vtx, overlay_image_draw_t *img_draws,
+                                  int *img_draw_count,
+                                  int x, int y, int w, int h, int diffsel,
+                                  int cached) {
+    (void)vtx; (void)vtx_count; (void)max_vtx;   /* text via image batch / digits */
+    append_rect(cmd, b, x + 6, y + 6, w, h, SWATCH_DARK);
+    append_rect(cmd, b, x, y, w, h, SWATCH_DARK);
+    append_rect(cmd, b, x + 4, y + 4, w - 8, h - 8, SWATCH_YELLOW);
+    {
+        int bsw = SWATCH_YELLOW - SWATCH_CYAN;
+        if (bsw < 0 || bsw >= TAB_PALETTE_N) bsw = 0;
+        append_bevel(cmd, b, x + 4, y + 4, w - 8, h - 8, 9, bsw,
+                     g_bevel_light_io[bsw], g_bevel_dark_io[bsw]);
+    }
+
+    /* Cached / download badge (top centre). */
+    {
+        int pw = 200, px = x + (w - pw) / 2, py = y + 16;
+        draw_outline(cmd, b, px, py, pw, 36, 4);
+        append_rect(cmd, b, px, py, pw, 36, cached ? SWATCH_GREEN : SWATCH_ORANGE);
+        append_ui_text(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                       img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width, b->height,
+                       px + 6, py + 6, pw - 12, 24,
+                       cached ? "On console" : "Will download");
+    }
+
+    /* Detail (title+subtitle) on the right — always shown for context. */
+    int detail_w = 0;
+    if (g_detail_valid) {
+        int ih = h - 60;
+        int iw = ih * TAIKO_OVL_DETAIL_W / TAIKO_OVL_DETAIL_H;
+        int iwmax = w * 40 / 100;
+        if (iw > iwmax) { iw = iwmax; ih = iw * TAIKO_OVL_DETAIL_H / TAIKO_OVL_DETAIL_W; }
+        int rdy; uint8_t ra = reveal_from(g_detail_ready_us, &rdy);
+        int first = *img_vtx_count;
+        if (append_title_image_vertices(img_vtx, img_vtx_count, img_max_vtx,
+                                        b->width, b->height,
+                                        x + w - iw - 30, y + 40, iw, ih, ra, rdy) &&
+            *img_draw_count < OVERLAY_IMG_DRAW_MAX) {
+            img_draws[*img_draw_count].slot = OVERLAY_DETAIL_DRAW_SLOT;
+            img_draws[*img_draw_count].first = first;
+            img_draws[*img_draw_count].count = *img_vtx_count - first;
+            (*img_draw_count)++;
+        }
+        detail_w = iw + 40;
+    }
+
+    /* Busy / error: a progress bar or an error replaces the selector controls. */
+    if (g_diffmode_stage != 0) {
+        char msg[80];
+        copy_str(msg, sizeof msg, (const char *)g_diffmode_msg);
+        int cwid = w - detail_w - 80;
+        if (cwid < 200) cwid = 200;
+        int cx0 = x + 50;
+        int my = y + h / 2;
+        /* Message is static per stage -> cached FreeType (rendered once). */
+        append_ui_text(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                       img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width, b->height,
+                       cx0, my - 64, cwid, 28, msg);
+        if (g_diffmode_stage == 1) {
+            int barw = cwid * 80 / 100, barh2 = 30;
+            int barx = cx0 + (cwid - barw) / 2, bary = my;
+            draw_outline(cmd, b, barx, bary, barw, barh2, 4);
+            append_rect(cmd, b, barx, bary, barw, barh2, SWATCH_PALE);
+            int pct = g_diffmode_pct;
+            if (pct >= 0) {
+                if (pct > 100) pct = 100;
+                if (pct > 0)
+                    append_rect(cmd, b, barx, bary, barw * pct / 100, barh2, SWATCH_GREEN);
+                char pc[8];
+                small_uitoa(pc, pct);
+                int l = (int)strlen(pc); pc[l] = '%'; pc[l + 1] = 0;
+                append_digits(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                              img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width,
+                              b->height, barx, bary + barh2 + 10, barw, 24, pc);
+            } else {
+                /* indeterminate: a block sweeping across the track */
+                uint64_t now = (uint64_t)sys_time_get_system_time();
+                int blk = barw / 4, span = barw + blk, per = 1200;
+                int pos = (int)((now / 1000) % per) * span / per - blk;
+                int bx0 = barx + pos, bw0 = blk;
+                if (bx0 < barx) { bw0 -= (barx - bx0); bx0 = barx; }
+                if (bx0 + bw0 > barx + barw) bw0 = barx + barw - bx0;
+                if (bw0 > 0)
+                    append_rect(cmd, b, bx0, bary, bw0, barh2, SWATCH_GREEN);
+            }
+        } else {
+            append_ui_text(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                           img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width,
+                           b->height, cx0, my + 8, cwid, 24, "Press O to go back");
+        }
+        return;
+    }
+
+    /* Back button (left). */
+    int bbw = 56, bbh = h * 5 / 10;
+    int bbx = x + 26, bby = y + (h - bbh) / 2;
+    draw_outline(cmd, b, bbx, bby, bbw, bbh, 4);
+    append_rect(cmd, b, bbx, bby, bbw, bbh, SWATCH_BROWN);
+    append_ui_text(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                   img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width, b->height,
+                   bbx - 6, bby + bbh / 2 - 13, bbw + 12, 26, "Back");
+    if (diffsel < 0)
+        draw_cursor_border(cmd, b, bbx - 5, bby - 5, bbw + 10, bbh + 10);
+
+    /* Difficulty gauges between Back and the detail. */
+    int present[5], n = 0;
+    for (int d = 0; d < 5; d++)
+        if (g_sel_diff_stars[d] >= 0) present[n++] = d;
+    if (n == 0)
+        return;
+
+    int area_x0 = bbx + bbw + 40;
+    int area_x1 = x + w - detail_w - 30;
+    int area_w = area_x1 - area_x0;
+    if (area_w < 80) area_w = 80;
+    int gap = 18;
+    int cw = (area_w - (n - 1) * gap) / n;
+    if (cw > 60) cw = 60;
+    if (cw < 18) cw = 18;
+    int total = n * cw + (n - 1) * gap;
+    int cx = area_x0 + (area_w - total) / 2;
+    int top = y + h * 34 / 100;          /* leave room for badge + label above */
+    int barh = h * 40 / 100;             /* shorter bars, like the game */
+    if (barh < 60) barh = 60;
+
+    for (int k = 0; k < n; k++) {
+        int d = present[k];
+        int lvl = g_sel_diff_stars[d];
+        if (lvl > 10) lvl = 10;
+        if (lvl < 0) lvl = 0;
+        int fillh = barh * lvl / 10;
+
+        int lw = cw + 14, lh = lw;
+        int lx = cx + (cw - lw) / 2, ly = top - lh + 2;
+        int first = *img_vtx_count;
+        if (g_difflabel_valid[d] &&
+            append_title_image_vertices(img_vtx, img_vtx_count, img_max_vtx,
+                                        b->width, b->height, lx, ly, lw, lh, 255, 0) &&
+            *img_draw_count < OVERLAY_IMG_DRAW_MAX) {
+            img_draws[*img_draw_count].slot = OVERLAY_DIFFLABEL_SLOT0 - d;
+            img_draws[*img_draw_count].first = first;
+            img_draws[*img_draw_count].count = *img_vtx_count - first;
+            (*img_draw_count)++;
+        }
+        append_rect(cmd, b, cx + 3, top + 3, cw, barh, SWATCH_DARK);
+        append_rect(cmd, b, cx, top, cw, barh, SWATCH_PINK);
+        if (fillh > 0)
+            append_rect(cmd, b, cx, top + barh - fillh, cw, fillh, SWATCH_TEXT);
+        char num[4];
+        small_uitoa(num, g_sel_diff_stars[d]);
+        append_digits(img_vtx, img_vtx_count, img_max_vtx, img_draws,
+                      img_draw_count, OVERLAY_IMG_DRAW_MAX, b->width, b->height,
+                      cx - 8, top + barh - 34, cw + 16, 26, num);
+        if (k == diffsel)
+            draw_cursor_border(cmd, b, cx - 5, top - 5, cw + 10, barh + 10);
         cx += cw + gap;
     }
 }
@@ -1591,7 +1946,7 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
     int img_vtx_count = 0;
     overlay_vertex_t *img_vtx = text_begin(&img_vtx_io, &img_max_vtx);
     /* Up to one gloss quad + one title image per tile. */
-    overlay_image_draw_t img_draws[OVERLAY_CAROUSEL_ITEMS * 2];
+    overlay_image_draw_t img_draws[OVERLAY_IMG_DRAW_MAX];
     int img_draw_count = 0;
     if (!img_vtx)
         return;
@@ -1643,9 +1998,15 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                               title_x, 34, title_w, TEXT_WHITE, m.title))
         return;
 
+    /* Selected tile rect, captured for the diff-select expand animation. */
+    int esx = (int)b.width / 2, esy = y, esw = sel_w, esh = tile_h;
     for (int i = 0; i < m.count; i++) {
         int selected = i == m.selected;
         int w = selected ? sel_w : strip_w;
+        if (selected) { esx = x; esy = y; esw = w; esh = tile_h; }
+        /* Diff-select hides the song list; only position the tiles (to anchor
+         * the expand) and let the fullscreen panel draw on a clean background. */
+        if (g_diffmode) { x += w + gap; continue; }
         int sw = m.palette[i] % 8;
         int color = SWATCH_CYAN + sw;
         int kind = m.kinds[i];
@@ -1653,7 +2014,6 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
         int image_valid = image_slot >= 0 &&
                           image_slot < TAIKO_OVL_TITLE_IMAGE_SLOTS &&
                           g_title_image_valid[image_slot];
-        text_color_t label_c = selected ? TEXT_DARK : TEXT_WHITE;
 
         if (kind == TAIKO_OVL_CAROUSEL_BACK)
             color = SWATCH_BROWN;
@@ -1697,7 +2057,7 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                                                  img_max_vtx, b.width, b.height,
                                                  x + w - iw - 16, y + 44,
                                                  iw, ih, ralpha, rdy) &&
-                    img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+                    img_draw_count < OVERLAY_IMG_DRAW_MAX) {
                     img_draws[img_draw_count].slot = OVERLAY_DETAIL_DRAW_SLOT;
                     img_draws[img_draw_count].first = first;
                     img_draws[img_draw_count].count = img_vtx_count - first;
@@ -1717,7 +2077,7 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                                                  b.height,
                                                  x + w - iw - 24, y + 58,
                                                  iw, ih, ralpha, rdy) &&
-                    img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+                    img_draw_count < OVERLAY_IMG_DRAW_MAX) {
                     img_draws[img_draw_count].slot = image_slot;
                     img_draws[img_draw_count].first = first;
                     img_draws[img_draw_count].count = img_vtx_count - first;
@@ -1728,15 +2088,13 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
              * the horizontal title and "n/total" counter clipped the columns,
              * so they're drawn for non-song tiles only. */
             if (kind != TAIKO_OVL_CAROUSEL_SONG) {
-                if (!append_centered_text(vtx, &vtx_count, max_vtx,
-                                          b.width, b.height, x + 18, y + 26,
-                                          w - 36, label_c, m.labels[i]))
-                    return;
-                if (m.values[i][0] &&
-                    !append_centered_text(vtx, &vtx_count, max_vtx,
-                                          b.width, b.height, x + 18, y + 58,
-                                          w - 36, label_c, m.values[i]))
-                    return;
+                append_ui_text(img_vtx, &img_vtx_count, img_max_vtx, img_draws,
+                               &img_draw_count, OVERLAY_IMG_DRAW_MAX, b.width,
+                               b.height, x + 14, y + 22, w - 28, 28, m.labels[i]);
+                if (m.values[i][0])
+                    append_ui_text(img_vtx, &img_vtx_count, img_max_vtx, img_draws,
+                                   &img_draw_count, OVERLAY_IMG_DRAW_MAX, b.width,
+                                   b.height, x + 14, y + 58, w - 28, 22, m.values[i]);
             }
 
             /* Songs: vertical title slides/fades in (right) + difficulty star
@@ -1749,14 +2107,12 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
             } else {
                 char lines[OVERLAY_DESC_LINES][OVERLAY_TEXT_CAP];
                 int ln = wrap_text(m.status, w - 42, OVERLAY_DESC_LINES, lines);
-                int ty = y + tile_h / 2 - (ln * 22) / 2;
-                for (int k = 0; k < ln; k++) {
-                    if (!append_centered_text(vtx, &vtx_count, max_vtx,
-                                              b.width, b.height, x + 20,
-                                              ty + k * 22, w - 40,
-                                              label_c, lines[k]))
-                        return;
-                }
+                int ty = y + tile_h / 2 - (ln * 28) / 2;
+                for (int k = 0; k < ln; k++)
+                    append_ui_text(img_vtx, &img_vtx_count, img_max_vtx, img_draws,
+                                   &img_draw_count, OVERLAY_IMG_DRAW_MAX, b.width,
+                                   b.height, x + 20, ty + k * 28, w - 40, 24,
+                                   lines[k]);
             }
         } else {
             int drew_image = 0;
@@ -1777,7 +2133,7 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
                         b.width, b.height,
                         x + (w - iw) / 2, y + (tile_h - ih) / 2,
                         iw, ih, ralpha, rdy);
-                    if (drew_image && img_draw_count < OVERLAY_CAROUSEL_ITEMS * 2) {
+                    if (drew_image && img_draw_count < OVERLAY_IMG_DRAW_MAX) {
                         img_draws[img_draw_count].slot = image_slot;
                         img_draws[img_draw_count].first = first;
                         img_draws[img_draw_count].count = img_vtx_count - first;
@@ -1797,7 +2153,28 @@ static void maybe_draw_carousel(void *ctx, uint8_t id) {
         x += w + gap;
     }
 
-    if (m.footer[0]) {
+    /* Diff-select: grow the selected box from its strip rect to near-fullscreen
+     * and draw the difficulty cursor / Back / detail on top of the list. */
+    if (g_diffmode) {
+        uint64_t now = (uint64_t)sys_time_get_system_time();
+        uint64_t e = (g_diffmode_us && now >= g_diffmode_us) ? now - g_diffmode_us : 0;
+        float t = e >= 180000 ? 1.0f : (float)e / 180000.0f;
+        float p = 1.0f - (1.0f - t) * (1.0f - t);          /* ease-out */
+        int bw = (int)((float)b.width * 0.80f);
+        int bh = (int)((float)b.height * 0.82f);
+        int bx = ((int)b.width - bw) / 2;
+        int by = ((int)b.height - bh) / 2;
+        int ex = esx + (int)((bx - esx) * p);
+        int ey = esy + (int)((by - esy) * p);
+        int ew = esw + (int)((bw - esw) * p);
+        int eh = esh + (int)((bh - esh) * p);
+        draw_diffselect_panel(&cmd, &b, vtx, &vtx_count, max_vtx,
+                              img_vtx, &img_vtx_count, img_max_vtx,
+                              img_draws, &img_draw_count,
+                              ex, ey, ew, eh, g_diffmode_sel, g_diffmode_cached);
+    }
+
+    if (m.footer[0] && !g_diffmode) {
         int footer_w = (int)b.width - 2 * pad;
         int fy = (int)b.height - 42;
         if (!append_rect(&cmd, &b, pad, fy - 8, footer_w, 34, SWATCH_PANEL))
@@ -2066,6 +2443,29 @@ void taiko_overlay_carousel_set_diffs(const signed char stars[5]) {
         g_sel_diff_stars[i] = stars ? stars[i] : -1;
 }
 
+void taiko_overlay_carousel_diffmode(int on, int sel, int cached) {
+    if (on && !g_diffmode) {
+        g_diffmode_us = (uint64_t)sys_time_get_system_time();
+        g_diffmode_stage = 0;      /* fresh open starts on the selector */
+    }
+    g_diffmode = on ? 1 : 0;
+    g_diffmode_sel = sel;
+    g_diffmode_cached = cached ? 1 : 0;
+}
+
+int taiko_overlay_diffmode_is_on(void) { return g_diffmode; }
+
+void taiko_overlay_diffmode_busy(const char *msg, int pct) {
+    copy_str(g_diffmode_msg, sizeof g_diffmode_msg, msg ? msg : "Working...");
+    g_diffmode_pct = pct;
+    g_diffmode_stage = 1;
+}
+
+void taiko_overlay_diffmode_error(const char *msg) {
+    copy_str(g_diffmode_msg, sizeof g_diffmode_msg, msg ? msg : "Failed");
+    g_diffmode_stage = 2;
+}
+
 unsigned int taiko_overlay_carousel_color_argb(int palette_index) {
     /* Mirror of swatches[SWATCH_CYAN..SWATCH_PALE] used by the carousel draw. */
     static const unsigned int c[8] = {
@@ -2121,6 +2521,18 @@ void taiko_overlay_diff_label_set(int idx, const void *argb, unsigned int bytes)
     memcpy(g_difflabel_tex[idx], argb, need);
     flush_dcache(g_difflabel_tex[idx], need);
     g_difflabel_valid[idx] = 1;
+}
+
+void taiko_overlay_digit_set(int idx, const void *argb, unsigned int bytes, int w) {
+    unsigned int need = TAIKO_OVL_DIGIT_W * TAIKO_OVL_DIGIT_H * 4;
+    if (idx < 0 || idx >= TAIKO_OVL_DIGITS)
+        return;
+    g_digit_w[idx] = 0;
+    if (!argb || bytes != need || w <= 0 || !ensure_overlay_mapped())
+        return;
+    memcpy(g_digit_tex[idx], argb, need);
+    flush_dcache(g_digit_tex[idx], need);
+    g_digit_w[idx] = w;
 }
 
 void taiko_overlay_hooks_install(void) {

@@ -45,5 +45,7 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
 int ese_song_prepare_and_cache(const char *song_id, const char *title,
                                ese_course_entry_t *courses, int course_cap,
                                int *out_course_count);
+/* 1 if the song is already converted+downloaded locally (manifest present). */
+int ese_song_is_cached(const char *song_id);
 
 #endif

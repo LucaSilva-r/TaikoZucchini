@@ -39,6 +39,18 @@ static float      g_ascent_px, g_char_h;
 
 static int font_ready(void);
 
+/* FreeType face + glyph cache are shared by the title worker and the overlay's
+ * flip-hook text cache, so serialize all rendering. */
+#ifndef TITLE_RENDER_HOST_TEST
+#include <sys/ppu_thread.h>
+static volatile int g_ft_lock;
+static void ft_lock(void)   { while (__sync_lock_test_and_set(&g_ft_lock, 1)) sys_ppu_thread_yield(); }
+static void ft_unlock(void) { __sync_lock_release(&g_ft_lock); }
+#else
+static void ft_lock(void)   {}
+static void ft_unlock(void) {}
+#endif
+
 /* --- UTF-8 ---------------------------------------------------------------- */
 static int utf8_next(const char **p) {
     const unsigned char *s = (const unsigned char *)*p;
@@ -603,32 +615,96 @@ int taiko_title_render_argb(const char *title, void *out,
                             unsigned int out_w, unsigned int out_h,
                             unsigned int outline_rgb) {
     if (!title || !title[0] || !out) return 0;
-    if (!font_ready()) return 0;
-    OUT_R = (uint8_t)(outline_rgb >> 16);
-    OUT_G = (uint8_t)(outline_rgb >> 8);
-    OUT_B = (uint8_t)outline_rgb;
-
-    Buf img;
-    if (!build_vertical(title, &img)) return 0;
-    fit_into_out(&img, (uint32_t *)out, (int)out_w, (int)out_h);
-    buf_free(&img);
-    return 1;
+    ft_lock();
+    int ok = font_ready();
+    if (ok) {
+        OUT_R = (uint8_t)(outline_rgb >> 16);
+        OUT_G = (uint8_t)(outline_rgb >> 8);
+        OUT_B = (uint8_t)outline_rgb;
+        Buf img;
+        if (build_vertical(title, &img)) {
+            fit_into_out(&img, (uint32_t *)out, (int)out_w, (int)out_h);
+            buf_free(&img);
+        } else {
+            ok = 0;
+        }
+    }
+    ft_unlock();
+    return ok;
 }
 
 int taiko_title_render_columns_argb(const char *const *strings, int n,
                                     void *out, unsigned int out_w,
                                     unsigned int out_h, unsigned int outline_rgb) {
     if (!strings || n <= 0 || !out) return 0;
-    if (!font_ready()) return 0;
-    OUT_R = (uint8_t)(outline_rgb >> 16);
-    OUT_G = (uint8_t)(outline_rgb >> 8);
-    OUT_B = (uint8_t)outline_rgb;
+    ft_lock();
+    int ok = font_ready();
+    if (ok) {
+        OUT_R = (uint8_t)(outline_rgb >> 16);
+        OUT_G = (uint8_t)(outline_rgb >> 8);
+        OUT_B = (uint8_t)outline_rgb;
+        Buf img;
+        if (build_columns(strings, n, &img)) {
+            fit_contain(&img, (uint32_t *)out, (int)out_w, (int)out_h);
+            buf_free(&img);
+        } else {
+            ok = 0;
+        }
+    }
+    ft_unlock();
+    return ok;
+}
 
-    Buf img;
-    if (!build_columns(strings, n, &img)) return 0;
-    fit_contain(&img, (uint32_t *)out, (int)out_w, (int)out_h);
-    buf_free(&img);
+/* Build one horizontal line (premultiplied) reusing draw_cp for glyph layout. */
+static int build_horizontal(const char *s, Buf *out_buf) {
+    int cps[256], ncp = 0;
+    const char *p = s;
+    while (ncp < (int)(sizeof cps / sizeof cps[0])) {
+        int cp = utf8_next(&p);
+        if (cp < 0) break;
+        if (cp == 0xFFFD) continue;
+        cps[ncp++] = cp;
+    }
+    if (ncp == 0) return 0;
+
+    float total = 0;
+    for (int i = 0; i < ncp; i++) total += cp_advance(cps[i]);
+    int w = (int)(total + 2 * PAD), ht = (int)(g_char_h + 2 * PAD);
+    if (w <= 0 || ht <= 0 || w > 8192 || ht > 1024) return 0;
+    if (!buf_init(out_buf, w, ht)) return 0;
+
+    for (int pass = 0; pass < 2; pass++) {
+        int outline = (pass == 0);
+        float x = PAD;
+        for (int i = 0; i < ncp; i++) {
+            draw_cp(out_buf, cps[i], x, PAD, outline);
+            x += cp_advance(cps[i]);
+        }
+    }
     return 1;
+}
+
+int taiko_text_render_argb(const char *utf8, void *out, unsigned int max_w,
+                           unsigned int h, unsigned int outline_rgb) {
+    if (!utf8 || !utf8[0] || !out || max_w == 0 || h == 0) return 0;
+    ft_lock();
+    int dw = 0;
+    if (font_ready()) {
+        OUT_R = (uint8_t)(outline_rgb >> 16);
+        OUT_G = (uint8_t)(outline_rgb >> 8);
+        OUT_B = (uint8_t)outline_rgb;
+        Buf img;
+        if (build_horizontal(utf8, &img)) {
+            dw = img.w * (int)h / img.h;
+            if (dw > (int)max_w) dw = (int)max_w;
+            if (dw < 1) dw = 1;
+            memset(out, 0, (size_t)max_w * h * 4);
+            blit_scaled(&img, (uint32_t *)out, (int)max_w, dw, (int)h, 0, 0);
+            buf_free(&img);
+        }
+    }
+    ft_unlock();
+    return dw;
 }
 
 #ifndef TITLE_RENDER_HOST_TEST
