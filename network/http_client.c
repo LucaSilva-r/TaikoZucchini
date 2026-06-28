@@ -939,6 +939,248 @@ int http_request_direct(const char *method,
     return a.rc;
 }
 
+/* ------------------------------------------------------------------ */
+/* Keep-alive ranged streaming download                                */
+/* ------------------------------------------------------------------ */
+
+/* Read exactly one HTTP response on `ssl`, streaming its body to `sink`. The
+ * connection is left open for the next request. */
+static int read_resp_streamed(mbedtls_ssl_context *ssl, int *out_status,
+                              uint32_t *out_total, size_t *out_clen,
+                              http_body_sink_fn sink, void *ctx) {
+    unsigned char hdr[16384];
+    size_t hlen = 0, hend = 0, scan = 0;
+    int got_headers = 0;
+    int64_t deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
+
+    while (!got_headers) {
+        unsigned char tmp[8192];
+        int rc = mbedtls_ssl_read(ssl, tmp, sizeof tmp);
+        if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (now_ms() > deadline) return -1;
+            tls_retry_sleep();
+            continue;
+        }
+        if (rc <= 0) { dbg_print_hex32("[dl] hdr read rc", (uint32_t)rc); return -1; }
+        if (hlen + (size_t)rc > sizeof hdr) { dbg_print("[dl] hdr too big\n"); return -1; }
+        memcpy(hdr + hlen, tmp, (size_t)rc);
+        hlen += (size_t)rc;
+        for (; scan + 3 < hlen; scan++) {
+            if (hdr[scan] == '\r' && hdr[scan + 1] == '\n' &&
+                hdr[scan + 2] == '\r' && hdr[scan + 3] == '\n') {
+                hend = scan; got_headers = 1; break;
+            }
+        }
+        deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
+    }
+
+    const char *nl = memchr(hdr, '\n', hend);
+    if (!nl) return -1;
+    int status = parse_status_line((const char *)hdr,
+                                   (size_t)(nl - (const char *)hdr));
+    if (status < 0) return -1;
+    *out_status = status;
+
+    http_response_t tr;
+    memset(&tr, 0, sizeof tr);
+    tr.headers = (char *)hdr;
+    tr.headers_len = hend;
+    size_t cl_len = 0, sz_len = 0;
+    const char *cl = http_header_find(&tr, "Content-Length", &cl_len);
+    const char *sz = http_header_find(&tr, "X-Asset-Size", &sz_len);
+    size_t clen = 0;
+    for (size_t i = 0; cl && i < cl_len && cl[i] >= '0' && cl[i] <= '9'; i++)
+        clen = clen * 10 + (size_t)(cl[i] - '0');
+    uint32_t total = 0;
+    for (size_t i = 0; sz && i < sz_len && sz[i] >= '0' && sz[i] <= '9'; i++)
+        total = total * 10 + (uint32_t)(sz[i] - '0');
+    *out_clen = clen;
+    if (out_total) *out_total = total;
+
+    size_t body_start = hend + 4;
+    size_t streamed = 0;
+    if (hlen > body_start) {
+        size_t leftover = hlen - body_start;
+        size_t take = leftover < clen ? leftover : clen;
+        if (take && sink(ctx, hdr + body_start, take) != 0) { dbg_print("[dl] sink1 fail\n"); return -1; }
+        streamed = take;
+    }
+    deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
+    while (streamed < clen) {
+        unsigned char tmp[8192];
+        size_t want = clen - streamed;
+        size_t cap = want < sizeof tmp ? want : sizeof tmp;
+        int rc = mbedtls_ssl_read(ssl, tmp, cap);
+        if (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            if (now_ms() > deadline) return -1;
+            tls_retry_sleep();
+            continue;
+        }
+        if (rc <= 0) { dbg_print_hex32("[dl] body read rc", (uint32_t)rc); return -1; }
+        if (sink(ctx, tmp, (size_t)rc) != 0) { dbg_print("[dl] sink2 fail\n"); return -1; }
+        streamed += (size_t)rc;
+        deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
+    }
+    return 0;
+}
+
+static int http_download_inner(const char *host, int port, const char *path_base,
+                               const char *extra_headers, size_t extra_len,
+                               unsigned int chunk, http_body_sink_fn sink,
+                               void *ctx) {
+    int fd = -1, rc = -1;
+    mbedtls_ssl_context      *ssl     = (mbedtls_ssl_context *)calloc(1, sizeof *ssl);
+    mbedtls_ssl_config       *conf    = (mbedtls_ssl_config *)calloc(1, sizeof *conf);
+    mbedtls_entropy_context  *entropy = (mbedtls_entropy_context *)calloc(1, sizeof *entropy);
+    mbedtls_ctr_drbg_context *drbg    = (mbedtls_ctr_drbg_context *)calloc(1, sizeof *drbg);
+    int ssl_i = 0, conf_i = 0, ent_i = 0, drbg_i = 0;
+    if (!ssl || !conf || !entropy || !drbg) goto done;
+
+    mbedtls_platform_set_calloc_free(calloc, free);
+    mbedtls_platform_set_time(plat_time);
+    mbedtls_ssl_init(ssl);          ssl_i = 1;
+    mbedtls_ssl_config_init(conf);  conf_i = 1;
+    mbedtls_entropy_init(entropy);  ent_i = 1;
+    mbedtls_ctr_drbg_init(drbg);    drbg_i = 1;
+
+    if (mbedtls_ctr_drbg_seed(drbg, mbedtls_entropy_func, entropy,
+                              (const unsigned char *)"taiko-dl", 8) != 0) goto done;
+    if (mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_CLIENT,
+                                    MBEDTLS_SSL_TRANSPORT_STREAM,
+                                    MBEDTLS_SSL_PRESET_DEFAULT) != 0) goto done;
+    mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_rng(conf, mbedtls_ctr_drbg_random, drbg);
+    if (mbedtls_ssl_setup(ssl, conf) != 0) goto done;
+    if (mbedtls_ssl_set_hostname(ssl, host) != 0) goto done;
+
+    struct in_addr ip;
+    if (resolve_host(host, &ip) != 0) goto done;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) goto done;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port   = htons((uint16_t)port);
+    sa.sin_addr   = ip;
+    if (connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof sa,
+                             HTTP_CONNECT_TIMEOUT_MS) < 0) { dbg_print("[dl] connect fail\n"); goto done; }
+    (void)set_io_timeouts(fd, HTTP_IO_TIMEOUT_MS);
+    mbedtls_ssl_set_bio(ssl, (void *)(intptr_t)fd, bio_send, bio_recv, NULL);
+    {
+        int64_t dl = now_ms() + HTTP_HANDSHAKE_TIMEOUT_MS;
+        for (;;) {
+            int hr = mbedtls_ssl_handshake(ssl);
+            if (hr == 0) break;
+            if (hr == MBEDTLS_ERR_SSL_WANT_READ || hr == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if (now_ms() > dl) { dbg_print("[dl] handshake deadline\n"); goto done; }
+                tls_retry_sleep();
+                continue;
+            }
+            dbg_print_hex32("[dl] handshake", (uint32_t)hr);
+            goto done;
+        }
+    }
+    dbg_print("[dl] handshake ok\n");
+
+    uint32_t offset = 0, total = 0;
+    for (;;) {
+        char head[1024];
+        int n = snprintf(head, sizeof head,
+                         "GET %s?offset=%u&length=%u HTTP/1.1\r\n"
+                         "Host: %s\r\nUser-Agent: taiko-sprx/0.1\r\n"
+                         "Accept: */*\r\nConnection: keep-alive\r\n",
+                         path_base, offset, chunk, host);
+        if (n < 0 || (size_t)n >= sizeof head) goto done;
+        if (extra_headers && extra_len > 0) {
+            if ((size_t)n + extra_len + 4 >= sizeof head) goto done;
+            memcpy(head + n, extra_headers, extra_len);
+            n += (int)extra_len;
+            if (n < 2 || head[n - 2] != '\r' || head[n - 1] != '\n') {
+                head[n++] = '\r'; head[n++] = '\n';
+            }
+        }
+        n += snprintf(head + n, sizeof head - (size_t)n, "\r\n");
+        if (ssl_write_all(ssl, (const unsigned char *)head, (size_t)n) != 0) {
+            dbg_print("[dl] write fail\n"); goto done;
+        }
+
+        int status = 0; size_t clen = 0; uint32_t t2 = 0;
+        int rr = read_resp_streamed(ssl, &status, &t2, &clen, sink, ctx);
+        dbg_print_hex32("[dl] read rc", (uint32_t)rr);
+        dbg_print_hex32("[dl] status", (uint32_t)status);
+        dbg_print_hex32("[dl] clen", (uint32_t)clen);
+        dbg_print_hex32("[dl] total", t2);
+        if (rr != 0) goto done;
+        if (status != 200 && status != 206) goto done;
+        if (t2) total = t2;
+        offset += (uint32_t)clen;
+        if (clen == 0) goto done;
+        if (total ? offset >= total : clen < chunk) { rc = 0; goto done; }
+    }
+
+done:
+    if (ssl_i) mbedtls_ssl_close_notify(ssl);
+    if (fd >= 0) socketclose(fd);
+    if (ssl_i)  mbedtls_ssl_free(ssl);
+    if (conf_i) mbedtls_ssl_config_free(conf);
+    if (drbg_i) mbedtls_ctr_drbg_free(drbg);
+    if (ent_i)  mbedtls_entropy_free(entropy);
+    free(ssl); free(conf); free(drbg); free(entropy);
+    return rc;
+}
+
+typedef struct {
+    const char       *host, *path_base, *extra;
+    int               port;
+    size_t            extra_len;
+    unsigned int      chunk;
+    http_body_sink_fn sink;
+    void             *ctx;
+    int               rc;
+    sys_semaphore_t   done_sem;
+} dl_args_t;
+
+static void dl_worker_entry(uint64_t arg) {
+    dl_args_t *a = (dl_args_t *)(uintptr_t)arg;
+    a->rc = http_download_inner(a->host, a->port, a->path_base, a->extra,
+                                a->extra_len, a->chunk, a->sink, a->ctx);
+    sys_semaphore_post(a->done_sem, 1);
+    sys_ppu_thread_exit(0);
+}
+
+int http_download_ranged(const char *host, int port, const char *path_base,
+                         const char *extra_headers, size_t extra_headers_len,
+                         unsigned int chunk, http_body_sink_fn sink, void *ctx) {
+    /* Direct to the given host (like http_request_direct / api_request) — no
+     * online_redirect: that's for game-server traffic, not tjarepo. */
+    if (!host || !path_base || !sink) return -1;
+
+    dl_args_t a;
+    a.host = host; a.port = port; a.path_base = path_base;
+    a.extra = extra_headers; a.extra_len = extra_headers_len;
+    a.chunk = chunk; a.sink = sink; a.ctx = ctx; a.rc = -1;
+
+    sys_semaphore_attribute_t sem_attr;
+    sys_semaphore_attribute_initialize(sem_attr);
+    if (sys_semaphore_create(&a.done_sem, &sem_attr, 0, 1) != CELL_OK)
+        return -1;
+
+    sys_ppu_thread_t tid = 0;
+    int rc = sys_ppu_thread_create(&tid, dl_worker_entry, (uint64_t)(uintptr_t)&a,
+                                   1500, 256 * 1024,
+                                   SYS_PPU_THREAD_CREATE_JOINABLE,
+                                   "taiko_http_dl");
+    if (rc != CELL_OK) {
+        sys_semaphore_destroy(a.done_sem);
+        return -1;
+    }
+    sys_semaphore_wait(a.done_sem, 0);
+    uint64_t st = 0;
+    sys_ppu_thread_join(tid, &st);
+    sys_semaphore_destroy(a.done_sem);
+    return a.rc;
+}
+
 int http_get(const char *url, http_response_t *out) {
     if (out) memset(out, 0, sizeof *out);
     if (!url || !out) return -1;

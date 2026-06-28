@@ -58,6 +58,16 @@ int http_request_direct(const char *method,
 
 void http_response_free(http_response_t *r);
 
+/* Keep-alive ranged download: opens ONE TLS connection and GETs
+ * `path_base?offset=N&length=chunk` repeatedly on it, streaming each response
+ * body straight to `sink` (no per-chunk handshake, no whole-file buffering).
+ * Loops until the server's X-Asset-Size is reached. The sink returns 0 on
+ * success. Returns 0 on success, negative on failure. */
+typedef int (*http_body_sink_fn)(void *ctx, const void *data, size_t len);
+int http_download_ranged(const char *host, int port, const char *path_base,
+                         const char *extra_headers, size_t extra_headers_len,
+                         unsigned int chunk, http_body_sink_fn sink, void *ctx);
+
 /* Case-insensitive header lookup. Returns pointer into `r->headers` to
  * the value (no surrounding whitespace), and writes value length into
  * *out_len. NULL if absent. */

@@ -18,10 +18,10 @@
 
 #define ESE_API_CATEGORIES_PATH "/api/tjarepo/songs/categories"
 #define ESE_CUSTOM_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
-/* Small chunks keep each download's peak heap low: the glyph cache fragments
- * the 3 MB libc heap, so a big contiguous chunk+TLS alloc on a later chunk fails
- * (asset download status=0). 128 KB stays well clear. */
-#define ESE_DOWNLOAD_CHUNK     (128 * 1024)
+/* Per-request length. Streams straight to disk over ONE keep-alive TLS
+ * connection (http_download_ranged), so request the whole asset in one go;
+ * the server returns at most the file size (or its asset_chunk_bytes cap). */
+#define ESE_DOWNLOAD_CHUNK     (32u * 1024 * 1024)
 #define ESE_ASSET_MAX         16
 #define ESE_ASSET_PATH_MAX    128
 #define ESE_MANIFEST_MAX      HTTP_CLIENT_BODY_MAX
@@ -550,22 +550,6 @@ static int write_file(const char *path, const unsigned char *buf, size_t len) {
     return rc == CELL_FS_SUCCEEDED && wrote == len;
 }
 
-static int append_file(const char *path, const unsigned char *buf, size_t len,
-                       int first) {
-    int fd = -1;
-    uint64_t wrote = 0;
-    int flags = CELL_FS_O_CREAT | CELL_FS_O_WRONLY;
-    if (first)
-        flags |= CELL_FS_O_TRUNC;
-    else
-        flags |= CELL_FS_O_APPEND;
-    int rc = cellFsOpen(path, flags, &fd, NULL, 0);
-    if (rc != CELL_FS_SUCCEEDED)
-        return 0;
-    rc = cellFsWrite(fd, buf, len, &wrote);
-    cellFsClose(fd);
-    return rc == CELL_FS_SUCCEEDED && wrote == len;
-}
 
 static int read_local_manifest_matches(const char *song_id,
                                        const unsigned char *manifest,
@@ -706,64 +690,58 @@ static int parse_status(const http_response_t *resp, char *status,
     return status[0] != 0;
 }
 
-static int download_asset_chunked(const char *song_id,
-                                  const char *asset_path) {
-    char api_path[256];
-    char root[192], dest[256];
-    uint32_t offset = 0;
-    int first = 1;
+/* Sink for http_download_ranged: append each streamed chunk to the open file. */
+typedef struct { int fd; int ok; } dl_sink_t;
+static int dl_file_sink(void *vctx, const void *data, size_t len) {
+    dl_sink_t *c = (dl_sink_t *)vctx;
+    uint64_t wrote = 0;
+    if (cellFsWrite(c->fd, data, len, &wrote) != CELL_FS_SUCCEEDED ||
+        wrote != len) {
+        c->ok = 0;
+        return -1;
+    }
+    return 0;
+}
+
+static int download_asset_chunked(const char *song_id, const char *asset_path) {
+    char root[192], dest[256], path_base[256], headers[256];
+    int fd = -1;
 
     if (!ensure_custom_song_dirs(song_id, asset_path))
         return 0;
     if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
         !append_path(dest, sizeof dest, root, asset_path))
         return 0;
-
-    for (;;) {
-        http_response_t resp;
-        int n = snprintf(api_path, sizeof api_path,
-                         "/api/tjarepo/conversions/%s/assets/%s"
-                         "?offset=%u&length=%u",
-                         song_id, asset_path, offset,
-                         (unsigned)ESE_DOWNLOAD_CHUNK);
-        if (n <= 0 || (size_t)n >= sizeof api_path)
-            return 0;
-
-        memset(&resp, 0, sizeof resp);
-        int rc = api_request("GET", api_path, &resp);
-        if (rc != 0 || (resp.status != 200 && resp.status != 206) ||
-            !resp.body || resp.body_len == 0) {
-            dbg_print("[ese] asset download failed: ");
-            dbg_print(asset_path);
-            dbg_print("\n");
-            dbg_print_hex32("[ese] status", (uint32_t)resp.status);
-            http_response_free(&resp);
-            return 0;
-        }
-        if (!append_file(dest, resp.body, resp.body_len, first)) {
-            http_response_free(&resp);
-            return 0;
-        }
-        first = 0;
-        offset += (uint32_t)resp.body_len;
-
-        size_t total_len = 0;
-        const char *total = http_header_find(&resp, "X-Asset-Size",
-                                             &total_len);
-        uint32_t total_size = 0;
-        if (total) {
-            for (size_t i = 0; i < total_len; i++) {
-                if (total[i] < '0' || total[i] > '9')
-                    break;
-                total_size = total_size * 10u + (uint32_t)(total[i] - '0');
-            }
-        }
-        int done = total_size ? offset >= total_size
-                              : resp.body_len < ESE_DOWNLOAD_CHUNK;
-        http_response_free(&resp);
-        if (done)
-            return 1;
+    int n = snprintf(path_base, sizeof path_base,
+                     "/api/tjarepo/conversions/%s/assets/%s", song_id, asset_path);
+    if (n <= 0 || (size_t)n >= sizeof path_base)
+        return 0;
+    if (!ese_song_service_ready())
+        return 0;
+    int hn = api_headers(headers, sizeof headers);
+    if (hn < 0)
+        return 0;
+    if (cellFsOpen(dest, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                   &fd, NULL, 0) != CELL_FS_SUCCEEDED) {
+        dbg_print("[ese] dest open failed\n");
+        return 0;
     }
+
+    dl_sink_t sc = { fd, 1 };
+    int port = g_cfg.tjarepo_port ? (int)g_cfg.tjarepo_port : 443;
+    /* ONE keep-alive TLS connection streams every ranged chunk straight to disk
+     * (no per-chunk handshake, no whole-file buffering). */
+    int rc = http_download_ranged(g_cfg.tjarepo_host, port, path_base,
+                                  headers, (size_t)hn, ESE_DOWNLOAD_CHUNK,
+                                  dl_file_sink, &sc);
+    cellFsClose(fd);
+    if (rc != 0 || !sc.ok) {
+        dbg_print("[ese] asset download failed: ");
+        dbg_print(asset_path);
+        dbg_print("\n");
+        return 0;
+    }
+    return 1;
 }
 
 static int write_local_manifest(const char *song_id,
