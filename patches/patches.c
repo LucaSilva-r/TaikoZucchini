@@ -23,6 +23,7 @@
 #include "icache.h"
 #include "patch_target.h"
 #include "patches.h"
+#include "usrdir_path.h"
 
 #define T  g_patch_target
 
@@ -1425,6 +1426,17 @@ static int dani_find_dormant_type9_case(uintptr_t count_sig,
     return 0;
 }
 
+static int dani_red_config_root_present(void) {
+    char path[256];
+    CellFsStat st;
+
+    if (!usrdir_resolve_path("data/config/ST8100-1", path, sizeof path)) {
+        dbg_print("[patch] Dan-i Dojo RED guard skipped; USRDIR unresolved\n");
+        return 0;
+    }
+    return cellFsStat(path, &st) == CELL_FS_SUCCEEDED;
+}
+
 static int resolve_dani_dojo_sites(uintptr_t *out_count_patch,
                                    uintptr_t *out_emit_patch,
                                    uintptr_t *out_dormant_case,
@@ -1495,6 +1507,11 @@ static void apply_dani_dojo_unlock(void) {
     uintptr_t dormant_case = 0;
     int count_state = DANI_GATE_ABSENT;
     int emit_state = DANI_GATE_ABSENT;
+
+    if (dani_red_config_root_present()) {
+        dbg_print("[patch] Dan-i Dojo unlock skipped; RED config root present\n");
+        return;
+    }
 
     if (!resolve_dani_dojo_sites(&count_patch, &emit_patch, &dormant_case,
                                  &count_state, &emit_state))

@@ -7,6 +7,8 @@
 
 extern const uint8_t taiko_white_dani_taikojuku_hook_start[];
 extern const uint8_t taiko_white_dani_taikojuku_hook_end[];
+extern const uint8_t taiko_murasaki_dani_taikojuku_hook_start[];
+extern const uint8_t taiko_murasaki_dani_taikojuku_hook_end[];
 
 static const uint32_t WHITE_ROW_HOOK_WORDS[] = {
     0x3880000Du, /* li r4,0x0d */
@@ -88,6 +90,27 @@ static const eboot_inline_signature_t WHITE_DANI_TAIKOJUKU_SIGNATURES[] = {
     },
 };
 
+static const uint32_t MURASAKI_ROW_HOOK_WORDS[] = {
+    0x3900000Du, /* li r8,0x0d */
+};
+
+static const uint32_t MURASAKI_ROW_HOOK_MASKS[] = {
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t MURASAKI_DANI_TAIKOJUKU_SIGNATURES[] = {
+    {
+        "murasaki row 0x0d hook",
+        0x005D8A24u,
+        MURASAKI_ROW_HOOK_WORDS,
+        MURASAKI_ROW_HOOK_MASKS,
+        sizeof(MURASAKI_ROW_HOOK_WORDS) /
+            sizeof(MURASAKI_ROW_HOOK_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
 static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
     {
         "dani_dojo_unlock",
@@ -101,6 +124,19 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0067DE40u,
+    },
+    {
+        "dani_dojo_unlock",
+        "murasaki-st61-sceexe001-01.00-dani-taikojuku",
+        0x005D8A24u,
+        MURASAKI_DANI_TAIKOJUKU_SIGNATURES,
+        sizeof(MURASAKI_DANI_TAIKOJUKU_SIGNATURES) /
+            sizeof(MURASAKI_DANI_TAIKOJUKU_SIGNATURES[0]),
+        taiko_murasaki_dani_taikojuku_hook_start,
+        taiko_murasaki_dani_taikojuku_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x005D7BF8u,
     },
 };
 

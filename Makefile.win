@@ -117,7 +117,8 @@ SRCS = core\main.c core\debug.c core\diag_log.c core\qr_encode.c \
        network\uri.c network\http_client.c network\version_check.c
 
 MAIN_OBJS = $(SRCS:.c=.o)
-ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o
+ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o \
+           patches\asm\murasaki_dani_taikojuku_hook.o
 
 SPU_QR_ELF = $(BIN_DIR)\qr_spu.elf
 SPU_QR_ELF_SECTION = bin/qr_spu.elf
@@ -277,6 +278,9 @@ ftp_eboot\menu_draw.o: ftp_eboot\menu_draw.c
 
 patches\asm\white_dani_taikojuku_hook.o: patches\asm\white_dani_taikojuku_hook.S
 	$(PPU_CC) $(CFLAGS) -c patches\asm\white_dani_taikojuku_hook.S -o $@
+
+patches\asm\murasaki_dani_taikojuku_hook.o: patches\asm\murasaki_dani_taikojuku_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\murasaki_dani_taikojuku_hook.S -o $@
 
 clean-prx:
 	-del /Q "$(SYM)" "$(PRX)" "$(SPRX)" "$(SPU_QR_ELF)" "$(SPU_QR_PPU_OBJ)" 2>NUL
