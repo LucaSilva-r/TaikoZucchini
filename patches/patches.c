@@ -1400,7 +1400,7 @@ static const dani_version_site_t DANI_VERSION_SITES[] = {
         "Momoiro v04r00",
         0x00528464u,
         0x00528534u,
-        0x005292F8u,
+        0x005293F8u,
         0x00528550u,
         0x3900000Cu,
         1,

@@ -246,7 +246,7 @@ $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
 
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
-core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h cards/card_picker.h
+core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h hooks/chassisinfo_hook.h core/overlay.h network/version_check.h cards/card_picker.h
 mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h mod_menu/menu_font_30.h mod_menu/menu_font_42.h
 mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
 mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
@@ -266,7 +266,7 @@ cards/card_store.o:  cards/card_store.c cards/card_store.h config/cfg_file.h cor
 cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_issuer.h cards/card_store.h qr/camera_qr.h hooks/bpreader_hook.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h input/kb_input.h config/runtime.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
 cards/card_issuer.o: cards/card_issuer.c cards/card_issuer.h network/http_client.h config/runtime.h config/network.h core/debug.h
 hooks/bpreader_hook.o: hooks/bpreader_hook.c hooks/bpreader_hook.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
-hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h
+hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h storage/usrdir_path.h
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h
 storage/chassisinfo_synth.o: storage/chassisinfo_synth.c storage/chassisinfo_synth.h storage/chassisinfo_schema.h config.h config/runtime.h core/debug.h
 storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_schema.h

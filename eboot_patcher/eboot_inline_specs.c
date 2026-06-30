@@ -227,7 +227,7 @@ static const eboot_inline_signature_t MOMOIRO_DANI_EMIT_SIGNATURES[] = {
     },
     {
         "momoiro dormant type-9 row",
-        0x005292F8u,
+        0x005293F8u,
         MOMOIRO_ROW_WORDS,
         ROW_MASKS,
         sizeof(MOMOIRO_ROW_WORDS) / sizeof(MOMOIRO_ROW_WORDS[0]),

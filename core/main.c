@@ -906,6 +906,7 @@ int taiko_start(unsigned int args, void *argp) {
     bpreader_hook_install();
     bpreader_serial_set_reader_enabled(1);
     (void)taiko_game_chassisinfo_dir();  /* warm cache + log detected version */
+    chassisinfo_rewrite_root_file();
     chassisinfo_hook_install();
     /* Publish the live dongle serial into the FPT so the patched fcntl
      * reader serves the current config value (v3+ EBOOTs). No-op on older
