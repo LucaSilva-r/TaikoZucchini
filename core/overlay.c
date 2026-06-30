@@ -260,11 +260,11 @@ static int ensure_overlay_mapped(void) {
     cursor += OVERLAY_QR_TEX_DIM * OVERLAY_QR_TEX_DIM * 4;
 
     cursor = align_up_u32(cursor, 128);
-    CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
+    CgBinaryProgram fp = overlay_quad_header(overlay_quad_fp_cgb);
     g_fp_ucode_io = off + cursor;
     memcpy((uint8_t *)g_overlay_mem + cursor,
-           (const uint8_t *)fp + fp->ucode, fp->ucodeSize);
-    cursor += fp->ucodeSize;
+           overlay_quad_ucode(overlay_quad_fp_cgb), fp.ucodeSize);
+    cursor += fp.ucodeSize;
 
     cursor = align_up_u32(cursor, 128);
     g_text_vtx = (overlay_vertex_t *)((uint8_t *)g_overlay_mem + cursor);
@@ -539,12 +539,11 @@ static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b
     cellGcmSetCullFaceEnable(cmd, CELL_GCM_FALSE);
 
     append_blend_state(cmd, 1);
-    cellGcmSetVertexProgram(cmd, (CGprogram)overlay_quad_vp_cgb,
-                            (const uint8_t *)overlay_quad_vp_cgb +
-                            ((CgBinaryProgram *)overlay_quad_vp_cgb)->ucode);
-    cellGcmSetFragmentProgramOffset(cmd, (CGprogram)overlay_quad_fp_cgb,
+    cellGcmSetVertexProgram(cmd, overlay_quad_program(overlay_quad_vp_cgb),
+                            overlay_quad_ucode(overlay_quad_vp_cgb));
+    cellGcmSetFragmentProgramOffset(cmd, overlay_quad_program(overlay_quad_fp_cgb),
                                     g_fp_ucode_io, CELL_GCM_LOCATION_MAIN);
-    cellGcmSetFragmentProgramControl(cmd, (CGprogram)overlay_quad_fp_cgb, 0, 1, 0);
+    cellGcmSetFragmentProgramControl(cmd, overlay_quad_program(overlay_quad_fp_cgb), 0, 1, 0);
 
     CellGcmTexture tex;
     memset(&tex, 0, sizeof tex);

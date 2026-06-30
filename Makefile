@@ -71,11 +71,10 @@ CFLAGS  := -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
 
 # -mprx + -zgenprx + -zgenstub tell the toolchain to emit the PRX-shape
 # ELF (proper SCE_PPURELA segment, sceModuleInfo, lib.ent/lib.stub layout).
-# --gc-sections drops mbedTLS objects whose features are disabled in
+# --strip-unused-data drops mbedTLS objects whose features are disabled in
 # mbedtls_config.h so the SPRX stays small.
 LDFLAGS := -mprx -zgenprx -zgenstub \
            -Wl,--strip-unused-data \
-           -Wl,--gc-sections \
            -L$(CELL_SDK)/target/ppu/lib
 
 # libc:        memcpy/memcmp (frozen subset usable in PRX context)
@@ -147,6 +146,8 @@ SPU_QR_CFLAGS := -Os -Wall -Wextra -std=gnu99 -DNDEBUG \
                  -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH \
                  -I$(CELL_SDK)/target/spu/include \
                  -Iqr_spu -I$(QUIRC_DIR)/lib
+QUIRC_WARN_CFLAGS := -Wno-extra -Wno-missing-braces \
+                     -Wno-missing-field-initializers
 SPU_QR_LDFLAGS := -L$(CELL_SDK)/target/spu/lib
 SPU_QR_LDLIBS := -lm
 
@@ -206,13 +207,13 @@ $(BIN_DIR)/qr_spu_main.spu.o: qr_spu/qr_spu_main.c qr_spu/qr_spu_shared.h $(QUIR
 	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
 
 $(BIN_DIR)/quirc_decode.spu.o: $(QUIRC_DIR)/lib/decode.c $(QUIRC_DIR)/lib/quirc.h $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
-	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $< -o $@
 
 $(BIN_DIR)/quirc_identify.spu.o: $(QUIRC_DIR)/lib/identify.c $(QUIRC_DIR)/lib/quirc.h $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
-	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $< -o $@
 
 $(BIN_DIR)/quirc_version_db.spu.o: $(QUIRC_DIR)/lib/version_db.c $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
-	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $< -o $@
 
 $(SPU_QR_ELF): $(SPU_QR_OBJS) | $(BIN_DIR)
 	$(SPU_LD) $(SPU_QR_LDFLAGS) $(SPU_QR_OBJS) $(SPU_QR_LDLIBS) -o $@
@@ -240,7 +241,7 @@ $(MBEDTLS_DIR)/library/%.o: $(MBEDTLS_DIR)/library/%.c $(MBEDTLS_CONFIG_H)
 # substitute manual rint/fabs/sqrt; libm calls return the input register
 # unchanged at PRX init time on this firmware.
 $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
-	$(PPU_CC) $(CFLAGS) -Os -DNDEBUG -include qr/quirc_math_shim.h -c $< -o $@
+	$(PPU_CC) $(CFLAGS) $(QUIRC_WARN_CFLAGS) -Os -DNDEBUG -include qr/quirc_math_shim.h -c $< -o $@
 
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h

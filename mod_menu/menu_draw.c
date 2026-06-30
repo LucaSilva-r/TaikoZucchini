@@ -180,11 +180,11 @@ static int ensure_mapped(void) {
     g_tex[g_white_tex].height = 16;
     g_tex[g_white_tex].pitch = UI_ATLAS_PITCH;
 
-    CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
+    CgBinaryProgram fp = overlay_quad_header(overlay_quad_fp_cgb);
     void *fp_dst = NULL;
-    if (!alloc_region(fp->ucodeSize, 128, &g_fp_ucode_io, &fp_dst))
+    if (!alloc_region(fp.ucodeSize, 128, &g_fp_ucode_io, &fp_dst))
         return 0;
-    memcpy(fp_dst, (const uint8_t *)fp + fp->ucode, fp->ucodeSize);
+    memcpy(fp_dst, overlay_quad_ucode(overlay_quad_fp_cgb), fp.ucodeSize);
 
     for (int i = 0; i < UI_VERTEX_SLOTS; i++) {
         if (!alloc_region(UI_RECT_MAX * sizeof(ui_vertex_t), 128,
@@ -286,12 +286,11 @@ static void setup_blend(CellGcmContextData *ctx, int enable) {
 }
 
 static void setup_shader(CellGcmContextData *ctx) {
-    cellGcmSetVertexProgram(ctx, (CGprogram)overlay_quad_vp_cgb,
-                            (const uint8_t *)overlay_quad_vp_cgb +
-                            ((CgBinaryProgram *)overlay_quad_vp_cgb)->ucode);
-    cellGcmSetFragmentProgramOffset(ctx, (CGprogram)overlay_quad_fp_cgb,
+    cellGcmSetVertexProgram(ctx, overlay_quad_program(overlay_quad_vp_cgb),
+                            overlay_quad_ucode(overlay_quad_vp_cgb));
+    cellGcmSetFragmentProgramOffset(ctx, overlay_quad_program(overlay_quad_fp_cgb),
                                     g_fp_ucode_io, CELL_GCM_LOCATION_MAIN);
-    cellGcmSetFragmentProgramControl(ctx, (CGprogram)overlay_quad_fp_cgb, 0, 1, 0);
+    cellGcmSetFragmentProgramControl(ctx, overlay_quad_program(overlay_quad_fp_cgb), 0, 1, 0);
 }
 
 static void setup_texture(CellGcmContextData *ctx, int tex_id) {

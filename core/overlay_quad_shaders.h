@@ -2,6 +2,9 @@
 #define TAIKO_CORE_OVERLAY_QUAD_SHADERS_H
 
 #include <stdint.h>
+#include <string.h>
+
+#include <Cg/cgBinary.h>
 
 static const uint8_t overlay_quad_vp_cgb[] __attribute__((aligned(16))) = {
   0x00, 0x00, 0x1b, 0x5b, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x02, 0x00,
@@ -86,5 +89,20 @@ static const uint8_t overlay_quad_fp_cgb[] __attribute__((aligned(16))) = {
 
 #define OVERLAY_QUAD_VP_CGB_LEN ((uint32_t)sizeof(overlay_quad_vp_cgb))
 #define OVERLAY_QUAD_FP_CGB_LEN ((uint32_t)sizeof(overlay_quad_fp_cgb))
+
+static inline CGprogram overlay_quad_program(const uint8_t *cgb) {
+    return (CGprogram)(uintptr_t)cgb;
+}
+
+static inline CgBinaryProgram overlay_quad_header(const uint8_t *cgb) {
+    CgBinaryProgram header;
+    memcpy(&header, cgb, sizeof header);
+    return header;
+}
+
+static inline const uint8_t *overlay_quad_ucode(const uint8_t *cgb) {
+    CgBinaryProgram header = overlay_quad_header(cgb);
+    return cgb + header.ucode;
+}
 
 #endif

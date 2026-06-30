@@ -280,55 +280,6 @@ static int find_import_stub_by_fnid(uint32_t fnid, uintptr_t *out_stub) {
     return 0;
 }
 
-static int find_http_stub_anchor(uintptr_t *out) {
-    static const uint16_t http_stub_delta[] = {
-        0x0000u, 0x0020u, 0x0040u, 0x0060u, 0x0080u, 0x00A0u,
-        0x00C0u, 0x00E0u, 0x0100u, 0x0120u, 0x0140u, 0x0160u,
-        0x0180u, 0x01A0u, 0x01C0u, 0x01E0u, 0x0200u, 0x0220u,
-        0x0240u, 0x02C0u, 0x0260u, 0x0280u, 0x02A0u,
-    };
-    static const uint16_t http_got_delta[] = {
-        0x0000u, 0x0004u, 0x0008u, 0x000Cu, 0x0010u, 0x0014u,
-        0x0018u, 0x001Cu, 0x0020u, 0x0024u, 0x0028u, 0x002Cu,
-        0x0030u, 0x0034u, 0x0038u, 0x003Cu, 0x0040u, 0x0044u,
-        0x0048u, 0x004Cu, 0x01C8u, 0x01CCu, 0x01D0u,
-    };
-    uintptr_t found = 0;
-    uint32_t count = 0;
-
-    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x300u <= CFG_SCAN_TEXT_END; p += 4) {
-        uintptr_t got_anchor = 0;
-        int ok = 1;
-
-        for (size_t i = 0; i < sizeof(http_stub_delta) / sizeof(http_stub_delta[0]); i++) {
-            uintptr_t got_slot = 0;
-            if (!import_stub_matches(p + http_stub_delta[i], &got_slot)) {
-                ok = 0;
-                break;
-            }
-            if (i == 0)
-                got_anchor = got_slot;
-            if (got_slot != got_anchor + http_got_delta[i]) {
-                ok = 0;
-                break;
-            }
-        }
-
-        if (!ok)
-            continue;
-        found = p;
-        count++;
-        if (count > 1)
-            break;
-    }
-
-    if (count == 1) {
-        *out = found;
-        return 1;
-    }
-    return 0;
-}
-
 static int resolve_usb_patch_sites(usb_patch_sites_t *s) {
 #if CFG_RUNTIME_SCAN_USB_PATCHES
     static const uint32_t dongle_probe_orig[] = {
