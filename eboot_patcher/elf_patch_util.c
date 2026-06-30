@@ -213,7 +213,7 @@ int elf_patch_append_to_load(self_ctx_t *ctx, elf_patch_view_t *view,
     uint64_t load_off = prefer_elf ? p->p_offset : ctx->si[ph_index].offset;
     uint64_t load_size = prefer_elf ? p->p_filesz : ctx->si[ph_index].size;
     uint64_t payload_off = elf_patch_align_u64(load_off + load_size, alignment);
-    uint64_t payload_va = elf_patch_align_u64(p->p_vaddr + p->p_filesz, alignment);
+    uint64_t payload_va = p->p_vaddr + (payload_off - load_off);
     uint64_t payload_end = payload_off + size;
     uint64_t next_load_off = 0;
 
@@ -233,11 +233,12 @@ int elf_patch_append_to_load(self_ctx_t *ctx, elf_patch_view_t *view,
     memcpy(ctx->buf + payload_off, src, size);
 
     uint64_t old_size = load_size;
-    uint64_t growth = payload_end - (load_off + load_size);
-    p->p_filesz += growth;
-    p->p_memsz += growth;
+    uint64_t new_size = payload_end - load_off;
+    p->p_filesz = new_size;
+    if (p->p_memsz < new_size)
+        p->p_memsz = new_size;
 
-    elf_patch_update_self_section_size(ctx, ph_index, old_size, p->p_filesz);
+    elf_patch_update_self_section_size(ctx, ph_index, old_size, new_size);
     elf_patch_update_embedded_phdr(ctx, ph_index, p);
 
     *out_off = payload_off;

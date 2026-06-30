@@ -227,7 +227,7 @@ static int install_spec(self_ctx_t *ctx, elf_patch_view_t *view,
     uint64_t rx_size = ctx->si[rx_index].size;
     uint64_t alignment = spec->payload_alignment ? spec->payload_alignment : 4u;
     predicted_off = elf_patch_align_u64(rx_off + rx_size, alignment);
-    predicted_va = elf_patch_align_u64(rx->p_vaddr + rx->p_filesz, alignment);
+    predicted_va = rx->p_vaddr + (predicted_off - rx_off);
 
     uint32_t alloc_words = 0;
     rc = build_payload_image(spec, (uint32_t)predicted_va, &alloc_words,
