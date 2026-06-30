@@ -27,7 +27,18 @@ typedef struct {
     const uint32_t *branch_targets;
 } eboot_inline_signature_t;
 
-typedef struct {
+typedef struct eboot_inline_hook_spec eboot_inline_hook_spec_t;
+
+typedef int (*eboot_inline_resolve_fn)(self_ctx_t *ctx,
+                                       const void *view,
+                                       eboot_inline_hook_spec_t *out_spec);
+typedef int (*eboot_inline_patch_payload_fn)(
+    const eboot_inline_hook_spec_t *spec,
+    uint32_t payload_va,
+    uint8_t *dst,
+    size_t dst_size);
+
+struct eboot_inline_hook_spec {
     const char *feature_id;
     const char *binary_id;
     uint32_t hook_va;
@@ -38,7 +49,10 @@ typedef struct {
     uint32_t payload_alignment;
     eboot_inline_return_mode_t return_mode;
     uint32_t continuation_va;
-} eboot_inline_hook_spec_t;
+    eboot_inline_resolve_fn resolve;
+    eboot_inline_patch_payload_fn patch_payload;
+    uint32_t payload_args[4];
+};
 
 uint32_t eboot_inline_encode_branch(uint32_t from_va, uint32_t to_va,
                                     int link, int *ok);

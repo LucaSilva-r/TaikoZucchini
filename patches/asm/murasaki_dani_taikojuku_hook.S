@@ -53,6 +53,15 @@ taiko_murasaki_dani_taikojuku_hook_start:
     stw     r0,64(r1)
     stw     r0,68(r1)
     stw     r0,72(r1)
+
+    /* Preserve original Dani visibility: row 0x0D only appears on song 1. */
+    lwz     r11,0(r25)
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,murasaki_skip_dani_row
+    clrldi  r11,r11,32
+    lwz     r9,28(r11)
+    cmpwi   cr7,r9,1
+    bc      BO_IF_FALSE,CR7_EQ,murasaki_skip_dani_row
     li      r0,13
     stw     r0,256(r1)
     lwz     r0,16(r30)
@@ -70,6 +79,8 @@ taiko_murasaki_dani_taikojuku_hook_start:
     mtctr   r12
     bctrl
     ld      r2,360(r1)
+
+murasaki_skip_dani_row:
     clrldi  r3,r22,32
     lwz     r4,4(r3)
     cmpwi   cr7,r4,0

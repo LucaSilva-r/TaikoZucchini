@@ -1,7 +1,6 @@
 # Windows NMAKE build for the Sony Cell SDK host-win32 toolchain.
 #
-# Run from a Visual Studio developer prompt, for example:
-#   call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat"
+# Run from an x64 Native Tools Command Prompt for Visual Studio:
 #   nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=token
 #
 # CELL_SDK defaults to SCE_PS3_ROOT when set, then H:\PS3_SDK.
@@ -117,7 +116,8 @@ SRCS = core\main.c core\debug.c core\diag_log.c core\qr_encode.c \
 
 MAIN_OBJS = $(SRCS:.c=.o)
 ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o \
-           patches\asm\murasaki_dani_taikojuku_hook.o
+           patches\asm\murasaki_dani_taikojuku_hook.o \
+           patches\asm\pre_red_dani_emit_gate_hook.o
 
 SPU_QR_ELF = $(BIN_DIR)\qr_spu.elf
 SPU_QR_ELF_SECTION = bin/qr_spu.elf
@@ -282,6 +282,9 @@ patches\asm\white_dani_taikojuku_hook.o: patches\asm\white_dani_taikojuku_hook.S
 
 patches\asm\murasaki_dani_taikojuku_hook.o: patches\asm\murasaki_dani_taikojuku_hook.S
 	$(PPU_CC) $(CFLAGS) -c patches\asm\murasaki_dani_taikojuku_hook.S -o $@
+
+patches\asm\pre_red_dani_emit_gate_hook.o: patches\asm\pre_red_dani_emit_gate_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\pre_red_dani_emit_gate_hook.S -o $@
 
 clean-prx:
 	-del /Q "$(SYM)" "$(PRX)" "$(SPRX)" "$(SPU_QR_ELF)" "$(SPU_QR_PPU_OBJ)" 2>NUL

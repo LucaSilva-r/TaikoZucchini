@@ -32,6 +32,15 @@ taiko_white_dani_taikojuku_hook_start:
     stdu    r1,-384(r1)
     std     r0,368(r1)
     std     r2,360(r1)
+
+    /* Preserve original Dani visibility: row 0x0D only appears on song 1. */
+    lwz     r11,0(r21)
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,white_skip_dani_row
+    clrldi  r11,r11,32
+    lwz     r9,28(r11)
+    cmpwi   cr7,r9,1
+    bc      BO_IF_FALSE,CR7_EQ,white_skip_dani_row
     addi    r3,r1,504
     li      r4,13
     lwz     r5,16(r29)
@@ -43,6 +52,7 @@ taiko_white_dani_taikojuku_hook_start:
     bctrl
     ld      r2,360(r1)
 
+white_skip_dani_row:
     /* Guard against duplicate visible row 0x11 in the local row vector. */
     li      r0,0
     stw     r0,64(r1)

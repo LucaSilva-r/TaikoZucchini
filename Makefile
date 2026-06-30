@@ -126,7 +126,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_s
            network/uri.c network/http_client.c network/version_check.c
 OBJS    := $(SRCS:.c=.o)
 ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
-            patches/asm/murasaki_dani_taikojuku_hook.S
+            patches/asm/murasaki_dani_taikojuku_hook.S \
+            patches/asm/pre_red_dani_emit_gate_hook.S
 ASM_OBJS := $(ASM_SRCS:.S=.o)
 OBJS += $(ASM_OBJS)
 
@@ -255,6 +256,7 @@ eboot_patcher/eboot_inline_hook.o: eboot_patcher/eboot_inline_hook.c eboot_patch
 eboot_patcher/eboot_inline_specs.o: eboot_patcher/eboot_inline_specs.c eboot_patcher/eboot_inline_specs.h eboot_patcher/eboot_inline_hook.h config/runtime.h
 patches/asm/white_dani_taikojuku_hook.o: patches/asm/white_dani_taikojuku_hook.S
 patches/asm/murasaki_dani_taikojuku_hook.o: patches/asm/murasaki_dani_taikojuku_hook.S
+patches/asm/pre_red_dani_emit_gate_hook.o: patches/asm/pre_red_dani_emit_gate_hook.S
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h

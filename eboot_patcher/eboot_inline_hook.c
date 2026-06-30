@@ -37,10 +37,23 @@ static int decode_branch_target(uint32_t insn_va, uint32_t word,
     return 1;
 }
 
+static int decode_conditional_branch_target(uint32_t insn_va, uint32_t word,
+                                            uint32_t *out_target) {
+    if ((word & 0xFC000003u) != 0x40000000u)
+        return 0;
+
+    int32_t disp = (int32_t)(word & 0x0000FFFCu);
+    if (disp & 0x00008000)
+        disp |= (int32_t)0xFFFF0000u;
+    *out_target = (uint32_t)(insn_va + disp);
+    return 1;
+}
+
 static void log_actual_branch_target(uint32_t va, uint32_t word) {
     uint32_t target = 0;
     if (decode_branch_target(va, word, 0, &target) ||
-        decode_branch_target(va, word, 1, &target))
+        decode_branch_target(va, word, 1, &target) ||
+        decode_conditional_branch_target(va, word, &target))
         dbg_print_hex32("[patch] inline actual branch target", target);
 }
 
@@ -65,8 +78,12 @@ static int signature_word_matches(const eboot_inline_signature_t *sig,
 
         uint32_t target = 0;
         int link = match_type == EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET;
-        if (!decode_branch_target(va, actual_word, link, &target))
-            return 0;
+        if (!decode_branch_target(va, actual_word, link, &target)) {
+            if (link || !decode_conditional_branch_target(va, actual_word,
+                                                          &target)) {
+                return 0;
+            }
+        }
         return target == sig->branch_targets[i] ? 1 : 0;
     }
 
@@ -173,6 +190,12 @@ static int build_payload_image(const eboot_inline_hook_spec_t *spec,
         elf_patch_store_be32(dst + payload_size, branch);
     }
 
+    if (spec->patch_payload) {
+        int rc = spec->patch_payload(spec, payload_va, dst, total_size);
+        if (rc != 0)
+            return -5;
+    }
+
     *out_alloc_words = (uint32_t)(total_size / 4u);
     return 0;
 }
@@ -268,13 +291,21 @@ int eboot_inline_hook_apply(self_ctx_t *ctx,
     if (rc != 0)
         return -10 + rc;
 
-    const eboot_inline_hook_spec_t *match = NULL;
     uint32_t match_count = 0;
 
     for (size_t i = 0; i < spec_count; i++) {
-        const eboot_inline_hook_spec_t *spec = &specs[i];
+        eboot_inline_hook_spec_t resolved = specs[i];
+        const eboot_inline_hook_spec_t *spec = &resolved;
         if (feature_id && spec->feature_id && strcmp(feature_id, spec->feature_id) != 0)
             continue;
+
+        if (spec->resolve) {
+            rc = spec->resolve(ctx, &view, &resolved);
+            if (rc < 0)
+                return -130 + rc;
+            if (rc == 0)
+                continue;
+        }
 
         rc = spec_match(ctx, &view, spec);
         if (rc < 0)
@@ -282,12 +313,10 @@ int eboot_inline_hook_apply(self_ctx_t *ctx,
         if (rc == 0)
             continue;
 
-        match = spec;
         match_count++;
-        if (match_count > 1u) {
-            dbg_print("[patch] inline hook ambiguous specs\n");
-            return -120;
-        }
+        rc = install_spec(ctx, &view, spec);
+        if (rc != 0)
+            return rc;
     }
 
     if (match_count == 0) {
@@ -295,5 +324,5 @@ int eboot_inline_hook_apply(self_ctx_t *ctx,
         return 0;
     }
 
-    return install_spec(ctx, &view, match);
+    return 0;
 }

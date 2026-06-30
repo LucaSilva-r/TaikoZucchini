@@ -340,11 +340,11 @@ SDK layout is the native `host-win32/` toolchain:
 
 ### Windows with Visual Studio NMAKE
 
-Open an x64 Native Tools Command Prompt, or initialize Visual Studio from
-`cmd.exe`, then build from the repository root:
+Open an x64 Native Tools Command Prompt for Visual Studio, or initialize the
+environment from your installed Visual Studio first, then build from the
+repository root:
 
 ```bat
-call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat"
 nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=your_token
 ```
 
