@@ -3,13 +3,11 @@
 # Run from an x64 Native Tools Command Prompt for Visual Studio:
 #   nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=token
 #
-# CELL_SDK defaults to SCE_PS3_ROOT when set, then H:\PS3_SDK.
+# CELL_SDK defaults to SCE_PS3_ROOT when set. Otherwise pass CELL_SDK=...
 
 !IF "$(CELL_SDK)" == ""
 !IF "$(SCE_PS3_ROOT)" != ""
 CELL_SDK = $(SCE_PS3_ROOT)
-!ELSE
-CELL_SDK = H:\PS3_SDK
 !ENDIF
 !ENDIF
 
@@ -197,13 +195,16 @@ QUIRC_OBJS = $(QUIRC_SRCS:.c=.o)
 
 OBJS = $(MAIN_OBJS) $(SPU_QR_PPU_OBJ) $(MBEDTLS_OBJS) $(QUIRC_OBJS) $(ASM_OBJS)
 
-all: check-token $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
+all: check-sdk check-token $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
 
-sprx: check-token $(SPRX)
+sprx: check-sdk check-token $(SPRX)
 
-bootstrap: $(BOOTSTRAP_EBOOT)
+bootstrap: check-sdk $(BOOTSTRAP_EBOOT)
 
-ftp-eboot: $(FTP_EBOOT)
+ftp-eboot: check-sdk $(FTP_EBOOT)
+
+check-sdk:
+	@if "$(CELL_SDK)" == "" (echo CELL_SDK must be provided or SCE_PS3_ROOT must be set & exit /b 1)
 
 check-token:
 	@if "$(TAIKO_ZUCCHINI_API_TOKEN)" == "" (echo TAIKO_ZUCCHINI_API_TOKEN must be provided & exit /b 1)
@@ -303,6 +304,6 @@ RPCS3_DEV_HDD0 = $(USERPROFILE)\AppData\Roaming\rpcs3\dev_hdd0
 !ENDIF
 RPCS3_PLUGIN_DIR = $(RPCS3_DEV_HDD0)\plugins\taiko
 
-install: check-token $(SPRX)
+install: check-sdk check-token $(SPRX)
 	if not exist "$(RPCS3_PLUGIN_DIR)" mkdir "$(RPCS3_PLUGIN_DIR)"
 	copy /Y "$(SPRX)" "$(RPCS3_PLUGIN_DIR)\zucchini.sprx"

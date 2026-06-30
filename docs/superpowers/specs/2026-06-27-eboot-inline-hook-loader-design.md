@@ -5,8 +5,8 @@ Date: 2026-06-27
 ## Context
 
 Taiko Zucchini already patches the game EBOOT during the first-run and repatch
-flows. The patch at `H:\RPCS3\rpcs3-blue\patches\imported_patch.yml` proves a
-White AC15 behavior change in RPCS3 using two fixed instruction patches plus an
+flows. A local RPCS3 imported patch file proves a
+White AC15 behavior change using two fixed instruction patches plus an
 RPCS3 `calloc` inline hook.
 
 RPCS3 `calloc` semantics are:

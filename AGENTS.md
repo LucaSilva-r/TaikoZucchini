@@ -6,7 +6,7 @@ Taiko Zucchini is a C-based PS3 SPRX mod built from the repository root. Core ru
 
 ## Build, Test, and Development Commands
 
-- `nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=token`: Windows build from a Visual Studio developer prompt; defaults to `H:\PS3_SDK` when `SCE_PS3_ROOT` is unset.
+- `nmake /f Makefile.win CELL_SDK=<cell-sdk-root> TAIKO_ZUCCHINI_API_TOKEN=token`: Windows build from a Visual Studio developer prompt; `CELL_SDK` may be omitted when `SCE_PS3_ROOT` is set.
 - `make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=token`: GNU Make build for Linux, MSYS/Git Bash, or wrapper-based SDK setups.
 - `make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=token bootstrap`: builds only the first-run bootstrap EBOOT.
 - `make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=token ftp-eboot`: builds only the FTP EBOOT.

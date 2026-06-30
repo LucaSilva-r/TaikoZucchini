@@ -348,11 +348,11 @@ repository root:
 nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=your_token
 ```
 
-`Makefile.win` defaults to `%SCE_PS3_ROOT%` when set, otherwise `H:\PS3_SDK`.
-Override it when needed:
+`Makefile.win` defaults to `%SCE_PS3_ROOT%` when set. Otherwise pass
+`CELL_SDK` explicitly:
 
 ```bat
-nmake /f Makefile.win CELL_SDK=H:\PS3_SDK TAIKO_ZUCCHINI_API_TOKEN=your_token
+nmake /f Makefile.win CELL_SDK=<cell-sdk-root> TAIKO_ZUCCHINI_API_TOKEN=your_token
 ```
 
 Useful Windows targets:

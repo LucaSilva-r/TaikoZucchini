@@ -404,10 +404,11 @@ Expected: `patches/asm/white_dani_taikojuku_hook.o` is compiled.
 
 - [ ] **Step 4: Inspect exported symbols**
 
-Run with the SDK objdump available in the current environment. Windows default path:
+Run with the SDK objdump available in the current environment:
 
 ```powershell
-& 'H:\PS3_SDK\host-win32\ppu\bin\ppu-lv2-objdump.exe' -t 'patches\asm\white_dani_taikojuku_hook.o' | Select-String 'taiko_white_dani_taikojuku_hook'
+$cellSdk = if ($env:CELL_SDK) { $env:CELL_SDK } else { $env:SCE_PS3_ROOT }
+& "$cellSdk\host-win32\ppu\bin\ppu-lv2-objdump.exe" -t 'patches\asm\white_dani_taikojuku_hook.o' | Select-String 'taiko_white_dani_taikojuku_hook'
 ```
 
 Expected output includes both symbols:
@@ -625,7 +626,8 @@ Expected: no output.
 Run:
 
 ```powershell
-$objdump = 'H:\PS3_SDK\host-win32\ppu\bin\ppu-lv2-objdump.exe'
+$cellSdk = if ($env:CELL_SDK) { $env:CELL_SDK } else { $env:SCE_PS3_ROOT }
+$objdump = "$cellSdk\host-win32\ppu\bin\ppu-lv2-objdump.exe"
 & $objdump -t 'patches\asm\white_dani_taikojuku_hook.o' | Select-String 'taiko_white_dani_taikojuku_hook'
 ```
 
