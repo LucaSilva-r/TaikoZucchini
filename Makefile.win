@@ -1,0 +1,309 @@
+# Windows NMAKE build for the Sony Cell SDK host-win32 toolchain.
+#
+# Run from an x64 Native Tools Command Prompt for Visual Studio:
+#   nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=token
+#
+# CELL_SDK defaults to SCE_PS3_ROOT when set. Otherwise pass CELL_SDK=...
+
+!IF "$(CELL_SDK)" == ""
+!IF "$(SCE_PS3_ROOT)" != ""
+CELL_SDK = $(SCE_PS3_ROOT)
+!ENDIF
+!ENDIF
+
+CELL_HOST = $(CELL_SDK)\host-win32
+
+!IF "$(TAIKO_ZUCCHINI_API_TOKEN)" == ""
+TOKEN_DEFINE = -DTAIKO_ZUCCHINI_API_TOKEN=\"\"
+!ELSE
+TOKEN_DEFINE = -DTAIKO_ZUCCHINI_API_TOKEN=\"$(TAIKO_ZUCCHINI_API_TOKEN)\"
+!ENDIF
+
+!IF "$(HEN_BUILD)" == ""
+HEN_BUILD = 1
+!ENDIF
+
+!IF "$(FORCE_PATCH_FAIL)" == ""
+FORCE_PATCH_FAIL = 0
+!ENDIF
+
+PPU_CC        = "$(CELL_HOST)\ppu\bin\ppu-lv2-gcc.exe"
+PPU_CXX       = "$(CELL_HOST)\ppu\bin\ppu-lv2-g++.exe"
+PPU_LD        = "$(CELL_HOST)\ppu\bin\ppu-lv2-g++.exe"
+PPU_OBJCOPY   = "$(CELL_HOST)\ppu\bin\ppu-lv2-objcopy.exe"
+SPU_CC        = "$(CELL_HOST)\spu\bin\spu-lv2-gcc.exe"
+SPU_LD        = "$(CELL_HOST)\spu\bin\spu-lv2-gcc.exe"
+PPU_PRX_STRIP = "$(CELL_HOST)\bin\ppu-lv2-prx-strip.exe"
+MAKE_FSELF    = "$(CELL_HOST)\bin\make_fself.exe"
+
+MBEDTLS_DIR = vendor\mbedtls
+QUIRC_DIR = vendor\quirc
+
+INCLUDES = -I"$(CELL_SDK)\target\ppu\include" \
+           -I"$(CELL_SDK)\target\common\include" \
+           -I. -Iconfig -Icore -Ipatches -Ihooks -Iinput -Iqr -Iqr_spu \
+           -Inetwork -Istorage -Ibpreader -Icards -Ieboot_patcher \
+           -Imod_menu -Iftp \
+           -I"$(MBEDTLS_DIR)\include" -I"$(MBEDTLS_DIR)\library" \
+           -I"$(QUIRC_DIR)\lib"
+
+CFLAGS = -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
+         -mprx -fno-builtin -ffunction-sections -fdata-sections \
+         -DHEN_BUILD=$(HEN_BUILD) \
+         $(TOKEN_DEFINE) \
+         -DTAIKO_PATCH_UI_FORCE_FAIL=$(FORCE_PATCH_FAIL) \
+         $(INCLUDES)
+
+LDFLAGS = -mprx -zgenprx -zgenstub \
+          -Wl,--strip-unused-data \
+          -L"$(CELL_SDK)\target\ppu\lib"
+
+LDLIBS = -lfs_stub -lsysmodule_stub -lsysutil_game_stub -lsysutil_stub \
+         -lm_stub -lcamera_stub -lio_stub -lgcm_cmd -lgcm_sys_stub \
+         -lc -lnet_stub -lnetctl_stub -llv2_stub
+
+BOOT_CFLAGS = -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
+              -I"$(CELL_SDK)\target\ppu\include" \
+              -I"$(CELL_SDK)\target\common\include"
+BOOT_LDFLAGS = -L"$(CELL_SDK)\target\ppu\lib"
+BOOT_LDLIBS = -lsysmodule_stub -lio_stub -lc
+
+FTP_CFLAGS = -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
+             -fno-builtin -ffunction-sections -fdata-sections \
+             -I"$(CELL_SDK)\target\ppu\include" \
+             -I"$(CELL_SDK)\target\common\include" -Iftp_eboot
+FTP_LDFLAGS = -Wl,--strip-unused-data -L"$(CELL_SDK)\target\ppu\lib"
+FTP_LDLIBS = -lfs_stub -lsysmodule_stub -lsysutil_stub \
+             -lgcm_cmd -lgcm_sys_stub \
+             -lnet_stub -lnetctl_stub -llv2_stub -lc
+
+BIN_DIR = bin
+SPRX = $(BIN_DIR)\zucchini.sprx
+PRX = $(BIN_DIR)\zucchini.prx
+SYM = $(BIN_DIR)\zucchini.sym
+BOOTSTRAP_EBOOT = bootstrap_eboot\bin\eboot.elf
+FTP_EBOOT = ftp_eboot\bin\ftp_eboot.elf
+
+SRCS = core\main.c core\debug.c core\diag_log.c core\qr_encode.c \
+       core\libc_stubs.c core\patch_ui.c core\patch_warn.c \
+       core\write_probe.c core\rsx_init.c core\overlay.c eboot_fpt.c \
+       mod_menu\menu.c mod_menu\menu_draw.c mod_menu\menu_pad.c \
+       mod_menu\menu_actions.c mod_menu\menu_osk.c \
+       ftp\ftp_server.c config\runtime.c config\cfg_file.c \
+       patches\patches.c patches\patch_target.c \
+       eboot_patcher\self_parse.c eboot_patcher\self_decrypt.c \
+       eboot_patcher\self_encrypt.c eboot_patcher\self_npdrm.c \
+       eboot_patcher\elf_extract.c eboot_patcher\key_load.c \
+       eboot_patcher\sce_bn.c eboot_patcher\sce_ecdsa.c \
+       eboot_patcher\sce_curve.c eboot_patcher\sce_segmap.c \
+       eboot_patcher\elf_patch_util.c eboot_patcher\eboot_inline_hook.c \
+       eboot_patcher\eboot_inline_specs.c \
+       eboot_patcher\sprx_loader_patch.c eboot_patcher\self_build.c \
+       eboot_patcher\sce_rand.c eboot_patcher\eboot_flow.c \
+       storage\data00000_redirect.c storage\usio_backup.c \
+       storage\usrdir_path.c storage\param_sfo_fix.c \
+       hooks\camera_diag.c hooks\smart_stub.c hooks\bpreader_hook.c \
+       hooks\chassisinfo_hook.c storage\chassisinfo_synth.c \
+       storage\chassisinfo_schema.c core\game_version.c \
+       input\pad_input.c input\kb_input.c input\taiko_frame.c \
+       qr\camera_qr.c qr\qr_spu_host.c bpreader\bpreader_serial.c \
+       cards\card_store.c cards\card_picker.c cards\card_issuer.c \
+       network\online_diag.c hooks\http_hook.c hooks\cell_http_shim.c \
+       hooks\dns_hook.c hooks\socket_hook.c hooks\video_out_hook.c \
+       network\uri.c network\http_client.c network\version_check.c
+
+MAIN_OBJS = $(SRCS:.c=.o)
+ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o \
+           patches\asm\murasaki_dani_taikojuku_hook.o \
+           patches\asm\pre_red_dani_emit_gate_hook.o
+
+SPU_QR_ELF = $(BIN_DIR)\qr_spu.elf
+SPU_QR_ELF_SECTION = bin/qr_spu.elf
+SPU_QR_PPU_OBJ = $(BIN_DIR)\qr_spu_elf.o
+SPU_QR_OBJS = $(BIN_DIR)\qr_spu_main.spu.o \
+              $(BIN_DIR)\quirc_decode.spu.o \
+              $(BIN_DIR)\quirc_identify.spu.o \
+              $(BIN_DIR)\quirc_version_db.spu.o
+
+SPU_QR_CFLAGS = -Os -Wall -Wextra -std=gnu99 -DNDEBUG \
+                -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH \
+                -I"$(CELL_SDK)\target\spu\include" \
+                -Iqr_spu -I"$(QUIRC_DIR)\lib"
+QUIRC_WARN_CFLAGS = -Wno-extra -Wno-missing-braces \
+                    -Wno-missing-field-initializers
+SPU_QR_LDFLAGS = -L"$(CELL_SDK)\target\spu\lib"
+SPU_QR_LDLIBS = -lm
+
+MBEDTLS_CONFIG_H = $(MBEDTLS_DIR)\include\mbedtls\mbedtls_config.h
+MBEDTLS_SRCS = $(MBEDTLS_DIR)\library\aes.c \
+    $(MBEDTLS_DIR)\library\asn1parse.c \
+    $(MBEDTLS_DIR)\library\asn1write.c \
+    $(MBEDTLS_DIR)\library\base64.c \
+    $(MBEDTLS_DIR)\library\bignum.c \
+    $(MBEDTLS_DIR)\library\bignum_core.c \
+    $(MBEDTLS_DIR)\library\bignum_mod.c \
+    $(MBEDTLS_DIR)\library\bignum_mod_raw.c \
+    $(MBEDTLS_DIR)\library\chacha20.c \
+    $(MBEDTLS_DIR)\library\chachapoly.c \
+    $(MBEDTLS_DIR)\library\cipher.c \
+    $(MBEDTLS_DIR)\library\cipher_wrap.c \
+    $(MBEDTLS_DIR)\library\cmac.c \
+    $(MBEDTLS_DIR)\library\constant_time.c \
+    $(MBEDTLS_DIR)\library\ctr_drbg.c \
+    $(MBEDTLS_DIR)\library\ecdh.c \
+    $(MBEDTLS_DIR)\library\ecdsa.c \
+    $(MBEDTLS_DIR)\library\ecp.c \
+    $(MBEDTLS_DIR)\library\ecp_curves.c \
+    $(MBEDTLS_DIR)\library\ecp_curves_new.c \
+    $(MBEDTLS_DIR)\library\entropy.c \
+    $(MBEDTLS_DIR)\library\entropy_poll.c \
+    $(MBEDTLS_DIR)\library\error.c \
+    $(MBEDTLS_DIR)\library\gcm.c \
+    $(MBEDTLS_DIR)\library\hmac_drbg.c \
+    $(MBEDTLS_DIR)\library\md.c \
+    $(MBEDTLS_DIR)\library\oid.c \
+    $(MBEDTLS_DIR)\library\pem.c \
+    $(MBEDTLS_DIR)\library\pk.c \
+    $(MBEDTLS_DIR)\library\pk_ecc.c \
+    $(MBEDTLS_DIR)\library\pk_wrap.c \
+    $(MBEDTLS_DIR)\library\pkparse.c \
+    $(MBEDTLS_DIR)\library\platform.c \
+    $(MBEDTLS_DIR)\library\platform_util.c \
+    $(MBEDTLS_DIR)\library\poly1305.c \
+    $(MBEDTLS_DIR)\library\rsa.c \
+    $(MBEDTLS_DIR)\library\rsa_alt_helpers.c \
+    $(MBEDTLS_DIR)\library\sha1.c \
+    $(MBEDTLS_DIR)\library\sha256.c \
+    $(MBEDTLS_DIR)\library\sha512.c \
+    $(MBEDTLS_DIR)\library\ssl_ciphersuites.c \
+    $(MBEDTLS_DIR)\library\ssl_client.c \
+    $(MBEDTLS_DIR)\library\ssl_debug_helpers_generated.c \
+    $(MBEDTLS_DIR)\library\ssl_msg.c \
+    $(MBEDTLS_DIR)\library\ssl_tls.c \
+    $(MBEDTLS_DIR)\library\ssl_tls12_client.c \
+    $(MBEDTLS_DIR)\library\version.c \
+    $(MBEDTLS_DIR)\library\version_features.c \
+    $(MBEDTLS_DIR)\library\x509.c \
+    $(MBEDTLS_DIR)\library\x509_crt.c
+MBEDTLS_OBJS = $(MBEDTLS_SRCS:.c=.o)
+
+QUIRC_SRCS = $(QUIRC_DIR)\lib\quirc.c \
+    $(QUIRC_DIR)\lib\decode.c \
+    $(QUIRC_DIR)\lib\identify.c \
+    $(QUIRC_DIR)\lib\version_db.c
+QUIRC_OBJS = $(QUIRC_SRCS:.c=.o)
+
+OBJS = $(MAIN_OBJS) $(SPU_QR_PPU_OBJ) $(MBEDTLS_OBJS) $(QUIRC_OBJS) $(ASM_OBJS)
+
+all: check-sdk check-token $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
+
+sprx: check-sdk check-token $(SPRX)
+
+bootstrap: check-sdk $(BOOTSTRAP_EBOOT)
+
+ftp-eboot: check-sdk $(FTP_EBOOT)
+
+check-sdk:
+	@if "$(CELL_SDK)" == "" (echo CELL_SDK must be provided or SCE_PS3_ROOT must be set & exit /b 1)
+
+check-token:
+	@if "$(TAIKO_ZUCCHINI_API_TOKEN)" == "" (echo TAIKO_ZUCCHINI_API_TOKEN must be provided & exit /b 1)
+
+$(BIN_DIR):
+	if not exist "$(BIN_DIR)" mkdir "$(BIN_DIR)"
+
+bootstrap_eboot\bin:
+	if not exist "bootstrap_eboot\bin" mkdir "bootstrap_eboot\bin"
+
+ftp_eboot\bin:
+	if not exist "ftp_eboot\bin" mkdir "ftp_eboot\bin"
+
+$(SYM): $(OBJS) $(BIN_DIR)
+	$(PPU_LD) $(LDFLAGS) $(OBJS) $(LDLIBS) -o $@
+
+$(PRX): $(SYM)
+	$(PPU_PRX_STRIP) $** -o $@
+
+$(SPRX): $(PRX)
+	$(MAKE_FSELF) $** $@
+
+$(BOOTSTRAP_EBOOT): bootstrap_eboot\main.o bootstrap_eboot\bin
+	$(PPU_CC) $(BOOT_LDFLAGS) bootstrap_eboot\main.o $(BOOT_LDLIBS) -o $@
+
+$(FTP_EBOOT): ftp_eboot\main.o ftp_eboot\ftp_server.o ftp_eboot\debug.o ftp_eboot\rsx_init.o ftp_eboot\menu_draw.o ftp_eboot\bin
+	$(PPU_CC) $(FTP_LDFLAGS) ftp_eboot\main.o ftp_eboot\ftp_server.o ftp_eboot\debug.o ftp_eboot\rsx_init.o ftp_eboot\menu_draw.o $(FTP_LDLIBS) -o $@
+
+$(SPU_QR_ELF): $(SPU_QR_OBJS) $(BIN_DIR)
+	$(SPU_LD) $(SPU_QR_LDFLAGS) $(SPU_QR_OBJS) $(SPU_QR_LDLIBS) -o $@
+
+$(SPU_QR_PPU_OBJ): $(SPU_QR_ELF) $(BIN_DIR)
+	$(PPU_OBJCOPY) -I binary -O elf64-powerpc-celloslv2 -B powerpc --set-section-align .data=7 --set-section-pad .data=128 --rename-section .data=.spu_image.$(SPU_QR_ELF_SECTION),readonly,contents,alloc $(SPU_QR_ELF) $@
+
+$(BIN_DIR)\qr_spu_main.spu.o: qr_spu\qr_spu_main.c $(BIN_DIR)
+	$(SPU_CC) $(SPU_QR_CFLAGS) -c qr_spu\qr_spu_main.c -o $@
+
+$(BIN_DIR)\quirc_decode.spu.o: $(QUIRC_DIR)\lib\decode.c $(BIN_DIR)
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $(QUIRC_DIR)\lib\decode.c -o $@
+
+$(BIN_DIR)\quirc_identify.spu.o: $(QUIRC_DIR)\lib\identify.c $(BIN_DIR)
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $(QUIRC_DIR)\lib\identify.c -o $@
+
+$(BIN_DIR)\quirc_version_db.spu.o: $(QUIRC_DIR)\lib\version_db.c $(BIN_DIR)
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $(QUIRC_DIR)\lib\version_db.c -o $@
+
+$(MBEDTLS_OBJS): $(MBEDTLS_CONFIG_H) $(MBEDTLS_SRCS)
+	$(PPU_CC) $(CFLAGS) -Os -c $*.c -o $@
+
+$(QUIRC_OBJS): $(QUIRC_SRCS)
+	$(PPU_CC) $(CFLAGS) $(QUIRC_WARN_CFLAGS) -Os -DNDEBUG -include qr\quirc_math_shim.h -c $*.c -o $@
+
+bootstrap_eboot\main.o: bootstrap_eboot\main.c
+	$(PPU_CC) $(BOOT_CFLAGS) -c bootstrap_eboot\main.c -o $@
+
+ftp_eboot\main.o: ftp_eboot\main.c
+	$(PPU_CC) $(FTP_CFLAGS) -c ftp_eboot\main.c -o $@
+
+ftp_eboot\ftp_server.o: ftp_eboot\ftp_server.c
+	$(PPU_CC) $(FTP_CFLAGS) -c ftp_eboot\ftp_server.c -o $@
+
+ftp_eboot\debug.o: ftp_eboot\debug.c
+	$(PPU_CC) $(FTP_CFLAGS) -c ftp_eboot\debug.c -o $@
+
+ftp_eboot\rsx_init.o: ftp_eboot\rsx_init.c
+	$(PPU_CC) $(FTP_CFLAGS) -c ftp_eboot\rsx_init.c -o $@
+
+ftp_eboot\menu_draw.o: ftp_eboot\menu_draw.c
+	$(PPU_CC) $(FTP_CFLAGS) -c ftp_eboot\menu_draw.c -o $@
+
+.c.o:
+	$(PPU_CC) $(CFLAGS) -c $< -o $@
+
+patches\asm\white_dani_taikojuku_hook.o: patches\asm\white_dani_taikojuku_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\white_dani_taikojuku_hook.S -o $@
+
+patches\asm\murasaki_dani_taikojuku_hook.o: patches\asm\murasaki_dani_taikojuku_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\murasaki_dani_taikojuku_hook.S -o $@
+
+patches\asm\pre_red_dani_emit_gate_hook.o: patches\asm\pre_red_dani_emit_gate_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\pre_red_dani_emit_gate_hook.S -o $@
+
+clean-prx:
+	-del /Q "$(SYM)" "$(PRX)" "$(SPRX)" "$(SPU_QR_ELF)" "$(SPU_QR_PPU_OBJ)" 2>NUL
+	-del /Q core\*.o config\*.o patches\*.o patches\asm\*.o hooks\*.o input\*.o qr\*.o qr_spu\*.o network\*.o storage\*.o bpreader\*.o cards\*.o eboot_patcher\*.o mod_menu\*.o ftp\*.o vendor\mbedtls\library\*.o vendor\quirc\lib\*.o *.o 2>NUL
+	-del /Q "$(BIN_DIR)\*.spu.o" 2>NUL
+
+clean: clean-prx
+	-rmdir /S /Q "bootstrap_eboot\bin" 2>NUL
+	-rmdir /S /Q "ftp_eboot\bin" 2>NUL
+	-del /Q bootstrap_eboot\*.o ftp_eboot\*.o 2>NUL
+
+!IF "$(APPDATA)" != ""
+RPCS3_DEV_HDD0 = $(APPDATA)\rpcs3\dev_hdd0
+!ELSE
+RPCS3_DEV_HDD0 = $(USERPROFILE)\AppData\Roaming\rpcs3\dev_hdd0
+!ENDIF
+RPCS3_PLUGIN_DIR = $(RPCS3_DEV_HDD0)\plugins\taiko
+
+install: check-sdk check-token $(SPRX)
+	if not exist "$(RPCS3_PLUGIN_DIR)" mkdir "$(RPCS3_PLUGIN_DIR)"
+	copy /Y "$(SPRX)" "$(RPCS3_PLUGIN_DIR)\zucchini.sprx"

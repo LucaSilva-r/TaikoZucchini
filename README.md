@@ -325,40 +325,61 @@ the **PERMISSIONS** fixes.
 This project requires a local Sony Cell SDK installation. The SDK, game
 binaries, and private key material are not included and must not be committed.
 
-Prepare a Cell SDK tree and point `CELL_SDK` at it. The Makefile expects the
-SDK to provide these tools and directories:
+Prepare a Cell SDK tree and point `CELL_SDK` at it. On Windows, the expected
+SDK layout is the native `host-win32/` toolchain:
 
 ```text
-<CELL_SDK>/host-linux/ppu/bin/ppu-lv2-gcc
-<CELL_SDK>/host-linux/spu/bin/spu-lv2-gcc
-<CELL_SDK>/host-linux/bin/ppu-lv2-prx-strip
-<CELL_SDK>/host-linux/bin/make_fself
+<CELL_SDK>/host-win32/ppu/bin/ppu-lv2-gcc.exe
+<CELL_SDK>/host-win32/spu/bin/spu-lv2-gcc.exe
+<CELL_SDK>/host-win32/bin/ppu-lv2-prx-strip.exe
+<CELL_SDK>/host-win32/bin/make_fself.exe
 <CELL_SDK>/target/ppu/
 <CELL_SDK>/target/spu/
 <CELL_SDK>/target/common/
 ```
 
-If your SDK only has Windows-hosted tools under `host-win32/`, create your own
-`host-linux/` wrapper layer that invokes those `.exe` tools through Wine, then
-use that prepared SDK path as `CELL_SDK`.
+### Windows with Visual Studio NMAKE
 
-Build from the Taiko Zucchini repository root:
+Open an x64 Native Tools Command Prompt for Visual Studio, or initialize the
+environment from your installed Visual Studio first, then build from the
+repository root:
 
-```sh
-make CELL_SDK=/path/to/cell
+```bat
+nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=your_token
 ```
 
-The default `all` target builds both release artifacts:
+`Makefile.win` defaults to `%SCE_PS3_ROOT%` when set. Otherwise pass
+`CELL_SDK` explicitly:
+
+```bat
+nmake /f Makefile.win CELL_SDK=<cell-sdk-root> TAIKO_ZUCCHINI_API_TOKEN=your_token
+```
+
+Useful Windows targets:
+
+```bat
+nmake /f Makefile.win bootstrap
+nmake /f Makefile.win ftp-eboot
+nmake /f Makefile.win clean
+```
+
+### GNU Make
+
+The original `Makefile` remains available for GNU Make. It auto-picks
+`host-win32/` when present, otherwise `host-linux/`, and can still be used from
+Linux, MSYS, Git Bash, or a Wine-wrapper SDK:
+
+```sh
+make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=your_token
+make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=your_token bootstrap
+```
+
+The default build produces:
 
 ```text
 bin/zucchini.sprx
 bootstrap_eboot/bin/eboot.elf
-```
-
-To build only the bootstrap EBOOT:
-
-```sh
-make CELL_SDK=/path/to/cell bootstrap
+ftp_eboot/bin/ftp_eboot.elf
 ```
 
 `bootstrap_eboot/bin/eboot.elf` is an unsigned first-run bootstrap EBOOT. If
@@ -374,7 +395,8 @@ workflow before installing it as `EBOOT.BIN`.
 - `vendor/mbedtls/`: Mbed TLS source, under its upstream license.
 - `vendor/quirc/`: quirc source, under its upstream license.
 - `fonts/Roboto-Medium.ttf`: Roboto font, under the Apache License 2.0.
-- `Makefile`: Cell SDK SPRX build.
+- `Makefile`: GNU Make Cell SDK SPRX build.
+- `Makefile.win`: Visual Studio NMAKE build using the SDK `host-win32/` tools.
 
 ## Legal And Keys
 

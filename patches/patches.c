@@ -23,6 +23,7 @@
 #include "icache.h"
 #include "patch_target.h"
 #include "patches.h"
+#include "usrdir_path.h"
 
 #define T  g_patch_target
 
@@ -274,55 +275,6 @@ static int find_import_stub_by_fnid(uint32_t fnid, uintptr_t *out_stub) {
 
     if (count == 1) {
         *out_stub = found;
-        return 1;
-    }
-    return 0;
-}
-
-static int find_http_stub_anchor(uintptr_t *out) {
-    static const uint16_t http_stub_delta[] = {
-        0x0000u, 0x0020u, 0x0040u, 0x0060u, 0x0080u, 0x00A0u,
-        0x00C0u, 0x00E0u, 0x0100u, 0x0120u, 0x0140u, 0x0160u,
-        0x0180u, 0x01A0u, 0x01C0u, 0x01E0u, 0x0200u, 0x0220u,
-        0x0240u, 0x02C0u, 0x0260u, 0x0280u, 0x02A0u,
-    };
-    static const uint16_t http_got_delta[] = {
-        0x0000u, 0x0004u, 0x0008u, 0x000Cu, 0x0010u, 0x0014u,
-        0x0018u, 0x001Cu, 0x0020u, 0x0024u, 0x0028u, 0x002Cu,
-        0x0030u, 0x0034u, 0x0038u, 0x003Cu, 0x0040u, 0x0044u,
-        0x0048u, 0x004Cu, 0x01C8u, 0x01CCu, 0x01D0u,
-    };
-    uintptr_t found = 0;
-    uint32_t count = 0;
-
-    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x300u <= CFG_SCAN_TEXT_END; p += 4) {
-        uintptr_t got_anchor = 0;
-        int ok = 1;
-
-        for (size_t i = 0; i < sizeof(http_stub_delta) / sizeof(http_stub_delta[0]); i++) {
-            uintptr_t got_slot = 0;
-            if (!import_stub_matches(p + http_stub_delta[i], &got_slot)) {
-                ok = 0;
-                break;
-            }
-            if (i == 0)
-                got_anchor = got_slot;
-            if (got_slot != got_anchor + http_got_delta[i]) {
-                ok = 0;
-                break;
-            }
-        }
-
-        if (!ok)
-            continue;
-        found = p;
-        count++;
-        if (count > 1)
-            break;
-    }
-
-    if (count == 1) {
-        *out = found;
         return 1;
     }
     return 0;
@@ -1406,69 +1358,122 @@ static int dani_emit_gate_state(uintptr_t addr) {
     return DANI_GATE_ABSENT;
 }
 
-static int dani_find_dormant_type9_case(uintptr_t count_sig,
-                                        uintptr_t *out_case) {
-    uintptr_t start = count_sig + 0x700u;
-    uintptr_t end = count_sig + 0x1600u;
-    if (end > CFG_SCAN_TEXT_END)
-        end = CFG_SCAN_TEXT_END;
+typedef struct {
+    const char *label;
+    uintptr_t count_sig;
+    uintptr_t emit_sig;
+    uintptr_t dormant_case;
+    uintptr_t dormant_target;
+    uint32_t dormant_word;
+    int inline_emit_gate;
+} dani_version_site_t;
 
-    for (uintptr_t p = start; p + 4u <= end; p += 4u) {
-        uint32_t w = pt_read32(T, p);
-        if (w == 0x3880000Du || /* li r4,0x0d */
-            w == 0x3900000Du || /* li r8,0x0d */
-            w == 0x3900000Cu) { /* li r8,0x0c (Momoiro) */
-            *out_case = p;
-            return 1;
-        }
+static const dani_version_site_t DANI_VERSION_SITES[] = {
+    {
+        "White ST71 v07r00",
+        0x0067DD30u,
+        0x0067DE00u,
+        0x0067EB7Cu,
+        0x0067DE1Cu,
+        0x3880000Du,
+        0,
+    },
+    {
+        "Murasaki ST61 v06r00",
+        0x005D7A8Cu,
+        0x005D7B5Cu,
+        0x005D8A24u,
+        0x005D7B78u,
+        0x3900000Du,
+        0,
+    },
+    {
+        "Kimidori ST51 v05r00",
+        0x0057BB1Cu,
+        0x0057BBECu,
+        0x0057C588u,
+        0x0057BC08u,
+        0x3900000Du,
+        1,
+    },
+    {
+        "Momoiro v04r00",
+        0x00528464u,
+        0x00528534u,
+        0x005293F8u,
+        0x00528550u,
+        0x3900000Cu,
+        1,
+    },
+};
+
+static int dani_decode_uncond_branch_target(uintptr_t branch_va,
+                                            uintptr_t *out_target) {
+    uint32_t word = pt_read32(T, branch_va);
+    if ((word & 0xFC000003u) != 0x48000000u)
+        return 0;
+
+    int32_t disp = (int32_t)(word & 0x03FFFFFCu);
+    if (disp & 0x02000000)
+        disp |= (int32_t)0xFC000000u;
+    *out_target = branch_va + (uintptr_t)disp;
+    return 1;
+}
+
+static int dani_red_config_root_present(void) {
+    char path[256];
+    CellFsStat st;
+
+    if (!usrdir_resolve_path("data/config/ST8100-1", path, sizeof path)) {
+        dbg_print("[patch] Dan-i Dojo RED guard skipped; USRDIR unresolved\n");
+        return 0;
     }
-    return 0;
+    return cellFsStat(path, &st) == CELL_FS_SUCCEEDED;
 }
 
 static int resolve_dani_dojo_sites(uintptr_t *out_count_patch,
                                    uintptr_t *out_emit_patch,
                                    uintptr_t *out_dormant_case,
                                    int *out_count_state,
-                                   int *out_emit_state) {
+                                   int *out_emit_state,
+                                   int *out_inline_emit_gate) {
     uintptr_t found_count = 0;
     uintptr_t found_emit = 0;
     uintptr_t found_case = 0;
     int found_count_state = DANI_GATE_ABSENT;
     int found_emit_state = DANI_GATE_ABSENT;
+    int found_inline_emit_gate = 0;
     uint32_t candidates = 0;
 
-    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x10u <= CFG_SCAN_TEXT_END; p += 4u) {
-        int count_state = dani_count_gate_state(p);
+    for (size_t i = 0;
+         i < sizeof(DANI_VERSION_SITES) / sizeof(DANI_VERSION_SITES[0]);
+         i++) {
+        const dani_version_site_t *site = &DANI_VERSION_SITES[i];
+        int count_state = dani_count_gate_state(site->count_sig);
         if (!count_state)
             continue;
 
-        uintptr_t emit_sig = 0;
-        int emit_state = DANI_GATE_ABSENT;
-        uint32_t emit_matches = 0;
-        for (uintptr_t q = p + 0x40u;
-             q <= p + 0x200u && q + 0x14u <= CFG_SCAN_TEXT_END; q += 4u) {
-            int cur_emit_state = dani_emit_gate_state(q);
-            if (!cur_emit_state)
-                continue;
-            emit_sig = q;
-            emit_state = cur_emit_state;
-            emit_matches++;
-            if (emit_matches > 1u)
-                break;
-        }
-        if (emit_matches != 1u)
+        int emit_state = dani_emit_gate_state(site->emit_sig);
+        if (!emit_state)
             continue;
 
-        uintptr_t dormant_case = 0;
-        if (!dani_find_dormant_type9_case(p, &dormant_case))
+        uintptr_t target = 0;
+        if (pt_read32(T, site->dormant_case) != site->dormant_word ||
+            !dani_decode_uncond_branch_target(site->dormant_case + 4u,
+                                              &target) ||
+            target != site->dormant_target)
             continue;
 
-        found_count = p + 0x0Cu;
-        found_emit = emit_sig + 0x0Cu;
-        found_case = dormant_case;
+        found_count = site->count_sig + 0x0Cu;
+        found_emit = site->emit_sig + 0x0Cu;
+        found_case = site->dormant_case;
         found_count_state = count_state;
         found_emit_state = emit_state;
+        found_inline_emit_gate = site->inline_emit_gate;
         candidates++;
+        dbg_print("[patch] Dan-i Dojo binary: ");
+        dbg_print(site->label);
+        dbg_print("\n");
         if (candidates > 1u)
             break;
     }
@@ -1486,7 +1491,25 @@ static int resolve_dani_dojo_sites(uintptr_t *out_count_patch,
     *out_dormant_case = found_case;
     *out_count_state = found_count_state;
     *out_emit_state = found_emit_state;
+    *out_inline_emit_gate = found_inline_emit_gate;
     return 1;
+}
+
+static int dani_pre_red_inline_hook_target(uintptr_t count_patch,
+                                           uintptr_t emit_patch,
+                                           uintptr_t dormant_case,
+                                           int count_state,
+                                           int emit_state,
+                                           int inline_emit_gate) {
+    (void)dormant_case;
+    uint32_t count_word = pt_read32(T, count_patch);
+    return inline_emit_gate &&
+           T && T->kind == PT_BUFFER &&
+           (count_state == DANI_GATE_ORIG ||
+            count_state == DANI_GATE_PATCHED) &&
+           emit_state == DANI_GATE_ORIG &&
+           (count_word == 0x69290009u || count_word == 0x69290000u) &&
+           (pt_read32(T, emit_patch) & 0xFFFF0003u) == 0x419E0000u;
 }
 
 static void apply_dani_dojo_unlock(void) {
@@ -1495,10 +1518,28 @@ static void apply_dani_dojo_unlock(void) {
     uintptr_t dormant_case = 0;
     int count_state = DANI_GATE_ABSENT;
     int emit_state = DANI_GATE_ABSENT;
+    int inline_emit_gate = 0;
+
+    if (dani_red_config_root_present()) {
+        dbg_print("[patch] Dan-i Dojo unlock skipped; RED config root present\n");
+        return;
+    }
 
     if (!resolve_dani_dojo_sites(&count_patch, &emit_patch, &dormant_case,
-                                 &count_state, &emit_state))
+                                 &count_state, &emit_state,
+                                 &inline_emit_gate))
         return;
+
+    if (dani_pre_red_inline_hook_target(count_patch, emit_patch,
+                                        dormant_case, count_state,
+                                        emit_state, inline_emit_gate)) {
+        dbg_print_hex32("[patch] Dan-i Dojo count gate", (uint32_t)count_patch);
+        dbg_print_hex32("[patch] Dan-i Dojo emit hook gate", (uint32_t)emit_patch);
+        dbg_print_hex32("[patch] Dan-i Dojo dormant case", (uint32_t)dormant_case);
+        write32(count_patch, 0x69290000u); /* xori r9,r9,0 */
+        dbg_print("[patch] Dan-i Dojo emit gate left for inline hook\n");
+        return;
+    }
 
     dbg_print_hex32("[patch] Dan-i Dojo count gate", (uint32_t)count_patch);
     dbg_print_hex32("[patch] Dan-i Dojo emit gate", (uint32_t)emit_patch);

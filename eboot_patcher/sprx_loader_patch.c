@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "sprx_loader_patch.h"
+#include "elf_patch_util.h"
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "patches/patches.h"
@@ -45,23 +46,10 @@ static const uint8_t PRX_LOADER_BIN[] = {
 #define PRX_LOADER_PATH_LIS_OFF    0x88u
 #define PRX_LOADER_PATH_ORI_OFF    0x8Cu
 
-static uint64_t align_u64(uint64_t v, uint64_t a) { return (v + a - 1u) & ~(a - 1u); }
-
-static uint32_t load_be32(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-
-static uint64_t load_be64(const uint8_t *p) {
-    return ((uint64_t)load_be32(p) << 32) | (uint64_t)load_be32(p + 4);
-}
-
-static void store_be32(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)(v >> 24);
-    p[1] = (uint8_t)(v >> 16);
-    p[2] = (uint8_t)(v >> 8);
-    p[3] = (uint8_t)v;
-}
+#define align_u64 elf_patch_align_u64
+#define load_be32 elf_patch_load_be32
+#define load_be64 elf_patch_load_be64
+#define store_be32 elf_patch_store_be32
 
 static int use_elf_file_offsets(const self_ctx_t *ctx) {
     (void)ctx;

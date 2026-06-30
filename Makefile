@@ -1,11 +1,14 @@
-# Cell SDK SPRX build (PSL1GHT path retired).
+# Cell SDK SPRX build for GNU Make (PSL1GHT path retired).
 #
-# Toolchain runs through Wine wrappers under cell/host-linux/ produced by
-# cell/setup_wine_wrappers.sh. The wrappers point CELL_HOST_PATH at the
-# Windows .exe binaries with $WINEPREFIX = repo's wine_prefix/.
+# This file supports either SDK layout:
+#   - host-win32/ native Windows tools when using GNU Make from Windows/MSYS
+#   - host-linux/ native Linux tools or wrapper scripts
+#
+# Visual Studio users can build without GNU Make via Makefile.win:
+#   nmake /f Makefile.win TAIKO_ZUCCHINI_API_TOKEN=token
 #
 # Build:
-#   make CELL_SDK=$(realpath ../cell)
+#   make CELL_SDK=/path/to/cell TAIKO_ZUCCHINI_API_TOKEN=token
 # or set CELL_SDK in the environment.
 
 CELL_SDK     ?= $(abspath $(CURDIR)/../cell)
@@ -68,11 +71,10 @@ CFLAGS  := -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
 
 # -mprx + -zgenprx + -zgenstub tell the toolchain to emit the PRX-shape
 # ELF (proper SCE_PPURELA segment, sceModuleInfo, lib.ent/lib.stub layout).
-# --gc-sections drops mbedTLS objects whose features are disabled in
+# --strip-unused-data drops mbedTLS objects whose features are disabled in
 # mbedtls_config.h so the SPRX stays small.
 LDFLAGS := -mprx -zgenprx -zgenstub \
            -Wl,--strip-unused-data \
-           -Wl,--gc-sections \
            -L$(CELL_SDK)/target/ppu/lib
 
 # libc:        memcpy/memcmp (frozen subset usable in PRX context)
@@ -101,6 +103,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_s
            eboot_patcher/elf_extract.c eboot_patcher/key_load.c \
            eboot_patcher/sce_bn.c eboot_patcher/sce_ecdsa.c \
            eboot_patcher/sce_curve.c eboot_patcher/sce_segmap.c \
+           eboot_patcher/elf_patch_util.c eboot_patcher/eboot_inline_hook.c \
+           eboot_patcher/eboot_inline_specs.c \
            eboot_patcher/sprx_loader_patch.c eboot_patcher/self_build.c \
            eboot_patcher/sce_rand.c eboot_patcher/eboot_flow.c \
            storage/data00000_redirect.c \
@@ -121,6 +125,11 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/qr_encode.c core/libc_s
            hooks/video_out_hook.c \
            network/uri.c network/http_client.c network/version_check.c
 OBJS    := $(SRCS:.c=.o)
+ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
+            patches/asm/murasaki_dani_taikojuku_hook.S \
+            patches/asm/pre_red_dani_emit_gate_hook.S
+ASM_OBJS := $(ASM_SRCS:.S=.o)
+OBJS += $(ASM_OBJS)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf
 SPU_QR_PPU_OBJ := $(BIN_DIR)/qr_spu_elf.o
@@ -138,6 +147,8 @@ SPU_QR_CFLAGS := -Os -Wall -Wextra -std=gnu99 -DNDEBUG \
                  -DQUIRC_FLOAT_TYPE=float -DQUIRC_USE_TGMATH \
                  -I$(CELL_SDK)/target/spu/include \
                  -Iqr_spu -I$(QUIRC_DIR)/lib
+QUIRC_WARN_CFLAGS := -Wno-extra -Wno-missing-braces \
+                     -Wno-missing-field-initializers
 SPU_QR_LDFLAGS := -L$(CELL_SDK)/target/spu/lib
 SPU_QR_LDLIBS := -lm
 
@@ -190,17 +201,20 @@ $(SPRX): $(PRX)
 %.o: %.c
 	$(PPU_CC) $(CFLAGS) -c $< -o $@
 
+%.o: %.S
+	$(PPU_CC) $(CFLAGS) -c $< -o $@
+
 $(BIN_DIR)/qr_spu_main.spu.o: qr_spu/qr_spu_main.c qr_spu/qr_spu_shared.h $(QUIRC_DIR)/lib/quirc.h $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
 	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
 
 $(BIN_DIR)/quirc_decode.spu.o: $(QUIRC_DIR)/lib/decode.c $(QUIRC_DIR)/lib/quirc.h $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
-	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $< -o $@
 
 $(BIN_DIR)/quirc_identify.spu.o: $(QUIRC_DIR)/lib/identify.c $(QUIRC_DIR)/lib/quirc.h $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
-	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $< -o $@
 
 $(BIN_DIR)/quirc_version_db.spu.o: $(QUIRC_DIR)/lib/version_db.c $(QUIRC_DIR)/lib/quirc_internal.h | $(BIN_DIR)
-	$(SPU_CC) $(SPU_QR_CFLAGS) -c $< -o $@
+	$(SPU_CC) $(SPU_QR_CFLAGS) $(QUIRC_WARN_CFLAGS) -c $< -o $@
 
 $(SPU_QR_ELF): $(SPU_QR_OBJS) | $(BIN_DIR)
 	$(SPU_LD) $(SPU_QR_LDFLAGS) $(SPU_QR_OBJS) $(SPU_QR_LDLIBS) -o $@
@@ -228,15 +242,21 @@ $(MBEDTLS_DIR)/library/%.o: $(MBEDTLS_DIR)/library/%.c $(MBEDTLS_CONFIG_H)
 # substitute manual rint/fabs/sqrt; libm calls return the input register
 # unchanged at PRX init time on this firmware.
 $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
-	$(PPU_CC) $(CFLAGS) -Os -DNDEBUG -include qr/quirc_math_shim.h -c $< -o $@
+	$(PPU_CC) $(CFLAGS) $(QUIRC_WARN_CFLAGS) -Os -DNDEBUG -include qr/quirc_math_shim.h -c $< -o $@
 
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
-core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h core/overlay.h network/version_check.h cards/card_picker.h
+core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h hooks/chassisinfo_hook.h core/overlay.h network/version_check.h cards/card_picker.h
 mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h mod_menu/menu_font_30.h mod_menu/menu_font_42.h
 mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
 mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
 eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
+eboot_patcher/elf_patch_util.o: eboot_patcher/elf_patch_util.c eboot_patcher/elf_patch_util.h eboot_patcher/self_ctx.h eboot_patcher/self_format.h core/debug.h
+eboot_patcher/eboot_inline_hook.o: eboot_patcher/eboot_inline_hook.c eboot_patcher/eboot_inline_hook.h eboot_patcher/elf_patch_util.h eboot_patcher/self_ctx.h core/debug.h
+eboot_patcher/eboot_inline_specs.o: eboot_patcher/eboot_inline_specs.c eboot_patcher/eboot_inline_specs.h eboot_patcher/eboot_inline_hook.h config/runtime.h
+patches/asm/white_dani_taikojuku_hook.o: patches/asm/white_dani_taikojuku_hook.S
+patches/asm/murasaki_dani_taikojuku_hook.o: patches/asm/murasaki_dani_taikojuku_hook.S
+patches/asm/pre_red_dani_emit_gate_hook.o: patches/asm/pre_red_dani_emit_gate_hook.S
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h
@@ -246,11 +266,11 @@ cards/card_store.o:  cards/card_store.c cards/card_store.h config/cfg_file.h cor
 cards/card_picker.o: cards/card_picker.c cards/card_picker.h cards/card_issuer.h cards/card_store.h qr/camera_qr.h hooks/bpreader_hook.h bpreader/bpreader_serial.h core/overlay.h input/taiko_frame.h input/kb_input.h config/runtime.h mod_menu/menu_pad.h mod_menu/menu_osk.h core/debug.h
 cards/card_issuer.o: cards/card_issuer.c cards/card_issuer.h network/http_client.h config/runtime.h config/network.h core/debug.h
 hooks/bpreader_hook.o: hooks/bpreader_hook.c hooks/bpreader_hook.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
-hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h
+hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h storage/chassisinfo_synth.h storage/chassisinfo_schema.h core/game_version.h eboot_fpt.h core/debug.h storage/usrdir_path.h
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h
 storage/chassisinfo_synth.o: storage/chassisinfo_synth.c storage/chassisinfo_synth.h storage/chassisinfo_schema.h config.h config/runtime.h core/debug.h
 storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_schema.h
-patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h core/icache.h core/debug.h
+patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h core/icache.h core/debug.h storage/usrdir_path.h
 core/debug.o:     core/debug.c     core/debug.h core/diag_log.h config.h config/runtime.h
 core/diag_log.o:  core/diag_log.c  core/diag_log.h
 core/qr_encode.o: core/qr_encode.c core/qr_encode.h
@@ -277,11 +297,11 @@ install: $(SPRX)
 	@echo "installed -> $(RPCS3_PLUGIN_DIR)/zucchini.sprx"
 
 clean:
-	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(ASM_OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 	$(MAKE) -C bootstrap_eboot clean
 	$(MAKE) -C ftp_eboot clean
 
 clean-prx:
-	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(ASM_OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 
 .PHONY: all bootstrap ftp-eboot clean clean-prx install
