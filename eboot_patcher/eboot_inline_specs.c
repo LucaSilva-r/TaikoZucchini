@@ -30,8 +30,6 @@ extern const uint8_t taiko_kimidori_dani_registry_remove_diag_hook_start[];
 extern const uint8_t taiko_kimidori_dani_registry_remove_diag_hook_end[];
 extern const uint8_t taiko_kimidori_dani_registry_reset_diag_hook_start[];
 extern const uint8_t taiko_kimidori_dani_registry_reset_diag_hook_end[];
-extern const uint8_t taiko_kimidori_dani_ref_release_diag_hook_start[];
-extern const uint8_t taiko_kimidori_dani_ref_release_diag_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -688,70 +686,6 @@ static const eboot_inline_signature_t
         },
     };
 
-static const uint32_t KIMIDORI_DANI_REF_RELEASE_DIAG_WORDS[] = {
-    0x4BFFEA45u, /* bl sub_3BB6E0 */
-    0x60000000u, /* nop */
-    0xE80100A0u, /* ld r0,0xA0(r1) */
-    0xEBA10078u, /* ld r29,0x78(r1) */
-};
-
-static const uint32_t KIMIDORI_DANI_REF_RELEASE_DIAG_MASKS[] = {
-    0xFFFFFFFFu,
-    0xFFFFFFFFu,
-    0xFFFFFFFFu,
-    0xFFFFFFFFu,
-};
-
-static const uint8_t KIMIDORI_DANI_REF_RELEASE_DIAG_MATCH_TYPES[] = {
-    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
-    EBOOT_INLINE_MATCH_WORD,
-    EBOOT_INLINE_MATCH_WORD,
-    EBOOT_INLINE_MATCH_WORD,
-};
-
-static const uint32_t KIMIDORI_DANI_REF_RELEASE_DIAG_BRANCH_TARGETS[] = {
-    0x003BB6E0u,
-    0u,
-    0u,
-    0u,
-};
-
-static const uint32_t KIMIDORI_DANI_REF_RELEASE_CONTEXT_WORDS[] = {
-    0xE8410028u, /* ld r2,0x28(r1) */
-    0x7FA4EB78u, /* mr r4,r29 */
-    0x80629C4Cu, /* lwz r3,off_B45EBC(r2) */
-};
-
-static const uint32_t KIMIDORI_DANI_REF_RELEASE_CONTEXT_MASKS[] = {
-    0xFFFFFFFFu,
-    0xFFFFFFFFu,
-    0xFFFFFFFFu,
-};
-
-static const eboot_inline_signature_t
-    KIMIDORI_DANI_REF_RELEASE_DIAG_SIGNATURES[] = {
-        {
-            "kimidori Dani final ref release diagnostic call",
-            0x003BCC9Cu,
-            KIMIDORI_DANI_REF_RELEASE_DIAG_WORDS,
-            KIMIDORI_DANI_REF_RELEASE_DIAG_MASKS,
-            sizeof(KIMIDORI_DANI_REF_RELEASE_DIAG_WORDS) /
-                sizeof(KIMIDORI_DANI_REF_RELEASE_DIAG_WORDS[0]),
-            KIMIDORI_DANI_REF_RELEASE_DIAG_MATCH_TYPES,
-            KIMIDORI_DANI_REF_RELEASE_DIAG_BRANCH_TARGETS,
-        },
-        {
-            "kimidori Dani final ref release diagnostic context",
-            0x003BCC90u,
-            KIMIDORI_DANI_REF_RELEASE_CONTEXT_WORDS,
-            KIMIDORI_DANI_REF_RELEASE_CONTEXT_MASKS,
-            sizeof(KIMIDORI_DANI_REF_RELEASE_CONTEXT_WORDS) /
-                sizeof(KIMIDORI_DANI_REF_RELEASE_CONTEXT_WORDS[0]),
-            NULL,
-            NULL,
-        },
-    };
-
 static const uint32_t MOMOIRO_DANI_EMIT_BRANCH_TARGETS[] = {
     0x005285D0u,
     0u,
@@ -1196,22 +1130,6 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x003E6CE4u,
-        NULL,
-        NULL,
-        { 0u, 0u, 0u, 0u },
-    },
-    {
-        "dani_dojo_unlock",
-        "kimidori-st51-v05r00-dani-ref-release-diag",
-        0x003BCC9Cu,
-        KIMIDORI_DANI_REF_RELEASE_DIAG_SIGNATURES,
-        sizeof(KIMIDORI_DANI_REF_RELEASE_DIAG_SIGNATURES) /
-            sizeof(KIMIDORI_DANI_REF_RELEASE_DIAG_SIGNATURES[0]),
-        taiko_kimidori_dani_ref_release_diag_hook_start,
-        taiko_kimidori_dani_ref_release_diag_hook_end,
-        4u,
-        EBOOT_INLINE_RETURN_EXPLICIT,
-        0x003BCCA0u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },

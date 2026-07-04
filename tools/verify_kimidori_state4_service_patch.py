@@ -40,23 +40,19 @@ def main():
         "taiko_kimidori_dani_registry_insert_diag_hook_start",
         "taiko_kimidori_dani_registry_remove_diag_hook_start",
         "taiko_kimidori_dani_registry_reset_diag_hook_start",
-        "taiko_kimidori_dani_ref_release_diag_hook_start",
         "kimidori-st51-v05r00-dani-lookup-diag",
         "kimidori-st51-v05r00-dani-state4-service-diag",
         "kimidori-st51-v05r00-dani-registry-insert-diag",
         "kimidori-st51-v05r00-dani-registry-remove-diag",
         "kimidori-st51-v05r00-dani-registry-reset-diag",
-        "kimidori-st51-v05r00-dani-ref-release-diag",
         "0x003B2520u",
         "0x00056858u",
         "0x003E6F14u",
         "0x003E6DECu",
         "0x003E6CE0u",
-        "0x003BCC9Cu",
         "KIMIDORI_DANI_REGISTRY_INSERT_DIAG_SIGNATURES",
         "KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_SIGNATURES",
         "KIMIDORI_DANI_REGISTRY_RESET_DIAG_SIGNATURES",
-        "KIMIDORI_DANI_REF_RELEASE_DIAG_SIGNATURES",
     ]
     for token in required_tokens:
         ok &= require(token in src, f"missing {token}")
@@ -67,18 +63,16 @@ def main():
         "taiko_kimidori_dani_registry_insert_diag_hook_start",
         "taiko_kimidori_dani_registry_remove_diag_hook_start",
         "taiko_kimidori_dani_registry_reset_diag_hook_start",
-        "taiko_kimidori_dani_ref_release_diag_hook_start",
         "0xB70C",
         "0xF608",
         "0xF430",
         "0xF38C",
-        "0xB6E0",
         "0x2524",
         "0x685C",
         "0x6F18",
         "0x6DF0",
         "0x6CE4",
-        "0xBCA0",
+        "EMIT_REMOVE_CALLER_LINE",
         "sys_tty_write",
     ]
     for token in asm_tokens:
@@ -130,7 +124,15 @@ def main():
         "state-4 service patch must run before inline hook installation",
     )
 
-    forbidden = ["0x000A00EC", "entry/packeddata", "root slot"]
+    forbidden = [
+        "0x000A00EC",
+        "entry/packeddata",
+        "root slot",
+        "kimidori-st51-v05r00-dani-ref-release-diag",
+        "taiko_kimidori_dani_ref_release_diag_hook_start",
+        "KIMIDORI_DANI_REF_RELEASE_DIAG_SIGNATURES",
+        "0x003BCC9Cu",
+    ]
     for token in forbidden:
         ok &= require(token not in src, f"forbidden resource-graft token present: {token}")
 

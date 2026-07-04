@@ -10,14 +10,11 @@
     .globl taiko_kimidori_dani_registry_remove_diag_hook_end
     .globl taiko_kimidori_dani_registry_reset_diag_hook_start
     .globl taiko_kimidori_dani_registry_reset_diag_hook_end
-    .globl taiko_kimidori_dani_ref_release_diag_hook_start
-    .globl taiko_kimidori_dani_ref_release_diag_hook_end
     .type taiko_kimidori_dani_lookup_diag_hook_start, @object
     .type taiko_kimidori_dani_state4_service_diag_hook_start, @object
     .type taiko_kimidori_dani_registry_insert_diag_hook_start, @object
     .type taiko_kimidori_dani_registry_remove_diag_hook_start, @object
     .type taiko_kimidori_dani_registry_reset_diag_hook_start, @object
-    .type taiko_kimidori_dani_ref_release_diag_hook_start, @object
 
     .set r0,0
     .set r1,1
@@ -139,23 +136,23 @@
     sc      /* sys_tty_write */
     .endm
 
-    .macro EMIT_REF_RELEASE_LINE objoff, lroff
+    .macro EMIT_REMOVE_CALLER_LINE aoff, boff, coff
     lis     r12,0x5B74  /* "[tz]" */
     ori     r12,r12,0x7A5D
     stw     r12,32(r1)
-    lis     r12,0x2072  /* " rf " */
-    ori     r12,r12,0x6620
+    lis     r12,0x2072  /* " rc " */
+    ori     r12,r12,0x6320
     stw     r12,36(r1)
-    lis     r12,0x6F3D  /* "o=0x" */
+    lis     r12,0x613D  /* "a=0x" */
     ori     r12,r12,0x3078
     stw     r12,40(r1)
 
-    ld      r11,\objoff(r1)
+    ld      r11,\aoff(r1)
     STORE_HEX32 r11,44
 
     li      r12,32
     stb     r12,52(r1)
-    li      r12,108
+    li      r12,98
     stb     r12,53(r1)
     li      r12,61
     stb     r12,54(r1)
@@ -164,18 +161,32 @@
     li      r12,120
     stb     r12,56(r1)
 
-    ld      r11,\lroff(r1)
+    ld      r11,\boff(r1)
     STORE_HEX32 r11,57
 
-    li      r12,10
+    li      r12,32
     stb     r12,65(r1)
+    li      r12,99
+    stb     r12,66(r1)
+    li      r12,61
+    stb     r12,67(r1)
+    li      r12,48
+    stb     r12,68(r1)
+    li      r12,120
+    stb     r12,69(r1)
+
+    ld      r11,\coff(r1)
+    STORE_HEX32 r11,70
+
+    li      r12,10
+    stb     r12,78(r1)
     li      r12,0
-    stw     r12,72(r1)
+    stw     r12,80(r1)
 
     li      r3,0
     addi    r4,r1,32
-    li      r5,34
-    addi    r6,r1,72
+    li      r5,47
+    addi    r6,r1,80
     li      r11,0x193
     sc      /* sys_tty_write */
     .endm
@@ -505,7 +516,18 @@ taiko_kimidori_dani_registry_remove_diag_hook_start:
     cmplw   cr7,r11,r12
     bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_remove_done
 
+    ld      r11,448(r1)   /* sub_3E6D6C backchain: sub_3E7284 frame */
+    ld      r10,0(r11)    /* sub_3BB6E0 frame */
+    ld      r9,0(r10)     /* sub_3BCC00 frame */
+    ld      r8,0xB0(r11)  /* sub_3E7284 return to sub_3BB6E0 */
+    std     r8,304(r1)
+    ld      r8,0x80(r10)  /* sub_3BB6E0 return to sub_3BCC00 */
+    std     r8,296(r1)
+    ld      r8,0xA0(r9)   /* sub_3BCC00 caller */
+    std     r8,288(r1)
+
     EMIT_REGISTRY_LINE 0x7220,400,392,312,408,320
+    EMIT_REMOVE_CALLER_LINE 304,296,288
 
 kimidori_registry_remove_done:
     ld      r2,416(r1)
@@ -571,53 +593,3 @@ taiko_kimidori_dani_registry_reset_diag_hook_start:
 
 taiko_kimidori_dani_registry_reset_diag_hook_end:
     .size taiko_kimidori_dani_registry_reset_diag_hook_start, . - taiko_kimidori_dani_registry_reset_diag_hook_start
-
-    .align 2
-taiko_kimidori_dani_ref_release_diag_hook_start:
-    /*
-     * Hooked over Kimidori 0x003BCC9C:
-     *   bl sub_3BB6E0
-     *
-     * Trace final reference releases immediately before the release routine
-     * unregisters the object. The following registry-remove diagnostic line
-     * identifies whether this object is the Dani key 0xA00EC.
-     */
-    stdu    r1,-448(r1)
-    std     r0,432(r1)
-    mflr    r0
-    std     r0,424(r1)
-    std     r2,416(r1)
-    std     r3,408(r1)
-    std     r4,400(r1)
-    std     r5,392(r1)
-    std     r6,384(r1)
-    std     r7,376(r1)
-    std     r8,368(r1)
-    std     r9,360(r1)
-    std     r10,352(r1)
-    std     r11,344(r1)
-    std     r12,336(r1)
-    mfcr    r12
-    std     r12,328(r1)
-    ld      r11,608(r1) /* sub_3BCC00 saved caller LR */
-    std     r11,320(r1)
-
-    EMIT_REF_RELEASE_LINE 400,320
-
-    ld      r2,416(r1)
-    ld      r3,408(r1)
-    ld      r4,400(r1)
-    lis     r12,0x003B
-    ori     r12,r12,0xB6E0
-    mtctr   r12
-    bctrl
-    ld      r2,416(r1)
-    addi    r1,r1,448
-
-    lis     r12,0x003B
-    ori     r12,r12,0xBCA0
-    mtctr   r12
-    bctr
-
-taiko_kimidori_dani_ref_release_diag_hook_end:
-    .size taiko_kimidori_dani_ref_release_diag_hook_start, . - taiko_kimidori_dani_ref_release_diag_hook_start
