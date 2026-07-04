@@ -253,7 +253,8 @@ taiko_kimidori_dani_lookup_diag_hook_start:
      *   bl sub_3BB70C
      *
      * Preserve the original lookup call, then log the key, output pointer, and
-     * boolean return when the Dani crash key 0xA00EC or a null result appears.
+     * boolean return when the 0x000Axxxx Dani resource family or a null result
+     * appears.
      */
     stdu    r1,-320(r1)
     std     r0,304(r1)
@@ -288,9 +289,8 @@ taiko_kimidori_dani_lookup_diag_hook_start:
     stw     r10,188(r1)
 
     ld      r11,272(r1)
-    lis     r12,0x000A
-    ori     r12,r12,0x00EC
-    cmplw   cr7,r11,r12
+    srwi    r12,r11,16
+    cmpwi   cr7,r12,0x000A
     bc      BO_IF_TRUE,CR7_EQ,kimidori_lookup_diag_log
     cmpwi   cr7,r10,0
     bc      BO_IF_FALSE,CR7_EQ,kimidori_lookup_diag_done
@@ -474,9 +474,11 @@ taiko_kimidori_dani_registry_insert_diag_hook_start:
      *   bl sub_3BF608
      *
      * Trace insertions into the same registry family as the crashing lookup,
-     * filtered to key 0xA00EC. r3=map, r4=key, r5=value.
-     * Dani retain experiment: keep one extra reference to prove whether the
-     * later final release is the cause of the null lookup crash.
+     * filtered to the 0x000Axxxx Dani resource family. r3=map, r4=key,
+     * r5=value.
+     * Dani retain experiment: keep one extra reference only for key 0xA00EC
+     * to prove whether the later final release is the cause of the first null
+     * lookup crash.
      */
     stdu    r1,-448(r1)
     std     r0,432(r1)
@@ -509,10 +511,15 @@ taiko_kimidori_dani_registry_insert_diag_hook_start:
     ld      r2,416(r1)
 
     ld      r11,400(r1)
+    srwi    r12,r11,16
+    cmpwi   cr7,r12,0x000A
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_done
+
+    ld      r11,400(r1)
     lis     r12,0x000A
     ori     r12,r12,0x00EC
     cmplw   cr7,r11,r12
-    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_done
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_emit
 
     ld      r11,312(r1)
     cmpwi   cr7,r11,0
@@ -534,6 +541,11 @@ kimidori_registry_insert_retain_loop:
 
 kimidori_registry_insert_emit:
     EMIT_REGISTRY_LINE 0x6920,400,392,312,408,320
+    ld      r11,400(r1)
+    lis     r12,0x000A
+    ori     r12,r12,0x00EC
+    cmplw   cr7,r11,r12
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_done
     ld      r11,312(r1)
     cmpwi   cr7,r11,0
     bc      BO_IF_TRUE,CR7_EQ,kimidori_registry_insert_done
@@ -562,7 +574,9 @@ taiko_kimidori_dani_registry_remove_diag_hook_start:
      *   bl sub_3BF430
      *
      * Trace removals from the same registry family as the crashing lookup,
-     * filtered to key 0xA00EC. r3=map, r4=key.
+     * filtered to the 0x000Axxxx Dani resource family. r3=map, r4=key.
+     * The caller-chain line is only emitted for the known final-ref-release
+     * path returning to 0x003E7300, where the backchain shape is known.
      */
     stdu    r1,-448(r1)
     std     r0,432(r1)
@@ -595,8 +609,15 @@ taiko_kimidori_dani_registry_remove_diag_hook_start:
     ld      r2,416(r1)
 
     ld      r11,400(r1)
-    lis     r12,0x000A
-    ori     r12,r12,0x00EC
+    srwi    r12,r11,16
+    cmpwi   cr7,r12,0x000A
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_remove_done
+
+    EMIT_REGISTRY_LINE 0x7220,400,392,312,408,320
+
+    ld      r11,320(r1)
+    lis     r12,0x003E
+    ori     r12,r12,0x7300
     cmplw   cr7,r11,r12
     bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_remove_done
 
@@ -610,7 +631,6 @@ taiko_kimidori_dani_registry_remove_diag_hook_start:
     ld      r8,0xA0(r9)   /* sub_3BCC00 caller */
     std     r8,288(r1)
 
-    EMIT_REGISTRY_LINE 0x7220,400,392,312,408,320
     EMIT_REMOVE_CALLER_LINE 304,296,288
 
 kimidori_registry_remove_done:
