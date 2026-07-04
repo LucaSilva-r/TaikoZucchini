@@ -12,6 +12,8 @@ extern const uint8_t taiko_murasaki_dani_taikojuku_hook_start[];
 extern const uint8_t taiko_murasaki_dani_taikojuku_hook_end[];
 extern const uint8_t taiko_kimidori_dani_dojo_hook_start[];
 extern const uint8_t taiko_kimidori_dani_dojo_hook_end[];
+extern const uint8_t taiko_kimidori_dani_proc_main_hook_start[];
+extern const uint8_t taiko_kimidori_dani_proc_main_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -207,6 +209,95 @@ static const eboot_inline_signature_t KIMIDORI_DANI_ROW_SIGNATURES[] = {
         sizeof(INLINE_ROW_WORDS) / sizeof(INLINE_ROW_WORDS[0]),
         ROW_MATCH_TYPES,
         KIMIDORI_DANI_ROW_BRANCH_TARGETS,
+    },
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_WORDS[] = {
+    0x2F80001Au, /* cmpwi cr7,r0,0x1A */
+    0u,
+    0xE8010090u, /* ld r0,0x90(r1) */
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t KIMIDORI_DANI_PROC_MAIN_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_BRANCH_TARGET,
+    EBOOT_INLINE_MATCH_WORD,
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_BRANCH_TARGETS[] = {
+    0u,
+    0x00566E8u,
+    0u,
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_CONTEXT_WORDS[] = {
+    0x38800007u, /* li r4,7 */
+    0x80030028u, /* lwz r0,0x28(r3) */
+    0x7D435378u, /* mr r3,r10 */
+    0x55292036u, /* slwi r9,r9,4 */
+    0x7D290214u, /* add r9,r9,r0 */
+    0x79290020u, /* clrldi r9,r9,32 */
+    0x80090000u, /* lwz r0,0(r9) */
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_TARGET_WORDS[] = {
+    0x38000002u, /* li r0,2 */
+    0x901F0014u, /* stw r0,0x14(r31) */
+    0xE8010090u, /* ld r0,0x90(r1) */
+};
+
+static const uint32_t KIMIDORI_DANI_PROC_MAIN_TARGET_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t KIMIDORI_DANI_PROC_MAIN_SIGNATURES[] = {
+    {
+        "kimidori Proc_Main Dani branch",
+        0x005666Cu,
+        KIMIDORI_DANI_PROC_MAIN_WORDS,
+        KIMIDORI_DANI_PROC_MAIN_MASKS,
+        sizeof(KIMIDORI_DANI_PROC_MAIN_WORDS) /
+            sizeof(KIMIDORI_DANI_PROC_MAIN_WORDS[0]),
+        KIMIDORI_DANI_PROC_MAIN_MATCH_TYPES,
+        KIMIDORI_DANI_PROC_MAIN_BRANCH_TARGETS,
+    },
+    {
+        "kimidori Proc_Main selected marker load context",
+        0x0056650u,
+        KIMIDORI_DANI_PROC_MAIN_CONTEXT_WORDS,
+        KIMIDORI_DANI_PROC_MAIN_CONTEXT_MASKS,
+        sizeof(KIMIDORI_DANI_PROC_MAIN_CONTEXT_WORDS) /
+            sizeof(KIMIDORI_DANI_PROC_MAIN_CONTEXT_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "kimidori Proc_Main Dani target context",
+        0x00566E8u,
+        KIMIDORI_DANI_PROC_MAIN_TARGET_WORDS,
+        KIMIDORI_DANI_PROC_MAIN_TARGET_MASKS,
+        sizeof(KIMIDORI_DANI_PROC_MAIN_TARGET_WORDS) /
+            sizeof(KIMIDORI_DANI_PROC_MAIN_TARGET_WORDS[0]),
+        NULL,
+        NULL,
     },
 };
 
@@ -422,6 +513,22 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0057BC88u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-proc-main",
+        0x005666Cu,
+        KIMIDORI_DANI_PROC_MAIN_SIGNATURES,
+        sizeof(KIMIDORI_DANI_PROC_MAIN_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_PROC_MAIN_SIGNATURES[0]),
+        taiko_kimidori_dani_proc_main_hook_start,
+        taiko_kimidori_dani_proc_main_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0056674u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },
