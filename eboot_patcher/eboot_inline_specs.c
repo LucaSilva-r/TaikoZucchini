@@ -24,6 +24,12 @@ extern const uint8_t taiko_kimidori_dani_lookup_diag_hook_start[];
 extern const uint8_t taiko_kimidori_dani_lookup_diag_hook_end[];
 extern const uint8_t taiko_kimidori_dani_state4_service_diag_hook_start[];
 extern const uint8_t taiko_kimidori_dani_state4_service_diag_hook_end[];
+extern const uint8_t taiko_kimidori_dani_registry_insert_diag_hook_start[];
+extern const uint8_t taiko_kimidori_dani_registry_insert_diag_hook_end[];
+extern const uint8_t taiko_kimidori_dani_registry_remove_diag_hook_start[];
+extern const uint8_t taiko_kimidori_dani_registry_remove_diag_hook_end[];
+extern const uint8_t taiko_kimidori_dani_registry_reset_diag_hook_start[];
+extern const uint8_t taiko_kimidori_dani_registry_reset_diag_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -488,6 +494,198 @@ static const eboot_inline_signature_t
         },
     };
 
+static const uint32_t KIMIDORI_DANI_REGISTRY_INSERT_DIAG_WORDS[] = {
+    0x4BFD86F5u, /* bl sub_3BF608 */
+    0x60000000u, /* nop */
+    0x813F001Cu, /* lwz r9,0x1C(r31) */
+    0x7C7D1B78u, /* mr r29,r3 */
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_INSERT_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t KIMIDORI_DANI_REGISTRY_INSERT_DIAG_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_INSERT_DIAG_BRANCH_TARGETS[] = {
+    0x003BF608u,
+    0u,
+    0u,
+    0u,
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_INSERT_CONTEXT_WORDS[] = {
+    0x387F0080u, /* addi r3,r31,0x80 */
+    0x7BC40020u, /* clrldi r4,r30,32 */
+    0x78630020u, /* clrldi r3,r3,32 */
+    0x7B850020u, /* clrldi r5,r28,32 */
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_INSERT_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t
+    KIMIDORI_DANI_REGISTRY_INSERT_DIAG_SIGNATURES[] = {
+        {
+            "kimidori Dani registry insert diagnostic call",
+            0x003E6F14u,
+            KIMIDORI_DANI_REGISTRY_INSERT_DIAG_WORDS,
+            KIMIDORI_DANI_REGISTRY_INSERT_DIAG_MASKS,
+            sizeof(KIMIDORI_DANI_REGISTRY_INSERT_DIAG_WORDS) /
+                sizeof(KIMIDORI_DANI_REGISTRY_INSERT_DIAG_WORDS[0]),
+            KIMIDORI_DANI_REGISTRY_INSERT_DIAG_MATCH_TYPES,
+            KIMIDORI_DANI_REGISTRY_INSERT_DIAG_BRANCH_TARGETS,
+        },
+        {
+            "kimidori Dani registry insert diagnostic context",
+            0x003E6F04u,
+            KIMIDORI_DANI_REGISTRY_INSERT_CONTEXT_WORDS,
+            KIMIDORI_DANI_REGISTRY_INSERT_CONTEXT_MASKS,
+            sizeof(KIMIDORI_DANI_REGISTRY_INSERT_CONTEXT_WORDS) /
+                sizeof(KIMIDORI_DANI_REGISTRY_INSERT_CONTEXT_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_WORDS[] = {
+    0x4BFD8645u, /* bl sub_3BF430 */
+    0x60000000u, /* nop */
+    0x813F001Cu, /* lwz r9,0x1C(r31) */
+    0x2F890000u, /* cmpwi cr7,r9,0 */
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_BRANCH_TARGETS[] = {
+    0x003BF430u,
+    0u,
+    0u,
+    0u,
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_REMOVE_CONTEXT_WORDS[] = {
+    0x387F0080u, /* addi r3,r31,0x80 */
+    0x7BC40020u, /* clrldi r4,r30,32 */
+    0x78630020u, /* clrldi r3,r3,32 */
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_REMOVE_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t
+    KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_SIGNATURES[] = {
+        {
+            "kimidori Dani registry remove diagnostic call",
+            0x003E6DECu,
+            KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_WORDS,
+            KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_MASKS,
+            sizeof(KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_WORDS) /
+                sizeof(KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_WORDS[0]),
+            KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_MATCH_TYPES,
+            KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_BRANCH_TARGETS,
+        },
+        {
+            "kimidori Dani registry remove diagnostic context",
+            0x003E6DE0u,
+            KIMIDORI_DANI_REGISTRY_REMOVE_CONTEXT_WORDS,
+            KIMIDORI_DANI_REGISTRY_REMOVE_CONTEXT_MASKS,
+            sizeof(KIMIDORI_DANI_REGISTRY_REMOVE_CONTEXT_WORDS) /
+                sizeof(KIMIDORI_DANI_REGISTRY_REMOVE_CONTEXT_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_RESET_DIAG_WORDS[] = {
+    0x4BFD86ADu, /* bl sub_3BF38C */
+    0x60000000u, /* nop */
+    0x813F001Cu, /* lwz r9,0x1C(r31) */
+    0x2F890000u, /* cmpwi cr7,r9,0 */
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_RESET_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t KIMIDORI_DANI_REGISTRY_RESET_DIAG_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_RESET_DIAG_BRANCH_TARGETS[] = {
+    0x003BF38Cu,
+    0u,
+    0u,
+    0u,
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_RESET_CONTEXT_WORDS[] = {
+    0x387F0080u, /* addi r3,r31,0x80 */
+    0x78630020u, /* clrldi r3,r3,32 */
+};
+
+static const uint32_t KIMIDORI_DANI_REGISTRY_RESET_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t
+    KIMIDORI_DANI_REGISTRY_RESET_DIAG_SIGNATURES[] = {
+        {
+            "kimidori Dani registry reset diagnostic call",
+            0x003E6CE0u,
+            KIMIDORI_DANI_REGISTRY_RESET_DIAG_WORDS,
+            KIMIDORI_DANI_REGISTRY_RESET_DIAG_MASKS,
+            sizeof(KIMIDORI_DANI_REGISTRY_RESET_DIAG_WORDS) /
+                sizeof(KIMIDORI_DANI_REGISTRY_RESET_DIAG_WORDS[0]),
+            KIMIDORI_DANI_REGISTRY_RESET_DIAG_MATCH_TYPES,
+            KIMIDORI_DANI_REGISTRY_RESET_DIAG_BRANCH_TARGETS,
+        },
+        {
+            "kimidori Dani registry reset diagnostic context",
+            0x003E6CD8u,
+            KIMIDORI_DANI_REGISTRY_RESET_CONTEXT_WORDS,
+            KIMIDORI_DANI_REGISTRY_RESET_CONTEXT_MASKS,
+            sizeof(KIMIDORI_DANI_REGISTRY_RESET_CONTEXT_WORDS) /
+                sizeof(KIMIDORI_DANI_REGISTRY_RESET_CONTEXT_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
 static const uint32_t MOMOIRO_DANI_EMIT_BRANCH_TARGETS[] = {
     0x005285D0u,
     0u,
@@ -884,6 +1082,54 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0005685Cu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-registry-insert-diag",
+        0x003E6F14u,
+        KIMIDORI_DANI_REGISTRY_INSERT_DIAG_SIGNATURES,
+        sizeof(KIMIDORI_DANI_REGISTRY_INSERT_DIAG_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_REGISTRY_INSERT_DIAG_SIGNATURES[0]),
+        taiko_kimidori_dani_registry_insert_diag_hook_start,
+        taiko_kimidori_dani_registry_insert_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x003E6F18u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-registry-remove-diag",
+        0x003E6DECu,
+        KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_SIGNATURES,
+        sizeof(KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_SIGNATURES[0]),
+        taiko_kimidori_dani_registry_remove_diag_hook_start,
+        taiko_kimidori_dani_registry_remove_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x003E6DF0u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-registry-reset-diag",
+        0x003E6CE0u,
+        KIMIDORI_DANI_REGISTRY_RESET_DIAG_SIGNATURES,
+        sizeof(KIMIDORI_DANI_REGISTRY_RESET_DIAG_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_REGISTRY_RESET_DIAG_SIGNATURES[0]),
+        taiko_kimidori_dani_registry_reset_diag_hook_start,
+        taiko_kimidori_dani_registry_reset_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x003E6CE4u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },

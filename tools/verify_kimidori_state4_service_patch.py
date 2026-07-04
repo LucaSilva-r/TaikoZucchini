@@ -37,10 +37,22 @@ def main():
         "KIMIDORI_DANI_STATE4_SERVICE_DIAG_SIGNATURES",
         "taiko_kimidori_dani_lookup_diag_hook_start",
         "taiko_kimidori_dani_state4_service_diag_hook_start",
+        "taiko_kimidori_dani_registry_insert_diag_hook_start",
+        "taiko_kimidori_dani_registry_remove_diag_hook_start",
+        "taiko_kimidori_dani_registry_reset_diag_hook_start",
         "kimidori-st51-v05r00-dani-lookup-diag",
         "kimidori-st51-v05r00-dani-state4-service-diag",
+        "kimidori-st51-v05r00-dani-registry-insert-diag",
+        "kimidori-st51-v05r00-dani-registry-remove-diag",
+        "kimidori-st51-v05r00-dani-registry-reset-diag",
         "0x003B2520u",
         "0x00056858u",
+        "0x003E6F14u",
+        "0x003E6DECu",
+        "0x003E6CE0u",
+        "KIMIDORI_DANI_REGISTRY_INSERT_DIAG_SIGNATURES",
+        "KIMIDORI_DANI_REGISTRY_REMOVE_DIAG_SIGNATURES",
+        "KIMIDORI_DANI_REGISTRY_RESET_DIAG_SIGNATURES",
     ]
     for token in required_tokens:
         ok &= require(token in src, f"missing {token}")
@@ -48,9 +60,18 @@ def main():
     asm_tokens = [
         "taiko_kimidori_dani_lookup_diag_hook_start",
         "taiko_kimidori_dani_state4_service_diag_hook_start",
+        "taiko_kimidori_dani_registry_insert_diag_hook_start",
+        "taiko_kimidori_dani_registry_remove_diag_hook_start",
+        "taiko_kimidori_dani_registry_reset_diag_hook_start",
         "0xB70C",
+        "0xF608",
+        "0xF430",
+        "0xF38C",
         "0x2524",
         "0x685C",
+        "0x6F18",
+        "0x6DF0",
+        "0x6CE4",
         "sys_tty_write",
     ]
     for token in asm_tokens:

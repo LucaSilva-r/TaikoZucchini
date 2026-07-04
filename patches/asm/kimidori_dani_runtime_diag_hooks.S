@@ -4,8 +4,17 @@
     .globl taiko_kimidori_dani_lookup_diag_hook_end
     .globl taiko_kimidori_dani_state4_service_diag_hook_start
     .globl taiko_kimidori_dani_state4_service_diag_hook_end
+    .globl taiko_kimidori_dani_registry_insert_diag_hook_start
+    .globl taiko_kimidori_dani_registry_insert_diag_hook_end
+    .globl taiko_kimidori_dani_registry_remove_diag_hook_start
+    .globl taiko_kimidori_dani_registry_remove_diag_hook_end
+    .globl taiko_kimidori_dani_registry_reset_diag_hook_start
+    .globl taiko_kimidori_dani_registry_reset_diag_hook_end
     .type taiko_kimidori_dani_lookup_diag_hook_start, @object
     .type taiko_kimidori_dani_state4_service_diag_hook_start, @object
+    .type taiko_kimidori_dani_registry_insert_diag_hook_start, @object
+    .type taiko_kimidori_dani_registry_remove_diag_hook_start, @object
+    .type taiko_kimidori_dani_registry_reset_diag_hook_start, @object
 
     .set r0,0
     .set r1,1
@@ -42,6 +51,89 @@
     addi    r9,r9,-1
     cmpwi   cr7,r9,0
     bc      BO_IF_FALSE,CR7_EQ,1b
+    .endm
+
+    .macro EMIT_REGISTRY_LINE op_lo, keyoff, valueoff, retoff, mapoff, lroff
+    lis     r12,0x5B74  /* "[tz]" */
+    ori     r12,r12,0x7A5D
+    stw     r12,32(r1)
+    lis     r12,0x2072  /* " r?" */
+    ori     r12,r12,\op_lo
+    stw     r12,36(r1)
+    lis     r12,0x6B3D  /* "k=0x" */
+    ori     r12,r12,0x3078
+    stw     r12,40(r1)
+
+    ld      r11,\keyoff(r1)
+    STORE_HEX32 r11,44
+
+    li      r12,32
+    stb     r12,52(r1)
+    li      r12,118
+    stb     r12,53(r1)
+    li      r12,61
+    stb     r12,54(r1)
+    li      r12,48
+    stb     r12,55(r1)
+    li      r12,120
+    stb     r12,56(r1)
+
+    ld      r11,\valueoff(r1)
+    STORE_HEX32 r11,57
+
+    li      r12,32
+    stb     r12,65(r1)
+    li      r12,114
+    stb     r12,66(r1)
+    li      r12,61
+    stb     r12,67(r1)
+    li      r12,48
+    stb     r12,68(r1)
+    li      r12,120
+    stb     r12,69(r1)
+
+    ld      r11,\retoff(r1)
+    STORE_HEX32 r11,70
+
+    li      r12,32
+    stb     r12,78(r1)
+    li      r12,109
+    stb     r12,79(r1)
+    li      r12,61
+    stb     r12,80(r1)
+    li      r12,48
+    stb     r12,81(r1)
+    li      r12,120
+    stb     r12,82(r1)
+
+    ld      r11,\mapoff(r1)
+    STORE_HEX32 r11,83
+
+    li      r12,32
+    stb     r12,91(r1)
+    li      r12,108
+    stb     r12,92(r1)
+    li      r12,61
+    stb     r12,93(r1)
+    li      r12,48
+    stb     r12,94(r1)
+    li      r12,120
+    stb     r12,95(r1)
+
+    ld      r11,\lroff(r1)
+    STORE_HEX32 r11,96
+
+    li      r12,10
+    stb     r12,104(r1)
+    li      r12,0
+    stw     r12,112(r1)
+
+    li      r3,0
+    addi    r4,r1,32
+    li      r5,73
+    addi    r6,r1,112
+    li      r11,0x193
+    sc      /* sys_tty_write */
     .endm
 
 taiko_kimidori_dani_lookup_diag_hook_start:
@@ -263,3 +355,175 @@ taiko_kimidori_dani_state4_service_diag_hook_start:
 
 taiko_kimidori_dani_state4_service_diag_hook_end:
     .size taiko_kimidori_dani_state4_service_diag_hook_start, . - taiko_kimidori_dani_state4_service_diag_hook_start
+
+    .align 2
+taiko_kimidori_dani_registry_insert_diag_hook_start:
+    /*
+     * Hooked over Kimidori 0x003E6F14:
+     *   bl sub_3BF608
+     *
+     * Trace insertions into the same registry family as the crashing lookup,
+     * filtered to key 0xA00EC. r3=map, r4=key, r5=value.
+     */
+    stdu    r1,-448(r1)
+    std     r0,432(r1)
+    mflr    r0
+    std     r0,424(r1)
+    std     r2,416(r1)
+    std     r3,408(r1)
+    std     r4,400(r1)
+    std     r5,392(r1)
+    std     r6,384(r1)
+    std     r7,376(r1)
+    std     r8,368(r1)
+    std     r9,360(r1)
+    std     r10,352(r1)
+    std     r11,344(r1)
+    std     r12,336(r1)
+    mfcr    r12
+    std     r12,328(r1)
+    ld      r11,624(r1) /* parent frame saved LR */
+    std     r11,320(r1)
+
+    ld      r3,408(r1)
+    ld      r4,400(r1)
+    ld      r5,392(r1)
+    lis     r12,0x003B
+    ori     r12,r12,0xF608
+    mtctr   r12
+    bctrl
+    std     r3,312(r1)
+    ld      r2,416(r1)
+
+    ld      r11,400(r1)
+    lis     r12,0x000A
+    ori     r12,r12,0x00EC
+    cmplw   cr7,r11,r12
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_done
+
+    EMIT_REGISTRY_LINE 0x6920,400,392,312,408,320
+
+kimidori_registry_insert_done:
+    ld      r2,416(r1)
+    ld      r3,312(r1)
+    addi    r1,r1,448
+
+    lis     r12,0x003E
+    ori     r12,r12,0x6F18
+    mtctr   r12
+    bctr
+
+taiko_kimidori_dani_registry_insert_diag_hook_end:
+    .size taiko_kimidori_dani_registry_insert_diag_hook_start, . - taiko_kimidori_dani_registry_insert_diag_hook_start
+
+    .align 2
+taiko_kimidori_dani_registry_remove_diag_hook_start:
+    /*
+     * Hooked over Kimidori 0x003E6DEC:
+     *   bl sub_3BF430
+     *
+     * Trace removals from the same registry family as the crashing lookup,
+     * filtered to key 0xA00EC. r3=map, r4=key.
+     */
+    stdu    r1,-448(r1)
+    std     r0,432(r1)
+    mflr    r0
+    std     r0,424(r1)
+    std     r2,416(r1)
+    std     r3,408(r1)
+    std     r4,400(r1)
+    li      r11,0
+    std     r11,392(r1)
+    std     r6,384(r1)
+    std     r7,376(r1)
+    std     r8,368(r1)
+    std     r9,360(r1)
+    std     r10,352(r1)
+    std     r11,344(r1)
+    std     r12,336(r1)
+    mfcr    r12
+    std     r12,328(r1)
+    ld      r11,608(r1) /* parent frame saved LR */
+    std     r11,320(r1)
+
+    ld      r3,408(r1)
+    ld      r4,400(r1)
+    lis     r12,0x003B
+    ori     r12,r12,0xF430
+    mtctr   r12
+    bctrl
+    std     r3,312(r1)
+    ld      r2,416(r1)
+
+    ld      r11,400(r1)
+    lis     r12,0x000A
+    ori     r12,r12,0x00EC
+    cmplw   cr7,r11,r12
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_remove_done
+
+    EMIT_REGISTRY_LINE 0x7220,400,392,312,408,320
+
+kimidori_registry_remove_done:
+    ld      r2,416(r1)
+    ld      r3,312(r1)
+    addi    r1,r1,448
+
+    lis     r12,0x003E
+    ori     r12,r12,0x6DF0
+    mtctr   r12
+    bctr
+
+taiko_kimidori_dani_registry_remove_diag_hook_end:
+    .size taiko_kimidori_dani_registry_remove_diag_hook_start, . - taiko_kimidori_dani_registry_remove_diag_hook_start
+
+    .align 2
+taiko_kimidori_dani_registry_reset_diag_hook_start:
+    /*
+     * Hooked over Kimidori 0x003E6CE0:
+     *   bl sub_3BF38C
+     *
+     * Trace bulk resets of the same registry family as the crashing lookup.
+     * r3=map.
+     */
+    stdu    r1,-448(r1)
+    std     r0,432(r1)
+    mflr    r0
+    std     r0,424(r1)
+    std     r2,416(r1)
+    std     r3,408(r1)
+    li      r11,0
+    std     r11,400(r1)
+    std     r11,392(r1)
+    std     r6,384(r1)
+    std     r7,376(r1)
+    std     r8,368(r1)
+    std     r9,360(r1)
+    std     r10,352(r1)
+    std     r11,344(r1)
+    std     r12,336(r1)
+    mfcr    r12
+    std     r12,328(r1)
+    ld      r11,608(r1) /* parent frame saved LR */
+    std     r11,320(r1)
+
+    ld      r3,408(r1)
+    lis     r12,0x003B
+    ori     r12,r12,0xF38C
+    mtctr   r12
+    bctrl
+    std     r3,312(r1)
+    ld      r2,416(r1)
+
+    EMIT_REGISTRY_LINE 0x7A20,400,392,312,408,320
+
+    ld      r2,416(r1)
+    ld      r3,312(r1)
+    addi    r1,r1,448
+
+    lis     r12,0x003E
+    ori     r12,r12,0x6CE4
+    mtctr   r12
+    bctr
+
+taiko_kimidori_dani_registry_reset_diag_hook_end:
+    .size taiko_kimidori_dani_registry_reset_diag_hook_start, . - taiko_kimidori_dani_registry_reset_diag_hook_start
