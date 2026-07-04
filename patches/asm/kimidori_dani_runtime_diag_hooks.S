@@ -10,11 +10,14 @@
     .globl taiko_kimidori_dani_registry_remove_diag_hook_end
     .globl taiko_kimidori_dani_registry_reset_diag_hook_start
     .globl taiko_kimidori_dani_registry_reset_diag_hook_end
+    .globl taiko_kimidori_dani_request_fillrect_diag_hook_start
+    .globl taiko_kimidori_dani_request_fillrect_diag_hook_end
     .type taiko_kimidori_dani_lookup_diag_hook_start, @object
     .type taiko_kimidori_dani_state4_service_diag_hook_start, @object
     .type taiko_kimidori_dani_registry_insert_diag_hook_start, @object
     .type taiko_kimidori_dani_registry_remove_diag_hook_start, @object
     .type taiko_kimidori_dani_registry_reset_diag_hook_start, @object
+    .type taiko_kimidori_dani_request_fillrect_diag_hook_start, @object
 
     .set r0,0
     .set r1,1
@@ -29,6 +32,9 @@
     .set r10,10
     .set r11,11
     .set r12,12
+    .set r28,28
+    .set r29,29
+    .set r31,31
     .set BO_IF_TRUE,12
     .set BO_IF_FALSE,4
     .set CR0_EQ,2
@@ -232,6 +238,61 @@
     stb     r12,69(r1)
 
     ld      r11,\coff(r1)
+    STORE_HEX32 r11,70
+
+    li      r12,10
+    stb     r12,78(r1)
+    li      r12,0
+    stw     r12,80(r1)
+
+    li      r3,0
+    addi    r4,r1,32
+    li      r5,47
+    addi    r6,r1,80
+    li      r11,0x193
+    sc      /* sys_tty_write */
+    .endm
+
+    .macro EMIT_FILLRECT_LINE boardoff, uidoff, filloff
+    lis     r12,0x5B74  /* "[tz]" */
+    ori     r12,r12,0x7A5D
+    stw     r12,32(r1)
+    lis     r12,0x2072  /* " rf " */
+    ori     r12,r12,0x6620
+    stw     r12,36(r1)
+    lis     r12,0x623D  /* "b=0x" */
+    ori     r12,r12,0x3078
+    stw     r12,40(r1)
+
+    lwz     r11,\boardoff(r1)
+    STORE_HEX32 r11,44
+
+    li      r12,32
+    stb     r12,52(r1)
+    li      r12,117
+    stb     r12,53(r1)
+    li      r12,61
+    stb     r12,54(r1)
+    li      r12,48
+    stb     r12,55(r1)
+    li      r12,120
+    stb     r12,56(r1)
+
+    lwz     r11,\uidoff(r1)
+    STORE_HEX32 r11,57
+
+    li      r12,32
+    stb     r12,65(r1)
+    li      r12,102
+    stb     r12,66(r1)
+    li      r12,61
+    stb     r12,67(r1)
+    li      r12,48
+    stb     r12,68(r1)
+    li      r12,120
+    stb     r12,69(r1)
+
+    lwz     r11,\filloff(r1)
     STORE_HEX32 r11,70
 
     li      r12,10
@@ -697,3 +758,65 @@ taiko_kimidori_dani_registry_reset_diag_hook_start:
 
 taiko_kimidori_dani_registry_reset_diag_hook_end:
     .size taiko_kimidori_dani_registry_reset_diag_hook_start, . - taiko_kimidori_dani_registry_reset_diag_hook_start
+
+    .align 2
+taiko_kimidori_dani_request_fillrect_diag_hook_start:
+    /*
+     * Hooked over Kimidori 0x0002F85C:
+     *   nop
+     *
+     * RequestFillrect(boardIndex, uid) resolves uid through the native type-10
+     * title/fillrect map before drawing. Trace the Lumen board index, original
+     * uid argument, and resolved fillrect id while preserving the original no-op.
+     */
+    stdu    r1,-320(r1)
+    std     r0,304(r1)
+    std     r2,296(r1)
+    std     r3,288(r1)
+    std     r4,280(r1)
+    std     r5,272(r1)
+    std     r6,264(r1)
+    std     r7,256(r1)
+    std     r8,248(r1)
+    std     r9,240(r1)
+    std     r10,232(r1)
+    std     r11,224(r1)
+    std     r12,216(r1)
+    mfcr    r12
+    std     r12,208(r1)
+    std     r28,200(r1)
+    std     r29,192(r1)
+    std     r31,184(r1)
+
+    stw     r31,176(r1)     /* board index */
+    lwz     r11,464(r1)     /* parent RequestFillrect frame: uid stack slot */
+    stw     r11,172(r1)
+    stw     r29,168(r1)     /* resolved fillrect id */
+    EMIT_FILLRECT_LINE 176,172,168
+
+    ld      r31,184(r1)
+    ld      r29,192(r1)
+    ld      r28,200(r1)
+    ld      r12,208(r1)
+    mtcrf   0xff,r12
+    ld      r12,216(r1)
+    ld      r11,224(r1)
+    ld      r10,232(r1)
+    ld      r9,240(r1)
+    ld      r8,248(r1)
+    ld      r7,256(r1)
+    ld      r6,264(r1)
+    ld      r5,272(r1)
+    ld      r4,280(r1)
+    ld      r3,288(r1)
+    ld      r2,296(r1)
+    ld      r0,304(r1)
+    addi    r1,r1,320
+
+    lis     r12,0x0002
+    ori     r12,r12,0xF860
+    mtctr   r12
+    bctr
+
+taiko_kimidori_dani_request_fillrect_diag_hook_end:
+    .size taiko_kimidori_dani_request_fillrect_diag_hook_start, . - taiko_kimidori_dani_request_fillrect_diag_hook_start
