@@ -130,6 +130,7 @@ ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
             patches/asm/kimidori_dani_dojo_hook.S \
             patches/asm/kimidori_dani_proc_main_hook.S \
             patches/asm/kimidori_dani_change_state_diag_hook.S \
+            patches/asm/kimidori_dani_runtime_diag_hooks.S \
             patches/asm/pre_red_dani_emit_gate_hook.S
 ASM_OBJS := $(ASM_SRCS:.S=.o)
 OBJS += $(ASM_OBJS)

@@ -8,6 +8,9 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "eboot_patcher" / "eboot_inline_specs.c"
+ASM = ROOT / "patches" / "asm" / "kimidori_dani_runtime_diag_hooks.S"
+MAKEFILE = ROOT / "Makefile"
+MAKEFILE_WIN = ROOT / "Makefile.win"
 
 
 def require(condition, message):
@@ -19,6 +22,9 @@ def require(condition, message):
 
 def main():
     src = SPEC.read_text(encoding="utf-8")
+    asm = ASM.read_text(encoding="utf-8")
+    makefile = MAKEFILE.read_text(encoding="utf-8")
+    makefile_win = MAKEFILE_WIN.read_text(encoding="utf-8")
     ok = True
 
     required_tokens = [
@@ -27,9 +33,37 @@ def main():
         "KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_WORDS",
         "KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS",
         "KIMIDORI_DANI_STATE4_SERVICE_WORDS",
+        "KIMIDORI_DANI_LOOKUP_DIAG_SIGNATURES",
+        "KIMIDORI_DANI_STATE4_SERVICE_DIAG_SIGNATURES",
+        "taiko_kimidori_dani_lookup_diag_hook_start",
+        "taiko_kimidori_dani_state4_service_diag_hook_start",
+        "kimidori-st51-v05r00-dani-lookup-diag",
+        "kimidori-st51-v05r00-dani-state4-service-diag",
+        "0x003B2520u",
+        "0x00056858u",
     ]
     for token in required_tokens:
         ok &= require(token in src, f"missing {token}")
+
+    asm_tokens = [
+        "taiko_kimidori_dani_lookup_diag_hook_start",
+        "taiko_kimidori_dani_state4_service_diag_hook_start",
+        "0xB70C",
+        "0x2524",
+        "0x685C",
+        "sys_tty_write",
+    ]
+    for token in asm_tokens:
+        ok &= require(token in asm, f"runtime diagnostic asm missing {token}")
+
+    ok &= require(
+        "patches/asm/kimidori_dani_runtime_diag_hooks.S" in makefile,
+        "GNU Makefile missing runtime diagnostic asm",
+    )
+    ok &= require(
+        "patches\\asm\\kimidori_dani_runtime_diag_hooks.o" in makefile_win,
+        "Windows Makefile missing runtime diagnostic object",
+    )
 
     table_match = re.search(
         r"KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS\[\]\s*=\s*\{(?P<body>.*?)\};",

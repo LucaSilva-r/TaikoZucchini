@@ -20,6 +20,10 @@ extern const uint8_t taiko_kimidori_dani_proc_main_hook_start[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_end[];
 extern const uint8_t taiko_kimidori_dani_change_state_diag_hook_start[];
 extern const uint8_t taiko_kimidori_dani_change_state_diag_hook_end[];
+extern const uint8_t taiko_kimidori_dani_lookup_diag_hook_start[];
+extern const uint8_t taiko_kimidori_dani_lookup_diag_hook_end[];
+extern const uint8_t taiko_kimidori_dani_state4_service_diag_hook_start[];
+extern const uint8_t taiko_kimidori_dani_state4_service_diag_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -395,6 +399,95 @@ static const eboot_inline_signature_t
         },
     };
 
+static const uint32_t KIMIDORI_DANI_LOOKUP_DIAG_WORDS[] = {
+    0x480091EDu, /* bl sub_3BB70C */
+    0x60000000u, /* nop */
+    0x81410070u, /* lwz r10,0x70(r1) */
+};
+
+static const uint32_t KIMIDORI_DANI_LOOKUP_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t KIMIDORI_DANI_LOOKUP_DIAG_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+};
+
+static const uint32_t KIMIDORI_DANI_LOOKUP_DIAG_BRANCH_TARGETS[] = {
+    0x003BB70Cu,
+    0u,
+    0u,
+};
+
+static const uint32_t KIMIDORI_DANI_LOOKUP_DIAG_CONTEXT_WORDS[] = {
+    0x80629AB0u, /* lwz r3,off_B45D20(r2) */
+    0x7BA40020u, /* clrldi r4,r29,32 */
+    0x38A10070u, /* addi r5,r1,0x70 */
+    0x7FFEFB78u, /* mr r30,r31 */
+};
+
+static const uint32_t KIMIDORI_DANI_LOOKUP_DIAG_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t KIMIDORI_DANI_LOOKUP_DIAG_SIGNATURES[] = {
+    {
+        "kimidori Dani crash lookup call",
+        0x003B2520u,
+        KIMIDORI_DANI_LOOKUP_DIAG_WORDS,
+        KIMIDORI_DANI_LOOKUP_DIAG_MASKS,
+        sizeof(KIMIDORI_DANI_LOOKUP_DIAG_WORDS) /
+            sizeof(KIMIDORI_DANI_LOOKUP_DIAG_WORDS[0]),
+        KIMIDORI_DANI_LOOKUP_DIAG_MATCH_TYPES,
+        KIMIDORI_DANI_LOOKUP_DIAG_BRANCH_TARGETS,
+    },
+    {
+        "kimidori Dani crash lookup context",
+        0x003B2510u,
+        KIMIDORI_DANI_LOOKUP_DIAG_CONTEXT_WORDS,
+        KIMIDORI_DANI_LOOKUP_DIAG_CONTEXT_MASKS,
+        sizeof(KIMIDORI_DANI_LOOKUP_DIAG_CONTEXT_WORDS) /
+            sizeof(KIMIDORI_DANI_LOOKUP_DIAG_CONTEXT_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const uint32_t KIMIDORI_DANI_STATE4_SERVICE_DIAG_WORDS[] = {
+    0x814300D8u, /* lwz r10,0xD8(r3) */
+    0x7C7F1B78u, /* mr r31,r3 */
+    0x7C7E1B78u, /* mr r30,r3 */
+    0x2F8A0000u, /* cmpwi cr7,r10,0 */
+};
+
+static const uint32_t KIMIDORI_DANI_STATE4_SERVICE_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t
+    KIMIDORI_DANI_STATE4_SERVICE_DIAG_SIGNATURES[] = {
+        {
+            "kimidori state-4 service diagnostic entry",
+            0x00056858u,
+            KIMIDORI_DANI_STATE4_SERVICE_DIAG_WORDS,
+            KIMIDORI_DANI_STATE4_SERVICE_DIAG_MASKS,
+            sizeof(KIMIDORI_DANI_STATE4_SERVICE_DIAG_WORDS) /
+                sizeof(KIMIDORI_DANI_STATE4_SERVICE_DIAG_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
 static const uint32_t MOMOIRO_DANI_EMIT_BRANCH_TARGETS[] = {
     0x005285D0u,
     0u,
@@ -759,6 +852,38 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0056434u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-lookup-diag",
+        0x003B2520u,
+        KIMIDORI_DANI_LOOKUP_DIAG_SIGNATURES,
+        sizeof(KIMIDORI_DANI_LOOKUP_DIAG_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_LOOKUP_DIAG_SIGNATURES[0]),
+        taiko_kimidori_dani_lookup_diag_hook_start,
+        taiko_kimidori_dani_lookup_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x003B2524u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-state4-service-diag",
+        0x00056858u,
+        KIMIDORI_DANI_STATE4_SERVICE_DIAG_SIGNATURES,
+        sizeof(KIMIDORI_DANI_STATE4_SERVICE_DIAG_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_STATE4_SERVICE_DIAG_SIGNATURES[0]),
+        taiko_kimidori_dani_state4_service_diag_hook_start,
+        taiko_kimidori_dani_state4_service_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0005685Cu,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },
