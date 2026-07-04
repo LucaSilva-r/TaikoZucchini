@@ -1573,11 +1573,16 @@ static void apply_kimidori_dani_proc_main_runtime_fallback(void) {
         return;
 
     uint32_t cmp = pt_read32(T, PROC_MAIN_CMP);
-    if (cmp == 0x2F80000Du)
+    if (cmp == 0x2F80000Du) {
+        dbg_print("[patch] Kimidori Dan-i Proc_Main fallback already applied\n");
         return;
+    }
 
-    if (cmp != 0x2F80001Au)
+    if (cmp != 0x2F80001Au) {
+        dbg_print("[patch] Kimidori Dan-i Proc_Main fallback skipped; unexpected cmp\n");
+        dbg_print_hex32("[patch] Kimidori Dan-i Proc_Main cmp word", cmp);
         return;
+    }
 
     dbg_print("[patch] Kimidori Dan-i Proc_Main runtime fallback\n");
     dbg_print_hex32("[patch] Kimidori Dan-i Proc_Main cmp", PROC_MAIN_CMP);
@@ -2036,6 +2041,18 @@ void patches_apply_data00000_embed_live(uint32_t series_version,
                             pt_read32(&t, addr + 4u));
         }
     }
+    g_patch_target = NULL;
+}
+
+void patches_apply_dani_dojo_live_fallback(void) {
+    if (!g_cfg.dani_dojo_unlock)
+        return;
+
+    patch_target_t t;
+    pt_init_live(&t);
+    g_patch_target = &t;
+    dbg_print("[patch] Dan-i Dojo live fallback marker\n");
+    apply_kimidori_dani_proc_main_runtime_fallback();
     g_patch_target = NULL;
 }
 
