@@ -1557,6 +1557,38 @@ static void apply_dani_dojo_unlock(void) {
     }
 }
 
+static void apply_kimidori_dani_proc_main_runtime_fallback(void) {
+    enum {
+        PROC_MAIN_CMP = 0x005666Cu,
+        PROC_MAIN_BEQ = 0x0056670u,
+        PROC_MAIN_AFTER = 0x0056674u,
+        PROC_MAIN_DANI = 0x00566E8u,
+    };
+
+    if (pt_read32(T, 0x0056650u) != 0x38800007u ||
+        pt_read32(T, 0x0056668u) != 0x80090000u ||
+        branch_target(PROC_MAIN_BEQ, pt_read32(T, PROC_MAIN_BEQ)) !=
+            PROC_MAIN_DANI ||
+        pt_read32(T, PROC_MAIN_AFTER) != 0xE8010090u)
+        return;
+
+    uint32_t cmp = pt_read32(T, PROC_MAIN_CMP);
+    if (cmp == 0x2F80000Du)
+        return;
+
+    if (cmp != 0x2F80001Au)
+        return;
+
+    dbg_print("[patch] Kimidori Dan-i Proc_Main runtime fallback\n");
+    dbg_print_hex32("[patch] Kimidori Dan-i Proc_Main cmp", PROC_MAIN_CMP);
+    write32(PROC_MAIN_CMP, 0x2F80000Du); /* cmpwi cr7,r0,0x0D */
+
+    if (pt_read32(T, PROC_MAIN_CMP) != 0x2F80000Du) {
+        dbg_print("[patch] Kimidori Dan-i Proc_Main fallback verify failed\n");
+        g_patch_error = -1;
+    }
+}
+
 /*
  * Katsu Don ST21 (software 0.21 and older) updates the gold-crown bit in
  * object byte +0x44, but the field actually lives at +0x45. Later EBOOTs
@@ -1964,8 +1996,10 @@ static void patches_apply_all_impl(void) {
         apply_clearlocks_stub();
     if (g_cfg.allow_screen_tearing)
         apply_allow_screen_tearing();
-    if (g_cfg.dani_dojo_unlock)
+    if (g_cfg.dani_dojo_unlock) {
         apply_dani_dojo_unlock();
+        apply_kimidori_dani_proc_main_runtime_fallback();
+    }
     apply_online_gate_force_patches();
     apply_katsudon_gold_crown_fix();
     if (g_have_data00000_metadata)
