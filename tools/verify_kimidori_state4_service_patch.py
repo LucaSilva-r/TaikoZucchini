@@ -76,6 +76,8 @@ def main():
         "EMIT_RETAIN_LINE",
         "Dani retain experiment",
         "0x000Axxxx",
+        "0x000A0000..0x000A019F",
+        "0x01A0",
         "0x7300",
         "srwi",
         "lwarx",
@@ -84,6 +86,11 @@ def main():
     ]
     for token in asm_tokens:
         ok &= require(token in asm, f"runtime diagnostic asm missing {token}")
+
+    ok &= require(
+        "0x00EC" not in asm,
+        "runtime diagnostic retain hook must not special-case only 0xA00EC",
+    )
 
     ok &= require(
         "patches/asm/kimidori_dani_runtime_diag_hooks.S" in makefile,

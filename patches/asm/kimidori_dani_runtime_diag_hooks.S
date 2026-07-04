@@ -476,9 +476,9 @@ taiko_kimidori_dani_registry_insert_diag_hook_start:
      * Trace insertions into the same registry family as the crashing lookup,
      * filtered to the 0x000Axxxx Dani resource family. r3=map, r4=key,
      * r5=value.
-     * Dani retain experiment: keep one extra reference only for key 0xA00EC
-     * to prove whether the later final release is the cause of the first null
-     * lookup crash.
+     * Dani retain experiment: keep one extra reference for the observed
+     * 0x000A0000..0x000A019F resource family to prove whether the later final
+     * release is the cause of the null lookup crashes.
      */
     stdu    r1,-448(r1)
     std     r0,432(r1)
@@ -517,9 +517,9 @@ taiko_kimidori_dani_registry_insert_diag_hook_start:
 
     ld      r11,400(r1)
     lis     r12,0x000A
-    ori     r12,r12,0x00EC
+    ori     r12,r12,0x01A0
     cmplw   cr7,r11,r12
-    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_emit
+    bc      BO_IF_FALSE,CR7_LT,kimidori_registry_insert_emit
 
     ld      r11,312(r1)
     cmpwi   cr7,r11,0
@@ -543,9 +543,9 @@ kimidori_registry_insert_emit:
     EMIT_REGISTRY_LINE 0x6920,400,392,312,408,320
     ld      r11,400(r1)
     lis     r12,0x000A
-    ori     r12,r12,0x00EC
+    ori     r12,r12,0x01A0
     cmplw   cr7,r11,r12
-    bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_done
+    bc      BO_IF_FALSE,CR7_LT,kimidori_registry_insert_done
     ld      r11,312(r1)
     cmpwi   cr7,r11,0
     bc      BO_IF_TRUE,CR7_EQ,kimidori_registry_insert_done
