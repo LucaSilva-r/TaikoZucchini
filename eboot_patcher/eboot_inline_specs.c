@@ -10,6 +10,8 @@ extern const uint8_t taiko_white_dani_taikojuku_hook_start[];
 extern const uint8_t taiko_white_dani_taikojuku_hook_end[];
 extern const uint8_t taiko_murasaki_dani_taikojuku_hook_start[];
 extern const uint8_t taiko_murasaki_dani_taikojuku_hook_end[];
+extern const uint8_t taiko_kimidori_dani_dojo_hook_start[];
+extern const uint8_t taiko_kimidori_dani_dojo_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -185,6 +187,18 @@ static const eboot_inline_signature_t KIMIDORI_DANI_EMIT_SIGNATURES[] = {
         NULL,
         NULL,
     },
+    {
+        "kimidori dormant type-9 row",
+        0x0057C588u,
+        INLINE_ROW_WORDS,
+        ROW_MASKS,
+        sizeof(INLINE_ROW_WORDS) / sizeof(INLINE_ROW_WORDS[0]),
+        ROW_MATCH_TYPES,
+        KIMIDORI_DANI_ROW_BRANCH_TARGETS,
+    },
+};
+
+static const eboot_inline_signature_t KIMIDORI_DANI_ROW_SIGNATURES[] = {
     {
         "kimidori dormant type-9 row",
         0x0057C588u,
@@ -392,6 +406,22 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0067DE40u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-row",
+        0x0057C588u,
+        KIMIDORI_DANI_ROW_SIGNATURES,
+        sizeof(KIMIDORI_DANI_ROW_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_ROW_SIGNATURES[0]),
+        taiko_kimidori_dani_dojo_hook_start,
+        taiko_kimidori_dani_dojo_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0057BC88u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },
