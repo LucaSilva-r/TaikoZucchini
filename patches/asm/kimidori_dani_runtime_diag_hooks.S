@@ -31,6 +31,7 @@
     .set r12,12
     .set BO_IF_TRUE,12
     .set BO_IF_FALSE,4
+    .set CR0_EQ,2
     .set CR7_EQ,30
     .set CR7_LT,28
 
@@ -132,6 +133,61 @@
     addi    r4,r1,32
     li      r5,73
     addi    r6,r1,112
+    li      r11,0x193
+    sc      /* sys_tty_write */
+    .endm
+
+    .macro EMIT_RETAIN_LINE objoff, beforeoff, afteroff
+    lis     r12,0x5B74  /* "[tz]" */
+    ori     r12,r12,0x7A5D
+    stw     r12,32(r1)
+    lis     r12,0x2072  /* " rt " */
+    ori     r12,r12,0x7420
+    stw     r12,36(r1)
+    lis     r12,0x6F3D  /* "o=0x" */
+    ori     r12,r12,0x3078
+    stw     r12,40(r1)
+
+    ld      r11,\objoff(r1)
+    STORE_HEX32 r11,44
+
+    li      r12,32
+    stb     r12,52(r1)
+    li      r12,98
+    stb     r12,53(r1)
+    li      r12,61
+    stb     r12,54(r1)
+    li      r12,48
+    stb     r12,55(r1)
+    li      r12,120
+    stb     r12,56(r1)
+
+    lwz     r11,\beforeoff(r1)
+    STORE_HEX32 r11,57
+
+    li      r12,32
+    stb     r12,65(r1)
+    li      r12,97
+    stb     r12,66(r1)
+    li      r12,61
+    stb     r12,67(r1)
+    li      r12,48
+    stb     r12,68(r1)
+    li      r12,120
+    stb     r12,69(r1)
+
+    lwz     r11,\afteroff(r1)
+    STORE_HEX32 r11,70
+
+    li      r12,10
+    stb     r12,78(r1)
+    li      r12,0
+    stw     r12,80(r1)
+
+    li      r3,0
+    addi    r4,r1,32
+    li      r5,47
+    addi    r6,r1,80
     li      r11,0x193
     sc      /* sys_tty_write */
     .endm
@@ -419,6 +475,8 @@ taiko_kimidori_dani_registry_insert_diag_hook_start:
      *
      * Trace insertions into the same registry family as the crashing lookup,
      * filtered to key 0xA00EC. r3=map, r4=key, r5=value.
+     * Dani retain experiment: keep one extra reference to prove whether the
+     * later final release is the cause of the null lookup crash.
      */
     stdu    r1,-448(r1)
     std     r0,432(r1)
@@ -456,7 +514,33 @@ taiko_kimidori_dani_registry_insert_diag_hook_start:
     cmplw   cr7,r11,r12
     bc      BO_IF_FALSE,CR7_EQ,kimidori_registry_insert_done
 
+    ld      r11,312(r1)
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_registry_insert_emit
+
+    ld      r11,392(r1)
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_registry_insert_emit
+
+    addi    r9,r11,4
+    clrldi  r9,r9,32
+kimidori_registry_insert_retain_loop:
+    lwarx   r10,0,r9
+    addi    r8,r10,1
+    stwcx.  r8,0,r9
+    bc      BO_IF_FALSE,CR0_EQ,kimidori_registry_insert_retain_loop
+    stw     r10,304(r1)
+    stw     r8,296(r1)
+
+kimidori_registry_insert_emit:
     EMIT_REGISTRY_LINE 0x6920,400,392,312,408,320
+    ld      r11,312(r1)
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_registry_insert_done
+    ld      r11,392(r1)
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_registry_insert_done
+    EMIT_RETAIN_LINE 392,304,296
 
 kimidori_registry_insert_done:
     ld      r2,416(r1)

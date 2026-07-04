@@ -73,6 +73,10 @@ def main():
         "0x6DF0",
         "0x6CE4",
         "EMIT_REMOVE_CALLER_LINE",
+        "EMIT_RETAIN_LINE",
+        "Dani retain experiment",
+        "lwarx",
+        "stwcx.",
         "sys_tty_write",
     ]
     for token in asm_tokens:
