@@ -14,6 +14,8 @@ extern const uint8_t taiko_kimidori_dani_dojo_hook_start[];
 extern const uint8_t taiko_kimidori_dani_dojo_hook_end[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_start[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_end[];
+extern const uint8_t taiko_kimidori_dani_change_state_diag_hook_start[];
+extern const uint8_t taiko_kimidori_dani_change_state_diag_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -301,6 +303,46 @@ static const eboot_inline_signature_t KIMIDORI_DANI_PROC_MAIN_SIGNATURES[] = {
     },
 };
 
+static const uint32_t KIMIDORI_DANI_CHANGE_STATE_DIAG_WORDS[] = {
+    0x2B840009u, /* cmplwi cr7,r4,9 */
+    0x7C0802A6u, /* mflr r0 */
+    0xF821FF81u, /* stdu r1,-0x80(r1) */
+    0xFBC10070u, /* std r30,0x70(r1) */
+    0xFBE10078u, /* std r31,0x78(r1) */
+    0xF8010090u, /* std r0,0x90(r1) */
+    0x7C7F1B78u, /* mr r31,r3 */
+    0x7C9E2378u, /* mr r30,r4 */
+    0x7C852378u, /* mr r5,r4 */
+    0x419D0048u, /* bgt cr7,default */
+};
+
+static const uint32_t KIMIDORI_DANI_CHANGE_STATE_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t
+    KIMIDORI_DANI_CHANGE_STATE_DIAG_SIGNATURES[] = {
+        {
+            "kimidori GameDojoSelect ChangeState diagnostic entry",
+            0x0056430u,
+            KIMIDORI_DANI_CHANGE_STATE_DIAG_WORDS,
+            KIMIDORI_DANI_CHANGE_STATE_DIAG_MASKS,
+            sizeof(KIMIDORI_DANI_CHANGE_STATE_DIAG_WORDS) /
+                sizeof(KIMIDORI_DANI_CHANGE_STATE_DIAG_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
 static const uint32_t MOMOIRO_DANI_EMIT_BRANCH_TARGETS[] = {
     0x005285D0u,
     0u,
@@ -529,6 +571,22 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0056674u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-change-state-diag",
+        0x0056430u,
+        KIMIDORI_DANI_CHANGE_STATE_DIAG_SIGNATURES,
+        sizeof(KIMIDORI_DANI_CHANGE_STATE_DIAG_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_CHANGE_STATE_DIAG_SIGNATURES[0]),
+        taiko_kimidori_dani_change_state_diag_hook_start,
+        taiko_kimidori_dani_change_state_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0056434u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },

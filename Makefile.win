@@ -117,6 +117,7 @@ ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o \
            patches\asm\murasaki_dani_taikojuku_hook.o \
            patches\asm\kimidori_dani_dojo_hook.o \
            patches\asm\kimidori_dani_proc_main_hook.o \
+           patches\asm\kimidori_dani_change_state_diag_hook.o \
            patches\asm\pre_red_dani_emit_gate_hook.o
 
 SPU_QR_ELF = $(BIN_DIR)\qr_spu.elf
@@ -291,6 +292,9 @@ patches\asm\kimidori_dani_dojo_hook.o: patches\asm\kimidori_dani_dojo_hook.S
 
 patches\asm\kimidori_dani_proc_main_hook.o: patches\asm\kimidori_dani_proc_main_hook.S
 	$(PPU_CC) $(CFLAGS) -c patches\asm\kimidori_dani_proc_main_hook.S -o $@
+
+patches\asm\kimidori_dani_change_state_diag_hook.o: patches\asm\kimidori_dani_change_state_diag_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\kimidori_dani_change_state_diag_hook.S -o $@
 
 patches\asm\pre_red_dani_emit_gate_hook.o: patches\asm\pre_red_dani_emit_gate_hook.S
 	$(PPU_CC) $(CFLAGS) -c patches\asm\pre_red_dani_emit_gate_hook.S -o $@
