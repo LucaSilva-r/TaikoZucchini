@@ -219,7 +219,7 @@ static const uint32_t KIMIDORI_DANI_PROC_MAIN_WORDS[] = {
 };
 
 static const uint32_t KIMIDORI_DANI_PROC_MAIN_MASKS[] = {
-    0xFFFFFFFFu,
+    0xFFFF0000u, /* cmpwi cr7,r0,imm; accept original or live fallback */
     0xFFFFFFFFu,
     0xFFFFFFFFu,
 };

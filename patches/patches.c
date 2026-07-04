@@ -1565,6 +1565,9 @@ static void apply_kimidori_dani_proc_main_runtime_fallback(void) {
         PROC_MAIN_DANI = 0x00566E8u,
     };
 
+    if (!T || T->kind != PT_LIVE)
+        return;
+
     if (pt_read32(T, 0x0056650u) != 0x38800007u ||
         pt_read32(T, 0x0056668u) != 0x80090000u ||
         branch_target(PROC_MAIN_BEQ, pt_read32(T, PROC_MAIN_BEQ)) !=
@@ -1575,6 +1578,11 @@ static void apply_kimidori_dani_proc_main_runtime_fallback(void) {
     uint32_t cmp = pt_read32(T, PROC_MAIN_CMP);
     if (cmp == 0x2F80000Du) {
         dbg_print("[patch] Kimidori Dan-i Proc_Main fallback already applied\n");
+        return;
+    }
+
+    if ((cmp & 0xFC000003u) == 0x48000000u) {
+        dbg_print("[patch] Kimidori Dan-i Proc_Main inline hook present\n");
         return;
     }
 
