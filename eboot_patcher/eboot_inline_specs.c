@@ -1,10 +1,14 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "eboot_inline_specs.h"
 #include "eboot_inline_hook.h"
 #include "elf_patch_util.h"
 #include "config/runtime.h"
+
+#define ELF_PF_X 1u
+#define ELF_PF_R 4u
 
 extern const uint8_t taiko_white_dani_taikojuku_hook_start[];
 extern const uint8_t taiko_white_dani_taikojuku_hook_end[];
@@ -303,6 +307,54 @@ static const eboot_inline_signature_t KIMIDORI_DANI_PROC_MAIN_SIGNATURES[] = {
     },
 };
 
+enum {
+    KIMIDORI_DANI_STATE4_CHANGE_VA = 0x0056554u,
+    KIMIDORI_DANI_STATE4_TOC_VA = 0x00B35C74u,
+    KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_VA = 0x00AED068u,
+};
+
+static const uint32_t KIMIDORI_DANI_STATE4_CHANGE_WORDS[] = {
+    0x800299BCu, /* lwz r0,off_B35C74(r2), case 4 table pointer */
+    0x39200000u, /* li r9,0 */
+    0x900300D8u, /* stw r0,0xD8(r3) */
+    0x912300DCu, /* stw r9,0xDC(r3) */
+};
+
+static const uint32_t KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_WORDS[] = {
+    0x00056590u, 0x00B3C2B8u,
+    0x0049E708u, 0x00B3C2B8u,
+    0x004A9430u, 0x00B3C2B8u,
+    0x004A8290u, 0x00B3C2B8u,
+    0x004C5C64u, 0x00B3C2B8u,
+    0x000565B0u, 0x00B3C2B8u,
+};
+
+static const uint32_t KIMIDORI_DANI_STATE4_SERVICE_WORDS[] = {
+    0xF821FF81u, /* stdu r1,-0x80(r1) */
+    0x7C0802A6u, /* mflr r0 */
+    0xFBC10070u, /* std r30,0x70(r1) */
+    0xFBE10078u, /* std r31,0x78(r1) */
+    0xF8010090u, /* std r0,0x90(r1) */
+    0x814300D8u, /* lwz r10,0xD8(r3) */
+};
+
+static const uint32_t KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS[] = {
+    0x00056590u, 0x00B3C2B8u,
+    0x00056844u, 0x00B3C2B8u,
+    0x0049E708u, 0x00B3C2B8u,
+    0x004A9430u, 0x00B3C2B8u,
+    0x004A8290u, 0x00B3C2B8u,
+    0x004C5C64u, 0x00B3C2B8u,
+    0x000565B0u, 0x00B3C2B8u,
+    0x00056624u, 0x00B3C2B8u,
+    0x004843A0u, 0x00B3C2B8u,
+    0x00056704u, 0x00B3C2B8u,
+    0x00056730u, 0x00B3C2B8u,
+    0x00056824u, 0x00B3C2B8u,
+    0x00056834u, 0x00B3C2B8u,
+    0x00056844u, 0x00B3C2B8u,
+};
+
 static const uint32_t KIMIDORI_DANI_CHANGE_STATE_DIAG_WORDS[] = {
     0x2B840009u, /* cmplwi cr7,r4,9 */
     0x7C0802A6u, /* mflr r0 */
@@ -462,6 +514,126 @@ static int patch_pre_red_dani_emit_payload(
     return replacements == 6u ? 0 : -2;
 }
 
+static int eboot_words_equal(self_ctx_t *ctx, const elf_patch_view_t *view,
+                             uint32_t va, const uint32_t *words,
+                             size_t word_count, int *out_equal) {
+    if (!ctx || !view || !words || !out_equal)
+        return -1;
+
+    uint64_t off = 0;
+    int rc = elf_patch_va_to_off(ctx, view, va, word_count * 4u, &off);
+    if (rc != 0)
+        return rc;
+
+    for (size_t i = 0; i < word_count; i++) {
+        uint32_t actual = elf_patch_load_be32(ctx->buf + off + i * 4u);
+        if (actual != words[i]) {
+            *out_equal = 0;
+            return 0;
+        }
+    }
+
+    *out_equal = 1;
+    return 0;
+}
+
+static int eboot_store_words(uint8_t *dst, size_t dst_size,
+                             const uint32_t *words, size_t word_count) {
+    if (!dst || !words || dst_size < word_count * 4u)
+        return -1;
+
+    for (size_t i = 0; i < word_count; i++)
+        elf_patch_store_be32(dst + i * 4u, words[i]);
+    return 0;
+}
+
+static int patch_kimidori_dani_state4_service_table(self_ctx_t *ctx) {
+    if (!ctx || !ctx->buf || !ctx->selfh)
+        return -1;
+
+    elf_patch_view_t view;
+    int rc = elf_patch_open(ctx, &view);
+    if (rc != 0)
+        return -10 + rc;
+
+    int matched = 0;
+    rc = eboot_words_equal(ctx, &view, KIMIDORI_DANI_STATE4_CHANGE_VA,
+                           KIMIDORI_DANI_STATE4_CHANGE_WORDS,
+                           sizeof(KIMIDORI_DANI_STATE4_CHANGE_WORDS) /
+                               sizeof(KIMIDORI_DANI_STATE4_CHANGE_WORDS[0]),
+                           &matched);
+    if (rc != 0 || !matched)
+        return 0;
+
+    uint64_t toc_off = 0;
+    rc = elf_patch_va_to_off(ctx, &view, KIMIDORI_DANI_STATE4_TOC_VA, 4u,
+                             &toc_off);
+    if (rc != 0)
+        return -20 + rc;
+
+    uint32_t toc_value = elf_patch_load_be32(ctx->buf + toc_off);
+    if (toc_value != KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_VA) {
+        matched = 0;
+        rc = eboot_words_equal(
+            ctx, &view, toc_value, KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS,
+            sizeof(KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS) /
+                sizeof(KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS[0]),
+            &matched);
+        return (rc == 0 && matched) ? 0 : -30;
+    }
+
+    matched = 0;
+    rc = eboot_words_equal(
+        ctx, &view, KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_VA,
+        KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_WORDS,
+        sizeof(KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_WORDS) /
+            sizeof(KIMIDORI_DANI_STATE4_ORIGINAL_TABLE_WORDS[0]),
+        &matched);
+    if (rc != 0 || !matched)
+        return -40 + rc;
+
+    matched = 0;
+    rc = eboot_words_equal(
+        ctx, &view, 0x00056844u, KIMIDORI_DANI_STATE4_SERVICE_WORDS,
+        sizeof(KIMIDORI_DANI_STATE4_SERVICE_WORDS) /
+            sizeof(KIMIDORI_DANI_STATE4_SERVICE_WORDS[0]),
+        &matched);
+    if (rc != 0 || !matched)
+        return -50 + rc;
+
+    uint16_t load_index = 0;
+    rc = elf_patch_find_first_load(&view, ELF_PF_R, ELF_PF_X, &load_index);
+    if (rc != 0)
+        return -60 + rc;
+
+    uint8_t table_image[sizeof(KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS)];
+    rc = eboot_store_words(table_image, sizeof(table_image),
+                           KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS,
+                           sizeof(KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS) /
+                               sizeof(KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS[0]));
+    if (rc != 0)
+        return -70 + rc;
+
+    uint64_t table_off = 0;
+    uint64_t table_va = 0;
+    rc = elf_patch_append_to_load(ctx, &view, load_index, 4u, table_image,
+                                  sizeof(table_image), 0u, &table_off,
+                                  &table_va);
+    if (rc != 0)
+        return -80 + rc;
+    if (table_va > 0xFFFFFFFFu)
+        return -90;
+
+    elf_patch_store_be32(ctx->buf + toc_off, (uint32_t)table_va);
+
+    if (elf_patch_load_be32(ctx->buf + toc_off) != (uint32_t)table_va)
+        return -100;
+    if (memcmp(ctx->buf + table_off, table_image, sizeof(table_image)) != 0)
+        return -101;
+
+    return 0;
+}
+
 static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
     {
         "dani_dojo_unlock",
@@ -615,6 +787,9 @@ static const size_t INLINE_HOOK_SPEC_COUNT =
 int eboot_inline_hooks_apply(self_ctx_t *ctx) {
     if (!g_cfg.dani_dojo_unlock)
         return 0;
+    int rc = patch_kimidori_dani_state4_service_table(ctx);
+    if (rc != 0)
+        return rc;
     return eboot_inline_hook_apply(ctx, INLINE_HOOK_SPECS,
                                    INLINE_HOOK_SPEC_COUNT,
                                    "dani_dojo_unlock");
