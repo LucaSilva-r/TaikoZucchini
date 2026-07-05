@@ -129,8 +129,6 @@ ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
             patches/asm/murasaki_dani_taikojuku_hook.S \
             patches/asm/kimidori_dani_dojo_hook.S \
             patches/asm/kimidori_dani_proc_main_hook.S \
-            patches/asm/kimidori_dani_change_state_diag_hook.S \
-            patches/asm/kimidori_dani_runtime_diag_hooks.S \
             patches/asm/pre_red_dani_emit_gate_hook.S
 ASM_OBJS := $(ASM_SRCS:.S=.o)
 OBJS += $(ASM_OBJS)
@@ -262,7 +260,6 @@ patches/asm/white_dani_taikojuku_hook.o: patches/asm/white_dani_taikojuku_hook.S
 patches/asm/murasaki_dani_taikojuku_hook.o: patches/asm/murasaki_dani_taikojuku_hook.S
 patches/asm/kimidori_dani_dojo_hook.o: patches/asm/kimidori_dani_dojo_hook.S
 patches/asm/kimidori_dani_proc_main_hook.o: patches/asm/kimidori_dani_proc_main_hook.S
-patches/asm/kimidori_dani_change_state_diag_hook.o: patches/asm/kimidori_dani_change_state_diag_hook.S
 patches/asm/pre_red_dani_emit_gate_hook.o: patches/asm/pre_red_dani_emit_gate_hook.S
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
