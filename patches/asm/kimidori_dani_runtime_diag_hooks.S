@@ -827,6 +827,8 @@ taiko_kimidori_dani_request_fillrect_diag_hook_start:
      */
     stdu    r1,-320(r1)
     std     r0,304(r1)
+    mflr    r0
+    std     r0,144(r1)
     std     r2,296(r1)
     std     r3,288(r1)
     std     r4,280(r1)
@@ -847,6 +849,38 @@ taiko_kimidori_dani_request_fillrect_diag_hook_start:
     stw     r31,176(r1)     /* board index used by the following draw call */
     lwz     r11,440(r1)     /* original RequestFillrect frame: sp+0x78 uid */
     stw     r11,172(r1)
+    lis     r10,0x000A
+    cmplw   cr7,r29,r10
+    bc      BO_IF_FALSE,CR7_EQ,kimidori_fillrect_fallback_done
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_fillrect_fallback_done
+
+    /*
+     * Native type-10 lookup returned the dummy/base id. If the exact
+     * base+uid title resource is already registered, use that real resource.
+     * This repairs the missing range-list state without inventing titles.
+     */
+    add     r10,r10,r11
+    stw     r10,140(r1)
+    li      r9,0
+    stw     r9,136(r1)
+    lis     r3,0x00B4
+    ori     r3,r3,0x5D20
+    lwz     r3,0(r3)        /* off_B45D20 -> resource registry */
+    mr      r4,r10
+    addi    r5,r1,136
+    lis     r12,0x003B
+    ori     r12,r12,0xB70C
+    mtctr   r12
+    bctrl
+    ld      r2,296(r1)
+    lwz     r10,136(r1)
+    cmpwi   cr7,r10,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_fillrect_fallback_done
+    lwz     r29,140(r1)
+    std     r29,192(r1)
+
+kimidori_fillrect_fallback_done:
     stw     r29,168(r1)     /* resolved fillrect id */
     lwz     r10,0(r28)      /* dword_C0422C */
     stw     r10,164(r1)
@@ -880,6 +914,8 @@ kimidori_fillrect_resource_ready:
     ld      r4,280(r1)
     ld      r3,288(r1)
     ld      r2,296(r1)
+    ld      r0,144(r1)
+    mtlr    r0
     ld      r0,304(r1)
     addi    r1,r1,320
 
