@@ -1270,24 +1270,47 @@ Failure mechanism:
 - The `sub_7501C8("hidden")` close-tag check therefore hit the archive error
   path and threw through `sub_70DE6C -> sub_45A6A8`.
 
-Fix applied to `tools/merge_kimidori_dani_from_st5100.py`:
+First attempted fix, later corrected:
 
 - Copy the ST5100-1 `MusicMedleyInfoHeader` version into active
   `musicmedleyinfo.xml`.
 - Normalize medley `Content` hidden-field presence to match ST5100-1. For the
   Kimidori ST5100-1 reference, this means removing all `<hidden>` tags.
+
+This avoided the XML parse abort, but it was semantically wrong for Kimidori.
+The old-format `<hidden>` field is not disposable. For `Content` rows it
+distinguishes regular Oni from Ura Oni:
+
+```text
+new-format Ura Oni: difficulty=4
+old-format Ura Oni: difficulty=3, hidden=1
+```
+
+Corrected fix in `tools/merge_kimidori_dani_from_st5100.py`:
+
+- Keep the target `musicmedleyinfo.xml` archive version by default instead of
+  copying the ST5100-1 version.
+- If the output version is old-format (`version <= 0x20140500`), ensure every
+  `Content` row has `<hidden>`.
+- Convert any new-format Ura Oni rows from `difficulty=4` to
+  `difficulty=3` plus `<hidden>1</hidden>`.
+- If writing a new-format file, convert old-format
+  `difficulty=3` plus `<hidden>1</hidden>` back to `difficulty=4` before
+  removing hidden tags.
+- Support `--target-musicmedleyinfo-source` so an already-mutated active file
+  can be repaired from a backup that still has the original hidden flags.
 - Keep the existing rank/song preservation strategy otherwise unchanged.
 
 Applied to active Kimidori runtime data:
 
 ```text
-python tools\merge_kimidori_dani_from_st5100.py --target-data-dir "H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Kimidori\USRDIR\data" --reference-dir "H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Murasaki\USRDIR\data\config\ST5100-1"
+python tools\merge_kimidori_dani_from_st5100.py --target-data-dir "H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Kimidori\USRDIR\data" --reference-dir "H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Murasaki\USRDIR\data\config\ST5100-1" --target-musicmedleyinfo-source "H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Kimidori\USRDIR\data\musicmedleyinfo.xml.bak-20260706-035616"
 ```
 
 Backup created:
 
 ```text
-H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Kimidori\USRDIR\data\musicmedleyinfo.xml.bak-20260706-035616
+H:\RPCS3\rpcs3-blue\dev_hdd0\game\SCEEXE001 Kimidori\USRDIR\data\musicmedleyinfo.xml.bak-20260706-054635
 ```
 
 Post-fix verification:
@@ -1303,9 +1326,9 @@ changed entries: 0
 no write needed
 
 direct structure check:
-medley version 538182913
+medley version 538054930
 medley size 22 blocks 22 size_ok True
-content blocks 66 hidden 0 notes 66 hidden_ok True notes_ok True
+content blocks 66 hidden 66 hidden1 11 diff4 0 notes 66 hidden_ok True notes_ok True
 musicinfo size 433 blocks 433 size_ok True
 ```
 

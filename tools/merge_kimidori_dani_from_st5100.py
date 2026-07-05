@@ -5,7 +5,9 @@ The Murasaki install carries the Kimidori-era ST5100-1 Dani set with 22 ranks.
 This tool uses ST5100-1 for the rank order, medley IDs, and missing rank rows,
 while preserving active Kimidori medleyinfo row contents for ranks already
 present. The musicinfo.xml Dani medley Data rows are copied from ST5100-1 as
-the correct Kimidori-era medley song metadata.
+the correct Kimidori-era medley song metadata. musicmedleyinfo output keeps
+the target archive format by default; old-format files represent ura oni as
+`difficulty=3` plus `hidden=1`, while newer files use `difficulty=4`.
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ UNIQUEID_RE = re.compile(r"(<uniqueid>)(\d+)(</uniqueid>)")
 PARTSSET_RE = re.compile(r"<partsset>([^<]+)</partsset>")
 CLASS_ID_RE = re.compile(r'(class_id=")(\d+)(")')
 HIDDEN_LINE_RE = re.compile(r"^[ \t]*<hidden>[^<]*</hidden>\r?\n?", re.MULTILINE)
+CONTENT_RE = re.compile(r"(<Content\b[^>]*>.*?</Content>)", re.DOTALL)
+HIDDEN_RE = re.compile(r"(<hidden>)(\d+)(</hidden>)")
+NOTES_RE = re.compile(r"(?P<indent>[ \t]*)<notes>")
+
+LEGACY_HIDDEN_VERSION_CUTOFF = 0x20140500
 
 
 GRADE_DIGITS = {
@@ -84,6 +91,23 @@ def parse_args() -> argparse.Namespace:
         "--backup-suffix",
         default=None,
         help="Backup suffix. Default: .bak-YYYYMMDD-HHMMSS.",
+    )
+    parser.add_argument(
+        "--musicmedley-version",
+        default=None,
+        help=(
+            "Override output musicmedleyinfo header version. Default: keep "
+            "the target file's version."
+        ),
+    )
+    parser.add_argument(
+        "--target-musicmedleyinfo-source",
+        type=Path,
+        default=None,
+        help=(
+            "Optional musicmedleyinfo.xml source to read existing Kimidori "
+            "rank contents from while still writing to --target-data-dir."
+        ),
     )
     return parser.parse_args()
 
@@ -176,6 +200,16 @@ def medleyinfo_header_version(prefix: str) -> str:
     return match.group(1)
 
 
+def medleyinfo_uses_hidden(version: str) -> bool:
+    return int(version) <= LEGACY_HIDDEN_VERSION_CUTOFF
+
+
+def validate_medleyinfo_version(version: str) -> str:
+    if not re.fullmatch(r"\d+", version):
+        raise SystemExit(f"Invalid musicmedleyinfo version: {version}")
+    return version
+
+
 def update_medleyinfo_header(prefix: str, version: str, count: int) -> str:
     rewritten, changed = re.subn(
         r"(<MusicMedleyInfoHeader\b[^>]*>.*?<version>)(\d+)(</version>)",
@@ -259,15 +293,49 @@ def content_musicids(block: str) -> List[str]:
     return MUSICID_RE.findall(block)
 
 
-def normalize_content_hidden_fields(block: str, reference_uses_hidden: bool) -> str:
-    if reference_uses_hidden:
-        return block
-    return HIDDEN_LINE_RE.sub("", block)
+def convert_content_to_medley_version(content: str, output_uses_hidden: bool) -> str:
+    difficulty = tag_text(content, "difficulty")
+    hidden = tag_text(content, "hidden")
+
+    if output_uses_hidden:
+        if difficulty == "4":
+            content = replace_tag(content, "difficulty", "3")
+            hidden = "1"
+        elif hidden == "":
+            hidden = "0"
+
+        if HIDDEN_RE.search(content):
+            return HIDDEN_RE.sub(rf"\g<1>{hidden}\g<3>", content, count=1)
+
+        notes_match = NOTES_RE.search(content)
+        if notes_match is None:
+            raise SystemExit("Content block has no notes tag")
+        indent = notes_match.group("indent")
+        hidden_line = f"{indent}<hidden>{hidden}</hidden>\n"
+        return (
+            content[: notes_match.start()]
+            + hidden_line
+            + content[notes_match.start() :]
+        )
+
+    if hidden == "1" and difficulty == "3":
+        content = replace_tag(content, "difficulty", "4")
+    return HIDDEN_LINE_RE.sub("", content)
+
+
+def convert_contents_to_medley_version(block: str, version: str) -> str:
+    output_uses_hidden = medleyinfo_uses_hidden(version)
+
+    def convert(match: re.Match[str]) -> str:
+        return convert_content_to_medley_version(match.group(1), output_uses_hidden)
+
+    return CONTENT_RE.sub(convert, block)
 
 
 def rewrite_medleyinfo(
     target_text: str,
     reference_text: str,
+    version_override: str | None = None,
 ) -> Tuple[str, List[str], List[str]]:
     target_prefix, target_blocks, target_suffix = split_blocks(target_text, MEDLEY_RE)
     ref_prefix, ref_blocks, _ref_suffix = split_blocks(reference_text, MEDLEY_RE)
@@ -276,8 +344,9 @@ def rewrite_medleyinfo(
 
     target_by_rank = map_by_rank(target_blocks, medleyinfo_rank)
     ref_order = reference_rank_order(ref_blocks, medleyinfo_rank)
-    ref_version = medleyinfo_header_version(ref_prefix)
-    reference_uses_hidden = "<hidden>" in reference_text
+    target_version = medleyinfo_header_version(target_prefix)
+    medleyinfo_header_version(ref_prefix)
+    output_version = validate_medleyinfo_version(version_override or target_version)
 
     merged: List[str] = []
     preserved: List[str] = []
@@ -297,10 +366,10 @@ def rewrite_medleyinfo(
         else:
             block = ref_block
             inserted.append(rank)
-        block = normalize_content_hidden_fields(block, reference_uses_hidden)
+        block = convert_contents_to_medley_version(block, output_version)
         merged.append(block)
 
-    target_prefix = update_medleyinfo_header(target_prefix, ref_version, len(ref_order))
+    target_prefix = update_medleyinfo_header(target_prefix, output_version, len(ref_order))
     return target_prefix + "\n  ".join(merged) + target_suffix, preserved, inserted
 
 
@@ -356,18 +425,23 @@ def main() -> int:
     target_medley = args.target_data_dir / "musicmedleyinfo.xml"
     ref_musicinfo = args.reference_dir / "musicinfo.xml"
     ref_medley = args.reference_dir / "musicmedleyinfo.xml"
+    target_medley_source = args.target_musicmedleyinfo_source or target_medley
     for path in (target_musicinfo, target_medley, ref_musicinfo, ref_medley):
         if not path.is_file():
             raise SystemExit(f"Missing required file: {path}")
+    if not target_medley_source.is_file():
+        raise SystemExit(f"Missing target medley source: {target_medley_source}")
 
     target_musicinfo_text = target_musicinfo.read_text(encoding="utf-8")
-    target_medley_text = target_medley.read_text(encoding="utf-8")
+    target_medley_current_text = target_medley.read_text(encoding="utf-8")
+    target_medley_text = target_medley_source.read_text(encoding="utf-8")
     ref_musicinfo_text = ref_musicinfo.read_text(encoding="utf-8")
     ref_medley_text = ref_medley.read_text(encoding="utf-8")
 
     new_medley, medley_preserved, medley_inserted = rewrite_medleyinfo(
         target_medley_text,
         ref_medley_text,
+        args.musicmedley_version,
     )
     new_musicinfo, musicinfo_removed, musicinfo_inserted = rewrite_musicinfo(
         target_musicinfo_text,
@@ -376,11 +450,14 @@ def main() -> int:
 
     print(f"target: {args.target_data_dir}")
     print(f"reference: {args.reference_dir}")
+    if target_medley_source != target_medley:
+        print(f"musicmedley source: {target_medley_source}")
+    print(f"musicmedley output version: {medleyinfo_header_version(new_medley)}")
     print_list("musicmedley preserved Kimidori ranks", medley_preserved)
     print_list("musicmedley inserted ST5100-1 ranks", medley_inserted)
     print(f"musicinfo removed target medley rows: {musicinfo_removed}")
     print(f"musicinfo inserted ST5100-1 medley rows: {musicinfo_inserted}")
-    print(f"musicmedley changed: {new_medley != target_medley_text}")
+    print(f"musicmedley changed: {new_medley != target_medley_current_text}")
     print(f"musicinfo changed: {new_musicinfo != target_musicinfo_text}")
 
     if args.dry_run:
@@ -391,7 +468,7 @@ def main() -> int:
     if new_musicinfo != target_musicinfo_text:
         backups.append(backup_file(target_musicinfo, args.backup_suffix))
         target_musicinfo.write_text(new_musicinfo, encoding="utf-8", newline="")
-    if new_medley != target_medley_text:
+    if new_medley != target_medley_current_text:
         backups.append(backup_file(target_medley, args.backup_suffix))
         target_medley.write_text(new_medley, encoding="utf-8", newline="")
 
