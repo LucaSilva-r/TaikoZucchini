@@ -25,9 +25,9 @@ taiko_kimidori_dani_proc_main_hook_start:
      * Hooked over Kimidori 0x005666C:
      *   cmpwi cr7,r0,0x1A
      *
-     * Preserve Kimidori's native marker 0x1A and route it to the existing
-     * Dani branch target. Every other marker resumes the original non-Dani
-     * path at 0x0056674.
+     * The restored row hook emits marker 0x0D. Preserve native marker 0x1A
+     * and route both markers to the existing Dani branch target. Every other
+     * marker resumes the original non-Dani path at 0x0056674.
      */
     stdu    r1,-192(r1)
     std     r0,176(r1)
@@ -99,6 +99,8 @@ kimidori_proc_main_lo_store:
     addi    r1,r1,192
 
     cmpwi   cr7,r0,0x1A
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_proc_main_dani
+    cmpwi   cr7,r0,0x0D
     bc      BO_IF_TRUE,CR7_EQ,kimidori_proc_main_dani
 
     lis     r12,0x0005
