@@ -308,6 +308,61 @@
     sc      /* sys_tty_write */
     .endm
 
+    .macro EMIT_FILLRECT_RESOURCE_LINE globaloff, rootoff, treeoff
+    lis     r12,0x5B74  /* "[tz]" */
+    ori     r12,r12,0x7A5D
+    stw     r12,32(r1)
+    lis     r12,0x2072  /* " rr " */
+    ori     r12,r12,0x7220
+    stw     r12,36(r1)
+    lis     r12,0x673D  /* "g=0x" */
+    ori     r12,r12,0x3078
+    stw     r12,40(r1)
+
+    lwz     r11,\globaloff(r1)
+    STORE_HEX32 r11,44
+
+    li      r12,32
+    stb     r12,52(r1)
+    li      r12,114
+    stb     r12,53(r1)
+    li      r12,61
+    stb     r12,54(r1)
+    li      r12,48
+    stb     r12,55(r1)
+    li      r12,120
+    stb     r12,56(r1)
+
+    lwz     r11,\rootoff(r1)
+    STORE_HEX32 r11,57
+
+    li      r12,32
+    stb     r12,65(r1)
+    li      r12,116
+    stb     r12,66(r1)
+    li      r12,61
+    stb     r12,67(r1)
+    li      r12,48
+    stb     r12,68(r1)
+    li      r12,120
+    stb     r12,69(r1)
+
+    lwz     r11,\treeoff(r1)
+    STORE_HEX32 r11,70
+
+    li      r12,10
+    stb     r12,78(r1)
+    li      r12,0
+    stw     r12,80(r1)
+
+    li      r3,0
+    addi    r4,r1,32
+    li      r5,47
+    addi    r6,r1,80
+    li      r11,0x193
+    sc      /* sys_tty_write */
+    .endm
+
 taiko_kimidori_dani_lookup_diag_hook_start:
     /*
      * Hooked over Kimidori 0x003B2520:
@@ -766,8 +821,9 @@ taiko_kimidori_dani_request_fillrect_diag_hook_start:
      *   nop
      *
      * RequestFillrect(boardIndex, uid) resolves uid through the native type-10
-     * title/fillrect map before drawing. Trace the Lumen board index, original
-     * uid argument, and resolved fillrect id while preserving the original no-op.
+     * title/fillrect map before drawing. Trace the Lumen board index, real uid
+     * argument local, resolved fillrect id, and the resource tree pointers while
+     * preserving the original no-op.
      */
     stdu    r1,-320(r1)
     std     r0,304(r1)
@@ -788,11 +844,25 @@ taiko_kimidori_dani_request_fillrect_diag_hook_start:
     std     r29,192(r1)
     std     r31,184(r1)
 
-    stw     r31,176(r1)     /* board index */
-    lwz     r11,464(r1)     /* parent RequestFillrect frame: uid stack slot */
+    stw     r31,176(r1)     /* board index used by the following draw call */
+    lwz     r11,440(r1)     /* original RequestFillrect frame: sp+0x78 uid */
     stw     r11,172(r1)
     stw     r29,168(r1)     /* resolved fillrect id */
+    lwz     r10,0(r28)      /* dword_C0422C */
+    stw     r10,164(r1)
+    li      r11,0
+    li      r12,0
+    cmpwi   cr7,r10,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_fillrect_resource_ready
+    lwz     r11,0(r10)      /* *(dword_C0422C + 0): resource catalog root */
+    cmpwi   cr7,r11,0
+    bc      BO_IF_TRUE,CR7_EQ,kimidori_fillrect_resource_ready
+    lwz     r12,512(r11)    /* *(resource catalog root + 0x200): type tree */
+kimidori_fillrect_resource_ready:
+    stw     r11,160(r1)
+    stw     r12,156(r1)
     EMIT_FILLRECT_LINE 176,172,168
+    EMIT_FILLRECT_RESOURCE_LINE 164,160,156
 
     ld      r31,184(r1)
     ld      r29,192(r1)
