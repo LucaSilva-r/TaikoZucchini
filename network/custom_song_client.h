@@ -2,6 +2,7 @@
 #define TAIKO_NETWORK_CUSTOM_SONG_CLIENT_H
 
 #define ESE_SONG_ID_MAX    32
+#define ESE_SONG_SHORT_ID_MAX 16
 #define ESE_SONG_TITLE_MAX 96
 #define ESE_CATEGORY_ID_MAX    64
 #define ESE_CATEGORY_TITLE_MAX 64
@@ -47,5 +48,13 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
                                int *out_course_count);
 /* 1 if the song is already converted+downloaded locally (manifest present). */
 int ese_song_is_cached(const char *song_id);
+int ese_song_library_count(void);
+int ese_song_library_get(int index, ese_song_entry_t *out);
+int ese_song_library_cached_count(void);
+int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out);
+int ese_song_make_short_id(const char *song_id, char *out, int cap);
+int ese_song_resolve_short_id(const char *short_id, char *out, int cap);
+int ese_song_map_course_for_short_id(const char *short_id, const char *requested,
+                                     char *out, int cap);
 
 #endif

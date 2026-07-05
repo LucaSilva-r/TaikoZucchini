@@ -257,8 +257,10 @@ static ese_category_entry_t g_lib_cats[ESE_CATEGORY_LIST_MAX];
 static int                  g_lib_cat_count;
 static ese_song_entry_t    *g_lib_songs;     /* malloc[g_lib_song_count] */
 static short               *g_lib_song_cat;  /* malloc[]: index into g_lib_cats */
+static unsigned char       *g_lib_cached;    /* malloc[]: local manifest exists */
 static int                  g_lib_song_count;
 static int                  g_lib_loaded;
+static int                  g_lib_cache_scanned;
 static char                 g_lib_hash[ESE_LIB_HASH_MAX];
 
 static int lib_cat_index(const char *id) {
@@ -297,10 +299,92 @@ static unsigned char *read_file_alloc(const char *path, size_t *out_len) {
 static void lib_free(void) {
     free(g_lib_songs);     g_lib_songs = NULL;
     free(g_lib_song_cat);  g_lib_song_cat = NULL;
+    free(g_lib_cached);    g_lib_cached = NULL;
     g_lib_song_count = 0;
     g_lib_cat_count = 0;
     g_lib_loaded = 0;
+    g_lib_cache_scanned = 0;
     g_lib_hash[0] = 0;
+}
+
+static int streq_c(const char *a, const char *b) {
+    if (!a || !b)
+        return 0;
+    while (*a && *b) {
+        if (*a++ != *b++)
+            return 0;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static int cached_dir_has_manifest(const char *song_id) {
+    char root[192];
+    int fd = -1;
+    CellFsDirent de;
+    uint64_t nread = 0;
+    int found = 0;
+
+    if (!song_id || !append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id))
+        return 0;
+    if (cellFsOpendir(root, &fd) != CELL_FS_SUCCEEDED)
+        return 0;
+
+    while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
+        if (de.d_type == CELL_FS_TYPE_REGULAR &&
+            streq_c(de.d_name, "manifest.json")) {
+            found = 1;
+            break;
+        }
+    }
+    cellFsClosedir(fd);
+    return found;
+}
+
+static int lib_find_song_index(const char *song_id) {
+    if (!song_id || !g_lib_loaded)
+        return -1;
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (strncmp(g_lib_songs[i].id, song_id,
+                    sizeof g_lib_songs[i].id) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void lib_refresh_cached_flags(void) {
+    int fd = -1;
+    CellFsDirent de;
+    uint64_t nread = 0;
+    int cached = 0;
+
+    if (!g_lib_loaded || !g_lib_cached)
+        return;
+    memset(g_lib_cached, 0, (size_t)g_lib_song_count);
+    g_lib_cache_scanned = 1;
+
+    if (cellFsOpendir(ESE_CUSTOM_ROOT, &fd) != CELL_FS_SUCCEEDED)
+        return;
+
+    while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
+        int idx;
+        if (de.d_type != CELL_FS_TYPE_DIRECTORY)
+            continue;
+        if (strncmp(de.d_name, "ese_", 4) != 0)
+            continue;
+        idx = lib_find_song_index(de.d_name);
+        if (idx < 0)
+            continue;
+        if (!cached_dir_has_manifest(de.d_name))
+            continue;
+        if (!g_lib_cached[idx]) {
+            g_lib_cached[idx] = 1;
+            cached++;
+        }
+    }
+    cellFsClosedir(fd);
+
+    dbg_print("[ese] cached library songs=");
+    dbg_print_hex32("", (uint32_t)cached);
 }
 
 /* Parse a flat "e:5,n:7,h:9,m:10,x:10" diffs string into canonical star slots
@@ -365,7 +449,9 @@ static int parse_library(const unsigned char *body, size_t len) {
     if (nsong > 0) {
         g_lib_songs = (ese_song_entry_t *)malloc(sizeof(ese_song_entry_t) * (size_t)nsong);
         g_lib_song_cat = (short *)malloc(sizeof(short) * (size_t)nsong);
-        if (!g_lib_songs || !g_lib_song_cat) { lib_free(); return 0; }
+        g_lib_cached = (unsigned char *)malloc((size_t)nsong);
+        if (!g_lib_songs || !g_lib_song_cat || !g_lib_cached) { lib_free(); return 0; }
+        memset(g_lib_cached, 0, (size_t)nsong);
     }
 
     for (p = songs_key; g_lib_song_count < nsong; ) {
@@ -394,6 +480,7 @@ static int parse_library(const unsigned char *body, size_t len) {
     }
 
     g_lib_loaded = (g_lib_cat_count > 0);
+    g_lib_cache_scanned = 0;
     return g_lib_loaded;
 }
 
@@ -502,6 +589,189 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
     if (out_total)
         *out_total = total;
     return count;
+}
+
+int ese_song_library_count(void) {
+    return g_lib_loaded ? g_lib_song_count : 0;
+}
+
+int ese_song_library_get(int index, ese_song_entry_t *out) {
+    if (!out || !g_lib_loaded || index < 0 || index >= g_lib_song_count)
+        return 0;
+    *out = g_lib_songs[index];
+    return 1;
+}
+
+int ese_song_library_cached_count(void) {
+    int count = 0;
+
+    if (!g_lib_loaded)
+        return 0;
+    if (!g_lib_cache_scanned)
+        lib_refresh_cached_flags();
+    if (!g_lib_cached)
+        return 0;
+
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (g_lib_cached[i])
+            count++;
+    }
+    return count;
+}
+
+int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out) {
+    int seen = 0;
+
+    if (!out || cached_index < 0 || !g_lib_loaded)
+        return 0;
+    if (!g_lib_cache_scanned)
+        lib_refresh_cached_flags();
+    if (!g_lib_cached)
+        return 0;
+
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (!g_lib_cached[i])
+            continue;
+        if (seen == cached_index) {
+            *out = g_lib_songs[i];
+            return 1;
+        }
+        seen++;
+    }
+    return 0;
+}
+
+int ese_song_make_short_id(const char *song_id, char *out, int cap) {
+    int len = 0;
+    const char *tail;
+
+    if (!song_id || !out || cap <= 0)
+        return 0;
+
+    out[0] = '\0';
+    while (song_id[len])
+        len++;
+    if (len < 6)
+        return 0;
+
+    tail = song_id + len - 6;
+    if (cap < 11)
+        return 0;
+
+    out[0] = 'e';
+    out[1] = 's';
+    out[2] = 'e';
+    out[3] = '_';
+    for (int i = 0; i < 6; i++)
+        out[4 + i] = tail[i];
+    out[10] = '\0';
+    return 1;
+}
+
+int ese_song_resolve_short_id(const char *short_id, char *out, int cap) {
+    char tmp[ESE_SONG_SHORT_ID_MAX];
+
+    if (!short_id || !out || cap <= 0)
+        return 0;
+    out[0] = '\0';
+
+    if (g_lib_loaded) {
+        for (int i = 0; i < g_lib_song_count; i++) {
+            if (!ese_song_make_short_id(g_lib_songs[i].id, tmp, sizeof tmp))
+                continue;
+        if (strncmp(tmp, short_id, sizeof tmp) == 0) {
+                int n = snprintf(out, (size_t)cap, "%s", g_lib_songs[i].id);
+                return n > 0 && n < cap;
+            }
+        }
+    }
+
+    if (strncmp(short_id, "ese_", 4) != 0)
+        return 0;
+
+    int fd = -1;
+    CellFsDirent de;
+    uint64_t nread = 0;
+
+    if (cellFsOpendir(ESE_CUSTOM_ROOT, &fd) != CELL_FS_SUCCEEDED)
+        return 0;
+
+    while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
+        if (de.d_type != CELL_FS_TYPE_DIRECTORY)
+            continue;
+        if (strncmp(de.d_name, "ese_", 4) != 0)
+            continue;
+        if (!ese_song_make_short_id(de.d_name, tmp, sizeof tmp))
+            continue;
+        if (strncmp(tmp, short_id, sizeof tmp) != 0)
+            continue;
+        if (!cached_dir_has_manifest(de.d_name))
+            continue;
+        int n = snprintf(out, (size_t)cap, "%s", de.d_name);
+        cellFsClosedir(fd);
+        return n > 0 && n < cap;
+    }
+
+    cellFsClosedir(fd);
+    return 0;
+}
+
+static int course_slot_from_char(char c) {
+    if (c >= 'A' && c <= 'Z')
+        c = (char)(c + ('a' - 'A'));
+    switch (c) {
+    case 'e': return 0;
+    case 'n': return 1;
+    case 'h': return 2;
+    case 'm': return 3;
+    case 'x':
+    case 'u': return 4;
+    default: return -1;
+    }
+}
+
+static char course_char_from_slot(int slot) {
+    static const char chars[ESE_DIFF_SLOTS] = { 'e', 'n', 'h', 'm', 'x' };
+    if (slot < 0 || slot >= ESE_DIFF_SLOTS)
+        return '\0';
+    return chars[slot];
+}
+
+int ese_song_map_course_for_short_id(const char *short_id, const char *requested,
+                                     char *out, int cap) {
+    char long_id[ESE_SONG_ID_MAX];
+    int req_slot;
+
+    if (!out || cap <= 1)
+        return 0;
+    out[0] = '\0';
+    if (!short_id || !requested || !requested[0])
+        return 0;
+    if (!ese_song_resolve_short_id(short_id, long_id, sizeof long_id))
+        return 0;
+
+    req_slot = course_slot_from_char(requested[0]);
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (strncmp(g_lib_songs[i].id, long_id, sizeof g_lib_songs[i].id) != 0)
+            continue;
+        if (req_slot >= 0 && g_lib_songs[i].stars[req_slot] >= 0) {
+            out[0] = course_char_from_slot(req_slot);
+            out[1] = '\0';
+            return 1;
+        }
+
+        static const int fallback[] = { 3, 2, 1, 0, 4 };
+        for (unsigned k = 0; k < sizeof fallback / sizeof fallback[0]; k++) {
+            int slot = fallback[k];
+            if (g_lib_songs[i].stars[slot] >= 0) {
+                out[0] = course_char_from_slot(slot);
+                out[1] = '\0';
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 0;
 }
 
 /* Song titles are now rendered on-device (see core/title_render.c); the
@@ -747,12 +1017,17 @@ static int download_asset_chunked(const char *song_id, const char *asset_path) {
 static int write_local_manifest(const char *song_id,
                                 const unsigned char *body, size_t len) {
     char root[192], path[256];
+    int ok;
+
     if (!ensure_custom_song_dirs(song_id, NULL))
         return 0;
     if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
         !append_path(path, sizeof path, root, "manifest.json"))
         return 0;
-    return write_file(path, body, len);
+    ok = write_file(path, body, len);
+    if (ok)
+        g_lib_cache_scanned = 0;
+    return ok;
 }
 
 int ese_song_is_cached(const char *song_id) {

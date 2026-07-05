@@ -19,6 +19,7 @@
 #include "dns_hook.h"
 #include "socket_hook.h"
 #include "video_out_hook.h"
+#include "hooks/songselect_natives.h"
 #include "online_diag.h"
 #include "data00000_redirect.h"
 #include "camera_diag.h"
@@ -899,6 +900,7 @@ int taiko_start(unsigned int args, void *argp) {
      * gcm allocator runs. */
     taiko_video_upscale_install();
     taiko_overlay_hooks_install();
+    songselect_natives_install();
     taiko_version_check_start();
     camera_diag_hooks_install();
     smart_stub_install();

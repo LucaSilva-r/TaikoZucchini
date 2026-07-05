@@ -121,6 +121,7 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            hooks/http_hook.c hooks/cell_http_shim.c \
            hooks/dns_hook.c hooks/socket_hook.c \
            hooks/video_out_hook.c \
+           hooks/songselect_natives.c \
            network/uri.c network/http_client.c network/version_check.c \
            network/custom_song_client.c
 OBJS    := $(SRCS:.c=.o)
@@ -285,6 +286,7 @@ hooks/http_hook.o:      hooks/http_hook.c      hooks/http_hook.h core/icache.h c
 hooks/dns_hook.o:       hooks/dns_hook.c       hooks/dns_hook.h core/icache.h core/debug.h eboot_fpt.h config/runtime.h config.h
 hooks/socket_hook.o:    hooks/socket_hook.c    hooks/socket_hook.h core/icache.h core/debug.h eboot_fpt.h network/http_client.h config/runtime.h config.h
 hooks/video_out_hook.o: hooks/video_out_hook.c hooks/video_out_hook.h eboot_fpt.h config/runtime.h config.h core/debug.h
+hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h core/debug.h core/icache.h
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
 network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h config/version.h core/debug.h core/overlay.h
