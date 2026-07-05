@@ -18,6 +18,8 @@ extern const uint8_t taiko_kimidori_dani_dojo_hook_start[];
 extern const uint8_t taiko_kimidori_dani_dojo_hook_end[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_start[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_end[];
+extern const uint8_t taiko_kimidori_dani_resource_retain_hook_start[];
+extern const uint8_t taiko_kimidori_dani_resource_retain_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -352,6 +354,72 @@ static const uint32_t KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS[] = {
     0x00056834u, 0x00B3C2B8u,
     0x00056844u, 0x00B3C2B8u,
 };
+
+static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_WORDS[] = {
+    0x4BFD86F5u, /* bl sub_3BF608 */
+    0x60000000u, /* nop */
+    0x813F001Cu, /* lwz r9,0x1C(r31) */
+    0x7C7D1B78u, /* mr r29,r3 */
+};
+
+static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t KIMIDORI_DANI_RESOURCE_RETAIN_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+};
+
+static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_BRANCH_TARGETS[] = {
+    0x003BF608u,
+    0u,
+    0u,
+    0u,
+};
+
+static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS[] = {
+    0x387F0080u, /* addi r3,r31,0x80 */
+    0x7BC40020u, /* clrldi r4,r30,32 */
+    0x78630020u, /* clrldi r3,r3,32 */
+    0x7B850020u, /* clrldi r5,r28,32 */
+};
+
+static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const eboot_inline_signature_t
+    KIMIDORI_DANI_RESOURCE_RETAIN_SIGNATURES[] = {
+        {
+            "kimidori Dani resource registry insert call",
+            0x003E6F14u,
+            KIMIDORI_DANI_RESOURCE_RETAIN_WORDS,
+            KIMIDORI_DANI_RESOURCE_RETAIN_MASKS,
+            sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_WORDS) /
+                sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_WORDS[0]),
+            KIMIDORI_DANI_RESOURCE_RETAIN_MATCH_TYPES,
+            KIMIDORI_DANI_RESOURCE_RETAIN_BRANCH_TARGETS,
+        },
+        {
+            "kimidori Dani resource registry insert context",
+            0x003E6F04u,
+            KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS,
+            KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_MASKS,
+            sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS) /
+                sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
 
 static const uint32_t MOMOIRO_DANI_EMIT_BRANCH_TARGETS[] = {
     0x005285D0u,
@@ -701,6 +769,22 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x0056674u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "kimidori-st51-v05r00-dani-resource-retain",
+        0x003E6F14u,
+        KIMIDORI_DANI_RESOURCE_RETAIN_SIGNATURES,
+        sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_SIGNATURES) /
+            sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_SIGNATURES[0]),
+        taiko_kimidori_dani_resource_retain_hook_start,
+        taiko_kimidori_dani_resource_retain_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x003E6F18u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },

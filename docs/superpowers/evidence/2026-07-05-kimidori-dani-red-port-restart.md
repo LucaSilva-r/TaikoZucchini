@@ -1323,11 +1323,12 @@ User runtime result after applying the medley header/content-shape fix:
 Now it is fully working.
 ```
 
-Final cleanup decision:
+Final cleanup decision, corrected after post-cleanup regression:
 
 - Keep the real Kimidori Dani hook path:
   - `kimidori-st51-v05r00-dani-row`
   - `kimidori-st51-v05r00-dani-proc-main`
+  - `kimidori-st51-v05r00-dani-resource-retain`
   - `patch_kimidori_dani_state4_service_table`
 - Remove the temporary diagnostic hooks and payloads from the final build:
   - change-state trace hook
@@ -1335,5 +1336,16 @@ Final cleanup decision:
   - lookup/state4/registry/fillrect runtime diagnostic hooks
 - Remove the temporary `[tz] pm=...` TTY marker from the proc-main hook itself.
 
-The final patch is therefore data-shape correction plus the already-established
-Kimidori native Dani hook path, not a logging build.
+The cleanup initially removed the registry-insert hook as if it were only
+diagnostic. That was wrong: the hook also performed the retained-resource-family
+experiment that runtime had already proven necessary. The production form keeps
+only the behavior:
+
+```text
+on registry insert:
+  if 0x000A0000 <= key < 0x000A01A0 and resource != NULL:
+      atomic_increment(*(resource + 4))
+```
+
+The final patch is therefore data-shape correction plus the established Kimidori
+native Dani hook path and the resource-family retain hook, not a logging build.
