@@ -1323,17 +1323,21 @@ User runtime result after applying the medley header/content-shape fix:
 Now it is fully working.
 ```
 
-Final cleanup decision, corrected after post-cleanup regression:
+Final cleanup decision, corrected after inspecting
+`H:\TaikoZucchini\.codex-tmp\removed.txt`:
 
 - Keep the real Kimidori Dani hook path:
   - `kimidori-st51-v05r00-dani-row`
   - `kimidori-st51-v05r00-dani-proc-main`
-  - `kimidori-st51-v05r00-dani-initdata-trace`
+  - `kimidori-st51-v05r00-dani-type10-ready`
   - `kimidori-st51-v05r00-dani-resource-retain`
   - `patch_kimidori_dani_state4_service_table`
 - Remove the temporary diagnostic hooks and payloads from the final build:
   - change-state trace hook
   - lookup/state4/registry/fillrect runtime diagnostic hooks
+- Remove the InitData trace hook from the final build. It only replaced
+  Kimidori's compiled-out logger at `0x00215E24` and printed parsed
+  `AssignDani` / `AssignMusic` rows. It did not load type-10 title resources.
 - Remove the temporary `[tz] pm=...` TTY marker from the proc-main hook itself.
 
 The cleanup initially removed the registry-insert hook as if it were only
@@ -1346,17 +1350,34 @@ on registry insert:
       atomic_increment(*(resource + 4))
 ```
 
-The next cleanup attempt also removed `kimidori-st51-v05r00-dani-initdata-trace`.
-That was wrong. The user's accepted runtime result was after `940aa8d`, where
-the InitData hook was still active; removing it made Dani song titles fall back
-to dummy again. Until the exact non-TTY replacement is proven at runtime, the
-working reconstructed patch keeps the InitData hook as part of the loader path.
+The next cleanup attempt also removed the old
+`patches/asm/kimidori_dani_runtime_diag_hooks.S` payload as if it were only
+diagnostic. That was also wrong. The removed file contained the behavior that
+made song titles resolve:
+
+```text
+RequestFillrect hook at 0x0002F85C:
+  if type10_entry exists
+  and requested uid != 0
+  and current resolved fillrect id == 0x000A0000
+  and type10 flags == 0x0A010100
+  and package byte count != 0
+  and range begin == range end:
+      sub_93258(type10_entry)
+      resolved = sub_92620(&root, 10, requested_uid)
+      if resolved != 0:
+          feed resolved id back through r29
+```
+
+That code path is the no-log production replacement for the diagnostic
+fillrect hook. The InitData trace hook being present in the accepted build was
+correlation, not proof that it loaded resources.
 
 The reconstructed working patch is therefore:
 
 - corrected Kimidori Dani data shape,
 - `kimidori-st51-v05r00-dani-row`,
 - `kimidori-st51-v05r00-dani-proc-main`,
-- `kimidori-st51-v05r00-dani-initdata-trace`,
+- `kimidori-st51-v05r00-dani-type10-ready`,
 - `kimidori-st51-v05r00-dani-resource-retain`,
 - `patch_kimidori_dani_state4_service_table`.
