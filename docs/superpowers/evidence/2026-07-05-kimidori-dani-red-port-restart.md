@@ -1328,11 +1328,11 @@ Final cleanup decision, corrected after post-cleanup regression:
 - Keep the real Kimidori Dani hook path:
   - `kimidori-st51-v05r00-dani-row`
   - `kimidori-st51-v05r00-dani-proc-main`
+  - `kimidori-st51-v05r00-dani-initdata-trace`
   - `kimidori-st51-v05r00-dani-resource-retain`
   - `patch_kimidori_dani_state4_service_table`
 - Remove the temporary diagnostic hooks and payloads from the final build:
   - change-state trace hook
-  - initdata trace hook
   - lookup/state4/registry/fillrect runtime diagnostic hooks
 - Remove the temporary `[tz] pm=...` TTY marker from the proc-main hook itself.
 
