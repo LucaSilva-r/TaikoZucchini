@@ -4,11 +4,14 @@
     .globl taiko_kimidori_dani_resource_retain_hook_end
     .type taiko_kimidori_dani_resource_retain_hook_start, @object
 
+    .set r0,0
     .set r1,1
     .set r2,2
     .set r3,3
     .set r4,4
     .set r5,5
+    .set r6,6
+    .set r7,7
     .set r8,8
     .set r9,9
     .set r10,10
@@ -30,33 +33,50 @@ taiko_kimidori_dani_resource_retain_hook_start:
      * runtime patch that stopped the Dani select crash:
      *   0x000A0000 <= key < 0x000A01A0.
      */
-    stdu    r1,-128(r1)
-    std     r2,112(r1)
-    std     r4,104(r1)
-    std     r5,96(r1)
+    stdu    r1,-448(r1)
+    std     r0,432(r1)
+    mflr    r0
+    std     r0,424(r1)
+    std     r2,416(r1)
+    std     r3,408(r1)
+    std     r4,400(r1)
+    std     r5,392(r1)
+    std     r6,384(r1)
+    std     r7,376(r1)
+    std     r8,368(r1)
+    std     r9,360(r1)
+    std     r10,352(r1)
+    std     r11,344(r1)
+    std     r12,336(r1)
+    mfcr    r12
+    std     r12,328(r1)
 
+    ld      r3,408(r1)
+    ld      r4,400(r1)
+    ld      r5,392(r1)
     lis     r12,0x003B
     ori     r12,r12,0xF608
     mtctr   r12
     bctrl
-    std     r3,88(r1)
-    ld      r2,112(r1)
+    std     r3,312(r1)
+    ld      r2,416(r1)
 
-    ld      r11,104(r1)
+    ld      r11,400(r1)
     srwi    r12,r11,16
     cmpwi   cr7,r12,0x000A
     bc      BO_IF_FALSE,CR7_EQ,kimidori_dani_retain_done
 
+    ld      r11,400(r1)
     lis     r12,0x000A
     ori     r12,r12,0x01A0
     cmplw   cr7,r11,r12
     bc      BO_IF_FALSE,CR7_LT,kimidori_dani_retain_done
 
-    ld      r11,88(r1)
+    ld      r11,312(r1)
     cmpwi   cr7,r11,0
     bc      BO_IF_TRUE,CR7_EQ,kimidori_dani_retain_done
 
-    ld      r11,96(r1)
+    ld      r11,392(r1)
     cmpwi   cr7,r11,0
     bc      BO_IF_TRUE,CR7_EQ,kimidori_dani_retain_done
 
@@ -69,8 +89,9 @@ kimidori_dani_retain_loop:
     bc      BO_IF_FALSE,CR0_EQ,kimidori_dani_retain_loop
 
 kimidori_dani_retain_done:
-    ld      r3,88(r1)
-    addi    r1,r1,128
+    ld      r2,416(r1)
+    ld      r3,312(r1)
+    addi    r1,r1,448
 
     lis     r12,0x003E
     ori     r12,r12,0x6F18

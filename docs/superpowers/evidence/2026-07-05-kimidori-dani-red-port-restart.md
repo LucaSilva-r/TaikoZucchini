@@ -1328,18 +1328,19 @@ Final cleanup decision, corrected after post-cleanup regression:
 - Keep the real Kimidori Dani hook path:
   - `kimidori-st51-v05r00-dani-row`
   - `kimidori-st51-v05r00-dani-proc-main`
-  - `kimidori-st51-v05r00-dani-initdata-trace`
   - `kimidori-st51-v05r00-dani-resource-retain`
   - `patch_kimidori_dani_state4_service_table`
 - Remove the temporary diagnostic hooks and payloads from the final build:
   - change-state trace hook
+  - initdata trace hook
   - lookup/state4/registry/fillrect runtime diagnostic hooks
 - Remove the temporary `[tz] pm=...` TTY marker from the proc-main hook itself.
 
 The cleanup initially removed the registry-insert hook as if it were only
 diagnostic. That was wrong: the hook also performed the retained-resource-family
 experiment that runtime had already proven necessary. The production form keeps
-only the behavior:
+only the behavior, using a logging-free hook body that mirrors the old
+registry-insert hook's call/retain path:
 
 ```text
 on registry insert:
@@ -1349,3 +1350,20 @@ on registry insert:
 
 The final patch is therefore data-shape correction plus the established Kimidori
 native Dani hook path and the resource-family retain hook, not a logging build.
+
+Line review of the removed pre-cleanup diagnostic hooks:
+
+- `kimidori_dani_change_state_diag_hook.S`: logging-only; replays the original
+  `cmplwi cr7,r4,9`.
+- `kimidori_dani_runtime_diag_hooks.S` lookup hook: logging-only; replays the
+  original `sub_3BB70C` lookup call.
+- `kimidori_dani_runtime_diag_hooks.S` state4-service hook: logging-only;
+  replays the original `lwz r10,0xD8(r3)`.
+- `kimidori_dani_runtime_diag_hooks.S` registry insert hook: behavior-bearing;
+  replays `sub_3BF608` and increments the retained resource refcount.
+- `kimidori_dani_runtime_diag_hooks.S` registry remove/reset hooks:
+  logging-only; replay the original remove/reset calls.
+- `kimidori_dani_runtime_diag_hooks.S` RequestFillrect hook: logging-only;
+  replaces an original `nop`.
+- `kimidori_dani_initdata_trace_hook.S`: logging-only; hooks Kimidori's
+  compiled-out logger at `0x00215E24`.

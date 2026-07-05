@@ -18,8 +18,6 @@ extern const uint8_t taiko_kimidori_dani_dojo_hook_start[];
 extern const uint8_t taiko_kimidori_dani_dojo_hook_end[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_start[];
 extern const uint8_t taiko_kimidori_dani_proc_main_hook_end[];
-extern const uint8_t taiko_kimidori_dani_initdata_trace_hook_start[];
-extern const uint8_t taiko_kimidori_dani_initdata_trace_hook_end[];
 extern const uint8_t taiko_kimidori_dani_resource_retain_hook_start[];
 extern const uint8_t taiko_kimidori_dani_resource_retain_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
@@ -356,28 +354,6 @@ static const uint32_t KIMIDORI_DANI_STATE4_SERVICE_TABLE_WORDS[] = {
     0x00056834u, 0x00B3C2B8u,
     0x00056844u, 0x00B3C2B8u,
 };
-
-static const uint32_t KIMIDORI_DANI_INITDATA_TRACE_WORDS[] = {
-    0x4E800020u, /* blr */
-};
-
-static const uint32_t KIMIDORI_DANI_INITDATA_TRACE_MASKS[] = {
-    0xFFFFFFFFu,
-};
-
-static const eboot_inline_signature_t
-    KIMIDORI_DANI_INITDATA_TRACE_SIGNATURES[] = {
-        {
-            "kimidori compiled-out Dani InitData logger",
-            0x00215E24u,
-            KIMIDORI_DANI_INITDATA_TRACE_WORDS,
-            KIMIDORI_DANI_INITDATA_TRACE_MASKS,
-            sizeof(KIMIDORI_DANI_INITDATA_TRACE_WORDS) /
-                sizeof(KIMIDORI_DANI_INITDATA_TRACE_WORDS[0]),
-            NULL,
-            NULL,
-        },
-    };
 
 static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_WORDS[] = {
     0x4BFD86F5u, /* bl sub_3BF608 */
@@ -809,22 +785,6 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x003E6F18u,
-        NULL,
-        NULL,
-        { 0u, 0u, 0u, 0u },
-    },
-    {
-        "dani_dojo_unlock",
-        "kimidori-st51-v05r00-dani-initdata-trace",
-        0x00215E24u,
-        KIMIDORI_DANI_INITDATA_TRACE_SIGNATURES,
-        sizeof(KIMIDORI_DANI_INITDATA_TRACE_SIGNATURES) /
-            sizeof(KIMIDORI_DANI_INITDATA_TRACE_SIGNATURES[0]),
-        taiko_kimidori_dani_initdata_trace_hook_start,
-        taiko_kimidori_dani_initdata_trace_hook_end,
-        4u,
-        EBOOT_INLINE_RETURN_EXPLICIT,
-        0u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },
