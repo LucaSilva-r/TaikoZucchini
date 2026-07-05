@@ -28,9 +28,9 @@
 taiko_kimidori_dani_dojo_hook_start:
     /*
      * Hooked at Kimidori 0x57C588, the dormant type-9 Dani row case.
-     * Mirror the Murasaki/White row path: append row 0x0D using the original
-     * source row fields from r27 + 0x10 / +0x14, then continue after the
-     * game's normal row append block. Taikojuku is intentionally not ported.
+     * Append Kimidori's native Dani row marker 0x1A using the original source
+     * row fields from r27 + 0x10 / +0x14, then continue after the game's
+     * normal row append block. Taikojuku is intentionally not ported.
      */
     stdu    r1,-192(r1)
     std     r0,176(r1)
@@ -47,7 +47,7 @@ taiko_kimidori_dani_dojo_hook_start:
     std     r11,104(r1)
     std     r12,96(r1)
 
-    /* Preserve original Dani visibility: row 0x0D only appears on song 1. */
+    /* Preserve original Dani visibility: the row only appears on song 1. */
     lwz     r11,0(r24)
     cmpwi   cr7,r11,0
     bc      BO_IF_TRUE,CR7_EQ,kimidori_skip_dani_row
@@ -56,7 +56,7 @@ taiko_kimidori_dani_dojo_hook_start:
     cmpwi   cr7,r9,1
     bc      BO_IF_FALSE,CR7_EQ,kimidori_skip_dani_row
 
-    li      r0,13
+    li      r0,26
     stw     r0,32(r1)
     lwz     r0,0x10(r27)
     stw     r0,36(r1)

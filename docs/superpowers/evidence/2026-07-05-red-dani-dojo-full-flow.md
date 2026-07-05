@@ -265,6 +265,25 @@ There are still two runtime cases to split:
 The old fillrect diagnostic cannot distinguish these because its logged `u=`
 field used the wrong stack slot.
 
+## Patch Implication From State 5
+
+The selected-row type must remain the native Dani marker for the era. RED's
+state 5 changes to Dani state 7 only when the selected row type is `30`.
+Kimidori has the same structure, but its native predicate is row type `26`
+(`0x1A`):
+
+```text
+Kimidori sub_56624:
+selected_row_type == 26 -> a1+0x14 = 2; ChangeState(7)
+otherwise               -> ChangeState(6)
+```
+
+The earlier Kimidori patch emitted row type `13` (`0x0D`) and then aliased that
+marker in the `Proc_Main` hook. That enters Dani state 7, but the selected row
+record no longer satisfies Kimidori's native Dani identity. The proper port is
+to append the restored Kimidori row with marker `0x1A` and leave `Proc_Main`
+matching only the native marker.
+
 ## Next Diagnostic Patch
 
 Patch `sub_2F718` earlier or more precisely, before the call to `sub_92620`, and
