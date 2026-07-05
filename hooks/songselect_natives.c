@@ -55,6 +55,30 @@ static ssn_arg_raw ssn_arg(void *vm, unsigned idx) {
     return out;
 }
 
+static int ssn_arg_u32(ssn_arg_raw arg, uint32_t *out) {
+    if (arg.type == 2) {
+        if (out)
+            *out = arg.value;
+        return 1;
+    }
+    if (arg.type == 3) {
+        union {
+            uint32_t u;
+            float f;
+        } v;
+        int iv;
+
+        v.u = arg.value;
+        iv = (int)v.f;
+        if (iv < 0)
+            return 0;
+        if (out)
+            *out = (uint32_t)iv;
+        return 1;
+    }
+    return 0;
+}
+
 static void ssn_log_arg(unsigned idx, ssn_arg_raw arg) {
     char label[16];
     label[0] = ' ';
@@ -128,9 +152,9 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_ENABLE_PLAYERINFO_SCAN 0
 #define SSN_ENABLE_SCENE_ENTER_HOOK 0
 #define SSN_ENABLE_MUSICINFO_HOOK 0
-#define SSN_ENABLE_E46_CUSTOM_INJECTION 0
+#define SSN_ENABLE_E46_CUSTOM_INJECTION 1
 #define SSN_ENABLE_E46_OBJECT_DUMP 0
-#define SSN_ENABLE_TEST_APPEND_PATH 0
+#define SSN_ENABLE_TEST_APPEND_PATH 1
 #define SSN_E46_DUMP_MAX_CALLS 1
 #define LOG_COURSESTAR_ARGS 12
 #define LOG_COURSESTAR_MAX 48
@@ -168,12 +192,13 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_INLINE_STRING_LEN_OFF   0x00000014u
 #define SSN_INLINE_STRING_CAP_OFF   0x00000018u
 #define SSN_INLINE_STRING_CAP       15u
-#define SSN_TEST_APPEND_FOLDER      4u
-#define SSN_TEST_APPEND_START       216u
-#define SSN_TEST_APPEND_ORIG_COUNT  4u
+#define SSN_TEST_APPEND_FOLDER      8u
+#define SSN_TEST_APPEND_START       453u
+#define SSN_TEST_APPEND_ORIG_COUNT  347u
+#define SSN_VISIBLE_APPEND_START    800u
 #define SSN_ENABLE_LEGACY_RANGE_INJECTION 0
 #define SSN_INJECT_MAX              32u
-#define SSN_TEMPLATE_ABSOLUTE       220u
+#define SSN_TEMPLATE_ABSOLUTE       799u
 #define SSN_PATCH_PLAYERINFO_STARS  0
 #define LOG_PLAYERINFO_STAR_MAX     12
 #define LOG_PLAYERINFO_NATIVE_ARGS  10
@@ -236,6 +261,9 @@ typedef uint32_t *(*basic_musicid_lookup_fn)(uint32_t *out,
 static int ssn_get_board_range(uint32_t idx, uint32_t *start, uint32_t *count);
 static int ssn_is_test_virtual_song(uint32_t folder, uint32_t local);
 static int ssn_streq(const char *a, const char *b);
+static int ssn_virtual_index_for_request(uint32_t folder, uint32_t local,
+                                         uint32_t *out_index,
+                                         uint32_t *out_absolute);
 
 static uint32_t ssn_songselect_state(void) {
     uint32_t cell = *(volatile uint32_t *)(uintptr_t)GREEN_SONGSELECT_STATE_CELL;
@@ -658,10 +686,11 @@ static int ssn_collect_cached_songs(ssn_inject_song_t *out, int cap) {
 
 static void ssn_patch_song_record_fields(uint32_t rec,
                                          const ssn_inject_song_t *song) {
+    const char *subtitle = song->song.subtitle[0] ?
+        song->song.subtitle : song->song.title;
+
     ssn_write_inline_string(rec + SSN_SONG_MUSICID_OFF, song->short_id);
-    ssn_write_inline_string(rec + SSN_SONG_GENRE_OFF, "douyou");
-    ssn_write_inline_string(rec + SSN_SONG_TITLE_OFF, song->song.title);
-    ssn_write_inline_string(rec + SSN_SONG_SUBTITLE_OFF, song->song.subtitle);
+    ssn_write_inline_string(rec + SSN_SONG_SUBTITLE_OFF, subtitle);
 }
 
 typedef struct ssn_detail_star_patch {
@@ -669,6 +698,14 @@ typedef struct ssn_detail_star_patch {
     unsigned char original[2][ESE_DIFF_SLOTS];
     int count;
 } ssn_detail_star_patch_t;
+
+typedef struct ssn_score_meta_patch {
+    uint32_t rec;
+    uint32_t meta;
+    uint32_t original[8];
+    uint32_t virtual_index;
+    int active;
+} ssn_score_meta_patch_t;
 
 static uint32_t ssn_display_record_by_absolute(uint32_t absolute) {
     uint32_t mgr = ssn_music_mgr();
@@ -1066,6 +1103,7 @@ static void ssn_log_custom_state(const char *label, uint32_t folder,
     uint32_t start = 0;
     uint32_t count = 0;
     uint32_t absolute;
+    uint32_t virtual_index = 0;
     uint32_t display_rec;
     uint32_t source_rec;
     uint32_t uniqueid = 0;
@@ -1075,12 +1113,8 @@ static void ssn_log_custom_state(const char *label, uint32_t folder,
     dbg_print("\n");
     dbg_print_hex32("  folder", folder);
     dbg_print_hex32("  local", local);
-    if (!ssn_is_test_virtual_song(folder, local)) {
+    if (!ssn_virtual_index_for_request(folder, local, &virtual_index, NULL)) {
         dbg_print("  not custom virtual song\n");
-        return;
-    }
-    if (local >= g_ssn_virtual_song_count) {
-        dbg_print("  custom local out of cache\n");
         return;
     }
     if (!ssn_get_board_range(folder, &start, &count) || local >= count) {
@@ -1094,11 +1128,12 @@ static void ssn_log_custom_state(const char *label, uint32_t folder,
     dbg_print_hex32("  start", start);
     dbg_print_hex32("  count", count);
     dbg_print_hex32("  absolute", absolute);
+    dbg_print_hex32("  virtual.index", virtual_index);
     dbg_print("  custom.id=");
-    dbg_print(g_ssn_virtual_songs[local].song.id);
+    dbg_print(g_ssn_virtual_songs[virtual_index].song.id);
     dbg_print("\n");
     dbg_print("  custom.short=");
-    dbg_print(g_ssn_virtual_songs[local].short_id);
+    dbg_print(g_ssn_virtual_songs[virtual_index].short_id);
     dbg_print("\n");
     for (int i = 0; i < ESE_DIFF_SLOTS; i++) {
         char name[16];
@@ -1112,7 +1147,7 @@ static void ssn_log_custom_state(const char *label, uint32_t folder,
         name[7] = '0' + (char)i;
         name[8] = '\0';
         dbg_print_hex32(name, (uint32_t)(int32_t)
-                        g_ssn_virtual_songs[local].song.stars[i]);
+                        g_ssn_virtual_songs[virtual_index].song.stars[i]);
     }
 
     if (display_rec) {
@@ -1477,6 +1512,35 @@ static uint32_t ssn_basic_metadata_for_record(uint32_t rec) {
     return out;
 }
 
+static int ssn_virtual_index_for_absolute(uint32_t absolute,
+                                          uint32_t *out_index) {
+    uint32_t start = g_ssn_injected_start;
+    uint32_t count = g_ssn_injected_count;
+
+    if (!count || absolute < start || absolute - start >= count)
+        return 0;
+    if (absolute - start >= g_ssn_virtual_song_count)
+        return 0;
+    if (out_index)
+        *out_index = absolute - start;
+    return 1;
+}
+
+static int ssn_virtual_index_for_request(uint32_t folder, uint32_t local,
+                                         uint32_t *out_index,
+                                         uint32_t *out_absolute) {
+    uint32_t start = 0;
+    uint32_t count = 0;
+    uint32_t absolute;
+
+    if (!ssn_get_board_range(folder, &start, &count) || local >= count)
+        return 0;
+    absolute = start + local;
+    if (out_absolute)
+        *out_absolute = absolute;
+    return ssn_virtual_index_for_absolute(absolute, out_index);
+}
+
 #if SSN_ENABLE_LEMON_STAR_PATCH
 static int ssn_song_string_equals(uint32_t str, const char *expected) {
     uint32_t len;
@@ -1564,6 +1628,99 @@ static void ssn_patch_lemon_score_metadata_from_vm(void *vm) {
 #endif
 }
 
+static void ssn_score_meta_patch_begin(void *vm,
+                                       ssn_score_meta_patch_t *patch) {
+    static unsigned logged;
+    ssn_arg_raw folder = ssn_arg(vm, 1);
+    ssn_arg_raw local = ssn_arg(vm, 2);
+    uint32_t folder_value;
+    uint32_t local_value;
+    uint32_t virtual_index = 0;
+    uint32_t absolute = 0;
+    uint32_t rec;
+    uint32_t lemon_rec;
+    uint32_t meta;
+    uint32_t stars[4];
+
+    memset(patch, 0, sizeof *patch);
+    if (!ssn_arg_u32(folder, &folder_value) ||
+        !ssn_arg_u32(local, &local_value))
+        return;
+    if (!ssn_virtual_index_for_request(folder_value, local_value,
+                                       &virtual_index, &absolute))
+        return;
+
+    rec = ssn_display_record_by_absolute(absolute);
+    if (!rec)
+        return;
+
+    lemon_rec = ssn_display_record_by_absolute(1u);
+    if (!lemon_rec)
+        lemon_rec = ssn_source_record_by_absolute(1u);
+    meta = ssn_basic_metadata_for_record(lemon_rec);
+    if (!meta)
+        return;
+
+    for (unsigned i = 0; i < 4u; i++) {
+        int v = g_ssn_virtual_songs[virtual_index].song.stars[i];
+        if (v < 1)
+            v = 1;
+        if (v > 10)
+            v = 10;
+        stars[i] = (uint32_t)v;
+        patch->original[i] = *(volatile uint32_t *)(uintptr_t)
+            (meta + 0x1cu + i * 4u);
+        patch->original[4u + i] = *(volatile uint32_t *)(uintptr_t)
+            (meta + 0x30u + i * 4u);
+    }
+
+    patch->rec = rec;
+    patch->meta = meta;
+    patch->virtual_index = virtual_index;
+    patch->active = 1;
+
+    mem_write_and_flush((void *)(uintptr_t)(meta + 0x1cu),
+                        stars, sizeof stars);
+    mem_write_and_flush((void *)(uintptr_t)(meta + 0x30u),
+                        stars, sizeof stars);
+    ssn_write_inline_string(rec + SSN_SONG_MUSICID_OFF, "ynzlmn");
+
+    if (logged < 8u) {
+        logged++;
+        dbg_print("[ssn] custom GetScore metadata borrowed Lemon slot\n");
+        dbg_print_hex32("  folder", folder_value);
+        dbg_print_hex32("  local", local_value);
+        dbg_print_hex32("  absolute", absolute);
+        dbg_print_hex32("  virtual.index", virtual_index);
+        dbg_print_hex32("  rec", rec);
+        dbg_print_hex32("  meta", meta);
+        dbg_print_hex32("  star0", stars[0]);
+        dbg_print_hex32("  star1", stars[1]);
+        dbg_print_hex32("  star2", stars[2]);
+        dbg_print_hex32("  star3", stars[3]);
+    }
+}
+
+static void ssn_score_meta_patch_end(ssn_score_meta_patch_t *patch) {
+    uint32_t restore_a[4];
+    uint32_t restore_b[4];
+
+    if (!patch->active)
+        return;
+
+    for (unsigned i = 0; i < 4u; i++) {
+        restore_a[i] = patch->original[i];
+        restore_b[i] = patch->original[4u + i];
+    }
+    mem_write_and_flush((void *)(uintptr_t)(patch->meta + 0x1cu),
+                        restore_a, sizeof restore_a);
+    mem_write_and_flush((void *)(uintptr_t)(patch->meta + 0x30u),
+                        restore_b, sizeof restore_b);
+    ssn_write_inline_string(patch->rec + SSN_SONG_MUSICID_OFF,
+                            g_ssn_virtual_songs[patch->virtual_index].short_id);
+    patch->active = 0;
+}
+
 static void ssn_log_basic_metadata_probe(uint32_t folder, uint32_t local,
                                          const char *label) {
     uint32_t start = 0;
@@ -1629,17 +1786,19 @@ static void ssn_log_basic_metadata_probe_from_vm(const char *label, void *vm) {
     static unsigned logged;
     ssn_arg_raw folder = ssn_arg(vm, 1);
     ssn_arg_raw local = ssn_arg(vm, 2);
+    uint32_t folder_value;
+    uint32_t local_value;
 
     if (logged >= LOG_BASIC_METADATA_DUMP_MAX)
         return;
-    if (!(folder.type == 2 || folder.type == 3) ||
-        !(local.type == 2 || local.type == 3))
+    if (!ssn_arg_u32(folder, &folder_value) ||
+        !ssn_arg_u32(local, &local_value))
         return;
-    if (ssn_is_test_virtual_song(folder.value, local.value))
+    if (ssn_is_test_virtual_song(folder_value, local_value))
         return;
 
     logged++;
-    ssn_log_basic_metadata_probe(folder.value, local.value, label);
+    ssn_log_basic_metadata_probe(folder_value, local_value, label);
 }
 
 static void ssn_log_official_detail_from_vm(const char *label, void *vm) {
@@ -1687,7 +1846,7 @@ static int ssn_append_songs_to_vector(uint32_t vec, const char *label,
     uint32_t cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
     uint32_t count = 0;
     uint32_t cap_count = 0;
-    uint32_t append_count;
+    uint32_t patch_count;
 
     if (!ssn_ptr_sane(begin) || end < begin ||
         cap < end ||
@@ -1711,40 +1870,45 @@ static int ssn_append_songs_to_vector(uint32_t vec, const char *label,
     if (count > cap_count || song_count <= 0)
         return 0;
 
-    append_count = cap_count - count;
-    if (append_count > (uint32_t)song_count)
-        append_count = (uint32_t)song_count;
-    if (append_count > SSN_INJECT_MAX)
-        append_count = SSN_INJECT_MAX;
-    if (!append_count)
+    if (SSN_VISIBLE_APPEND_START >= count ||
+        SSN_TEMPLATE_ABSOLUTE >= count ||
+        song_count <= 0)
         return 0;
 
-    uint32_t template_idx = SSN_TEMPLATE_ABSOLUTE < count ? SSN_TEMPLATE_ABSOLUTE : 0;
+    patch_count = count - SSN_VISIBLE_APPEND_START;
+    if (patch_count > (uint32_t)song_count)
+        patch_count = (uint32_t)song_count;
+    if (patch_count > SSN_INJECT_MAX)
+        patch_count = SSN_INJECT_MAX;
+    if (!patch_count)
+        return 0;
+
+    uint32_t template_idx = SSN_TEMPLATE_ABSOLUTE;
     uint32_t template_rec = begin + template_idx * SSN_SONG_RECORD_SIZE;
     record_copy_fn copy_record = (record_copy_fn)(uintptr_t)g_record_copy_desc;
 
-    for (uint32_t i = 0; i < append_count; i++) {
-        uint32_t dst = end + i * SSN_SONG_RECORD_SIZE;
+    for (uint32_t i = 0; i < patch_count; i++) {
+        uint32_t dst = begin + (SSN_VISIBLE_APPEND_START + i) *
+            SSN_SONG_RECORD_SIZE;
         copy_record((void *)(uintptr_t)dst, (const void *)(uintptr_t)template_rec);
         ssn_patch_song_record_fields(dst, &songs[i]);
     }
 
-    uint32_t new_end = end + append_count * SSN_SONG_RECORD_SIZE;
-    mem_write_and_flush((void *)(uintptr_t)(vec + 0x04u), &new_end, sizeof new_end);
-
-    dbg_print("[ssn] appended custom songs\n");
+    dbg_print("[ssn] patched custom songs into visible tail\n");
     dbg_print("  vec=");
     dbg_print(label);
     dbg_print("\n");
-    dbg_print_hex32("  start", count);
-    dbg_print_hex32("  count", append_count);
+    dbg_print_hex32("  start", SSN_VISIBLE_APPEND_START);
+    dbg_print_hex32("  count", patch_count);
+    dbg_print_hex32("  vec.count", count);
     dbg_print_hex32("  cap.count", cap_count);
-    ssn_log_song_record(end, "first appended custom song");
+    ssn_log_song_record(begin + SSN_VISIBLE_APPEND_START * SSN_SONG_RECORD_SIZE,
+                        "first visible-tail custom song");
 
     if (out_start)
-        *out_start = count;
+        *out_start = SSN_VISIBLE_APPEND_START;
     if (out_count)
-        *out_count = append_count;
+        *out_count = patch_count;
     return 1;
 }
 
@@ -2148,34 +2312,27 @@ static void ssn_apply_test_append(void) {
         dbg_print_hex32("  count", count);
     }
 
-#if SSN_ENABLE_LEGACY_RANGE_INJECTION
-    ssn_patch_song_record();
-
     if (g_ssn_injected_count) {
         start = *(volatile uint32_t *)(uintptr_t)(rec + 0x04u);
         count = *(volatile uint32_t *)(uintptr_t)(rec + 0x08u);
-        if (start != g_ssn_injected_start || count != g_ssn_injected_count) {
-            uint32_t next_start = g_ssn_injected_start;
-            uint32_t next_count = g_ssn_injected_count;
-            mem_write_and_flush((void *)(uintptr_t)(rec + 0x04u),
-                                &next_start, sizeof(next_start));
+        if (start == SSN_TEST_APPEND_START &&
+            count != SSN_TEST_APPEND_ORIG_COUNT + g_ssn_injected_count) {
+            uint32_t next_count =
+                SSN_TEST_APPEND_ORIG_COUNT + g_ssn_injected_count;
             mem_write_and_flush((void *)(uintptr_t)(rec + 0x08u),
                                 &next_count, sizeof(next_count));
-            dbg_print("[ssn] custom folder range installed\n");
+            dbg_print("[ssn] extended final visible folder range\n");
             dbg_print_hex32("  folder", SSN_TEST_APPEND_FOLDER);
-            dbg_print_hex32("  start", next_start);
+            dbg_print_hex32("  start", start);
             dbg_print_hex32("  count", next_count);
+            dbg_print_hex32("  custom.start", g_ssn_injected_start);
+            dbg_print_hex32("  custom.count", g_ssn_injected_count);
         }
     }
-#else
-    ssn_log_source_truth_once();
-#endif
 }
 
 static int ssn_is_test_virtual_song(uint32_t folder, uint32_t local) {
-    return folder == SSN_TEST_APPEND_FOLDER &&
-           g_ssn_injected_count &&
-           local < g_ssn_injected_count;
+    return ssn_virtual_index_for_request(folder, local, NULL, NULL);
 }
 
 static void ssn_log_board_record(uint32_t idx) {
@@ -2593,9 +2750,11 @@ static void ssn_log_notify_course_star(void *vm, unsigned seq,
         ssn_detail_star_patch_t star_patch;                                    \
         ssn_detail_vm_probe_t vm_probe;                                        \
         ssn_detail_replay_patch_t replay_patch;                                \
+        ssn_score_meta_patch_t score_patch;                                    \
         int replaying_detail = 0;                                              \
         memset(&vm_probe, 0, sizeof vm_probe);                                 \
         memset(&replay_patch, 0, sizeof replay_patch);                         \
+        memset(&score_patch, 0, sizeof score_patch);                           \
         if (SSN_ENABLE_TEST_APPEND_PATH)                                       \
             ssn_apply_test_append();                                           \
         if (notify_course_star && n < LOG_COURSESTAR_MAX)                      \
@@ -2619,8 +2778,12 @@ static void ssn_log_notify_course_star(void *vm, unsigned seq,
                 (void)ssn_apply_detail_star_patch(vm, &star_patch);            \
         if (ssn_streq(#name, "GetScore"))                                      \
             ssn_patch_lemon_score_metadata_from_vm(vm);                        \
+        if (ssn_streq(#name, "GetScore"))                                      \
+            ssn_score_meta_patch_begin(vm, &score_patch);                      \
         if (g_orig_##name)                                                     \
             g_orig_##name(vm);                                                 \
+        if (ssn_streq(#name, "GetScore"))                                      \
+            ssn_score_meta_patch_end(&score_patch);                            \
         if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
             ssn_log_detail_course_probe_from_vm(                               \
                 "GetMusicInfo_Detail course probe after original", vm);        \
