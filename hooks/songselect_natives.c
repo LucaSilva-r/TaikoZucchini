@@ -1,11 +1,16 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#include <cell/fs/cell_fs_file_api.h>
 
 #include "songselect_natives.h"
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "icache.h"
+#include "title_nut.h"
+#include "title_render.h"
 #include "network/custom_song_client.h"
 
 /*
@@ -123,8 +128,9 @@ static void ssn_log_args(const char *name, void *vm, unsigned seq,
     X(0x00f947a8u, NotifySetCourseStar)                 \
     X(0x00f947b0u, NotifyGenreFolder)                   \
     X(0x00f947b8u, NotifyMusicBoard)                    \
-    X(0x00f947e8u, RequestSongBoardTexture_Short)       \
+    X(0x00f947e8u, SetMotionShortState)                 \
     X(0x00f947f0u, RequestSongBoardTexture_Long)        \
+    X(0x00f947f8u, RequestSongBoardTexture_Short)       \
     X(0x00f94800u, NotifyBeginCourseSelect)             \
     X(0x00f94808u, NotifyEndCourseSelect)               \
     X(0x00f94848u, SetSelectedCourse)
@@ -139,10 +145,12 @@ SONGSEL_NATIVES(DECL_ORIG)
  * AS "this"; idx 1..N are explicit arguments. */
 #define LOG_HEAD_DEFAULT 16
 #define LOG_EVERY_DEFAULT 64
-#define LOG_HEAD_INTEREST 96
-#define LOG_EVERY_INTEREST 8
-#define LOG_HEAD_TEXTURE 48
-#define LOG_EVERY_TEXTURE 16
+#define LOG_HEAD_INTEREST 16
+#define LOG_EVERY_INTEREST 0
+#define LOG_HEAD_TEXTURE 24
+#define LOG_EVERY_TEXTURE 0
+#define LOG_FILLRECT_HEAD 64
+#define LOG_FILLRECT_CUSTOM_MAX 160
 #define LOG_MAX_ARGS 6
 #define LOG_OFFICIAL_DETAIL_MAX 8
 #define LOG_DETAIL_VM_DIFF_MAX 6
@@ -157,7 +165,7 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_ENABLE_TEST_APPEND_PATH 1
 #define SSN_E46_DUMP_MAX_CALLS 1
 #define LOG_COURSESTAR_ARGS 12
-#define LOG_COURSESTAR_MAX 48
+#define LOG_COURSESTAR_MAX 8
 #define SSN_DETAIL_VM_SNAPSHOT_BYTES 0x400u
 #define SSN_TEST_REPLAY_OFFICIAL_DETAIL 0
 #define SSN_REPLAY_OFFICIAL_ABSOLUTE SSN_TEMPLATE_ABSOLUTE
@@ -199,6 +207,7 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_ENABLE_LEGACY_RANGE_INJECTION 0
 #define SSN_INJECT_MAX              32u
 #define SSN_TEMPLATE_ABSOLUTE       799u
+#define SSN_CUSTOM_UID_BASE         6000u /* custom uid; textures hijacked at aux slot */
 #define SSN_PATCH_PLAYERINFO_STARS  0
 #define LOG_PLAYERINFO_STAR_MAX     12
 #define LOG_PLAYERINFO_NATIVE_ARGS  10
@@ -207,7 +216,21 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define LOG_RANKING_DETAIL_DUMP_MAX 16
 #define LOG_BASIC_METADATA_DUMP_MAX 16
 #define SSN_DETAIL_COURSE_MAX       5u
-#define SSN_ENABLE_DETAIL_COURSE_PROBE 1
+#define SSN_ENABLE_DETAIL_COURSE_PROBE 0
+#define SSN_ENABLE_TEXTURE_MAP_DUMP 0
+#define SSN_ENABLE_FILLRECT_PROBE 0
+#define SSN_ENABLE_CUSTOM_TEXTURE_REMAP_TEST 0
+#define SSN_ENABLE_DONOR_OVERWRITE_TEST 0
+#define SSN_ENABLE_TEXTURE_OWNER_PROBE 1
+#define LOG_TEXTURE_OWNER_PROBE_MAX 4
+#define LOG_TEXTURE_OWNER_BYTE_PROBE_MAX 1
+#define LOG_TEXTURE_OWNER_NESTED_PROBE_MAX 2
+#define LOG_TEXTURE_RESOURCE_POINTER_DUMP_MAX 2
+#define LOG_TEXTURE_BLOB_DUMP_MAX 1
+#define LOG_REMAP_TARGET_MAP_MAX 1
+#define LOG_RESOURCE_RANGE_SCAN_MAX 32
+#define SSN_CUSTOM_TEST_LONG_UID  0x0000028eu
+#define SSN_CUSTOM_TEST_SHORT_UID 0x00000160u
 #define SSN_ENABLE_LEMON_STAR_PATCH 0
 #define SSN_PI_SCAN_START           0x00f80000u
 #define SSN_PI_SCAN_END             0x01040f00u
@@ -257,6 +280,66 @@ static uint32_t g_basic_musicid_lookup_desc[2] = { 0x00632b5cu, 0x01037a88u };
 typedef uint32_t *(*basic_musicid_lookup_fn)(uint32_t *out,
                                              uint32_t map,
                                              uint32_t key_record);
+static uint32_t g_orig_RequestFillrect_desc[2];
+
+/*
+ * nuTextureLoadFromMemoryPointer. Public entry is the mutex/alloc-counter
+ * wrapper FUN_001a8d14 (TOC 0x01027c58); it takes RAW pixels (not a NUT
+ * container), so the freetype A8R8G8B8 output feeds straight in. Its return is
+ * only a small status/id-ish value in this build (runtime probes returned 1 for
+ * every upload), not the song-title resource key. The hidden allocator
+ * FUN_00538fa4 writes the real nuTextureInformation* to an out parameter; the
+ * runtime title path uses that object directly.
+ */
+static uint32_t g_nu_tex_load_desc[2] = { 0x001a8d14u, 0x01027c58u };
+typedef int (*nu_tex_load_fn)(void *pixels, uint64_t size, uint32_t flags,
+                              uint32_t width, uint32_t height, uint32_t format,
+                              uint32_t arg7, uint32_t arg8);
+static uint32_t g_nu_tex_alloc_desc[2] = { 0x00538fa4u, 0x01037a88u };
+typedef int (*nu_tex_alloc_fn)(uint32_t mgr, uint32_t bytes, uint32_t height,
+                               uint32_t flags, uint32_t width, uint32_t one,
+                               uint32_t zero, uint32_t *out_resource);
+typedef int (*nu_tex_info_upload_fn)(uint32_t resource, void *pixels,
+                                     uint32_t one, uint32_t format);
+
+#define SSN_RT_TITLE_CACHE_MAX (SSN_INJECT_MAX * 2u)
+#define SSN_RT_TITLE_LONG_W    96u
+#define SSN_RT_TITLE_SHORT_W   56u
+#define SSN_RT_TITLE_H         400u
+#define SSN_RT_TITLE_PIXELS    (SSN_RT_TITLE_LONG_W * SSN_RT_TITLE_H)
+#define SSN_RT_TITLE_OUTLINE   0x141428u
+/* Option 2: reuse a pool of real donor songs' already-IO-mapped VRAM texture
+ * buffers. Render each custom title, DXT5-encode straight into a donor's VRAM
+ * (donor_res+0x34), return that donor resource. Distinct visible customs map to
+ * distinct pool slots -> distinct textures. Pool >= max visible so consecutive
+ * visible customs don't collide. Donor uids 100..100+POOL-1 (have title files,
+ * so registered); pick a rarely-browsed range in production to avoid visibly
+ * overwriting those real songs' titles. */
+#define SSN_RT_DONOR_POOL      16u
+#define SSN_RT_DONOR_BASE      100u
+#define SSN_RESOURCE_CLONE_BYTES 0x90u
+#define SSN_RT_TITLE_RETURN_CLONE 0
+#define SSN_RT_TITLE_RETURN_TYPED_TEX 0
+#define SSN_RT_TITLE_RETURN_DIRECT_TEXINFO 1
+#define SSN_RT_TITLE_LOOKUP_PROBE_MAX 4u
+#define SSN_NU_TEX_ALLOC_MGR_CELL (0x01037a88u + 0x0000779cu)
+
+typedef struct ssn_runtime_title_entry {
+    uint8_t valid;
+    uint8_t type;
+    uint16_t index;
+    uint32_t key;
+    uint32_t donor_key;
+    uint32_t resource;
+    int tex_id;
+} ssn_runtime_title_entry_t;
+
+static ssn_runtime_title_entry_t g_rt_title_cache[SSN_RT_TITLE_CACHE_MAX];
+static uint8_t g_rt_title_clone_pool[SSN_RT_TITLE_CACHE_MAX]
+                                    [SSN_RESOURCE_CLONE_BYTES]
+    __attribute__((aligned(16)));
+static uint32_t g_rt_title_pixels[SSN_RT_TITLE_PIXELS]
+    __attribute__((aligned(128)));
 
 static int ssn_get_board_range(uint32_t idx, uint32_t *start, uint32_t *count);
 static int ssn_is_test_virtual_song(uint32_t folder, uint32_t local);
@@ -288,6 +371,11 @@ static uint32_t ssn_music_mgr(void) {
 
 static int ssn_ptr_sane(uint32_t p) {
     return p >= 0x00010000u && p < 0xe0000000u &&
+           p != 0xddddddddu && p != 0xcdcdcdcdu;
+}
+
+static int ssn_heap_ptr_sane(uint32_t p) {
+    return p >= 0x30000000u && p < 0x36000000u &&
            p != 0xddddddddu && p != 0xcdcdcdcdu;
 }
 
@@ -509,6 +597,120 @@ static void ssn_log_byte_window(uint32_t addr, uint32_t start, uint32_t count,
     }
 }
 
+static void ssn_dump_blob_file(const char *path, uint32_t addr, uint32_t bytes) {
+    int fd = -1;
+    uint64_t wrote = 0;
+    int rc;
+
+    if (!path || !ssn_heap_ptr_sane(addr) || bytes == 0 || bytes > 0x80000u)
+        return;
+
+    rc = cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                    &fd, NULL, 0);
+    dbg_print("[ssn] texture blob file\n");
+    dbg_print("  path=");
+    dbg_print(path);
+    dbg_print("\n");
+    dbg_print_hex32("  open.rc", (uint32_t)rc);
+    dbg_print_hex32("  addr", addr);
+    dbg_print_hex32("  bytes", bytes);
+    if (rc != CELL_FS_SUCCEEDED)
+        return;
+    rc = cellFsWrite(fd, (const void *)(uintptr_t)addr, bytes, &wrote);
+    dbg_print_hex32("  write.rc", (uint32_t)rc);
+    dbg_print_hex32("  wrote.lo", (uint32_t)wrote);
+    cellFsClose(fd);
+}
+
+static void ssn_log_texture_candidate_object(uint32_t obj, uint32_t expected,
+                                             const char *label) {
+    static unsigned object_dumps;
+    static unsigned blob_dumps;
+    uint32_t data;
+    uint32_t size;
+    uint32_t kind;
+    uint32_t vbegin;
+    uint32_t vend;
+    uint32_t vcap;
+
+    if (!ssn_heap_ptr_sane(obj))
+        return;
+    if (object_dumps < LOG_TEXTURE_RESOURCE_POINTER_DUMP_MAX) {
+        object_dumps++;
+        ssn_log_word_dump(obj, 0x80u, label);
+    }
+
+    data = *(volatile uint32_t *)(uintptr_t)(obj + 0x34u);
+    size = *(volatile uint32_t *)(uintptr_t)(obj + 0x38u);
+    kind = *(volatile uint32_t *)(uintptr_t)(obj + 0x3cu);
+    if (ssn_heap_ptr_sane(data) && size > 0 && size <= 0x80000u) {
+        dbg_print("[ssn] texture candidate blob 34/38\n");
+        dbg_print_hex32("  expected.handle", expected);
+        dbg_print_hex32("  obj", obj);
+        dbg_print_hex32("  obj.v00", *(volatile uint32_t *)(uintptr_t)(obj + 0x00u));
+        dbg_print_hex32("  obj.v18", *(volatile uint32_t *)(uintptr_t)(obj + 0x18u));
+        dbg_print_hex32("  obj.table2c", *(volatile uint32_t *)(uintptr_t)(obj + 0x2cu));
+        dbg_print_hex32("  data", data);
+        dbg_print_hex32("  size", size);
+        dbg_print_hex32("  kind", kind);
+        ssn_log_word_dump(data, 0x80u, "texture candidate blob 34/38 data");
+
+        if (0 && blob_dumps < LOG_TEXTURE_BLOB_DUMP_MAX) {
+            char path[128];
+            snprintf(path, sizeof path,
+                     "/dev_hdd0/plugins/taiko/ssn_tex_%08x_%08x_34.bin",
+                     expected, obj);
+            ssn_dump_blob_file(path, data, size);
+            blob_dumps++;
+        }
+    }
+
+    data = *(volatile uint32_t *)(uintptr_t)(obj + 0x30u);
+    size = *(volatile uint32_t *)(uintptr_t)(obj + 0x3cu);
+    if (ssn_heap_ptr_sane(data) && size > 0 && size <= 0x80000u) {
+        dbg_print("[ssn] texture candidate blob 30/3c\n");
+        dbg_print_hex32("  expected.handle", expected);
+        dbg_print_hex32("  obj", obj);
+        dbg_print_hex32("  data", data);
+        dbg_print_hex32("  size", size);
+        ssn_log_word_dump(data, 0x80u, "texture candidate blob 30/3c data");
+
+        if (0 && blob_dumps < LOG_TEXTURE_BLOB_DUMP_MAX) {
+            char path[128];
+            snprintf(path, sizeof path,
+                     "/dev_hdd0/plugins/taiko/ssn_tex_%08x_%08x_30.bin",
+                     expected, obj);
+            ssn_dump_blob_file(path, data, size);
+            blob_dumps++;
+        }
+    }
+
+    vbegin = *(volatile uint32_t *)(uintptr_t)(obj + 0x30u);
+    vend = *(volatile uint32_t *)(uintptr_t)(obj + 0x34u);
+    vcap = *(volatile uint32_t *)(uintptr_t)(obj + 0x38u);
+    if (ssn_heap_ptr_sane(vbegin) && ssn_heap_ptr_sane(vend) &&
+        ssn_heap_ptr_sane(vcap) && vbegin <= vend && vend <= vcap &&
+        vcap - vbegin > 0 && vcap - vbegin <= 0x80000u) {
+        dbg_print("[ssn] texture candidate vector 30/34/38\n");
+        dbg_print_hex32("  expected.handle", expected);
+        dbg_print_hex32("  obj", obj);
+        dbg_print_hex32("  begin", vbegin);
+        dbg_print_hex32("  end", vend);
+        dbg_print_hex32("  cap", vcap);
+        dbg_print_hex32("  bytes", vcap - vbegin);
+        ssn_log_word_dump(vbegin, 0x80u, "texture candidate vector data");
+
+        if (0 && blob_dumps < LOG_TEXTURE_BLOB_DUMP_MAX) {
+            char path[128];
+            snprintf(path, sizeof path,
+                     "/dev_hdd0/plugins/taiko/ssn_tex_%08x_%08x_vec.bin",
+                     expected, obj);
+            ssn_dump_blob_file(path, vbegin, vcap - vbegin);
+            blob_dumps++;
+        }
+    }
+}
+
 static uint32_t ssn_course_star_entry(uint32_t source, unsigned course,
                                       unsigned slot) {
     if (!ssn_ptr_sane(source) || course >= 4 || slot >= 10)
@@ -684,6 +886,24 @@ static int ssn_collect_cached_songs(ssn_inject_song_t *out, int cap) {
     return count;
 }
 
+int ssn_collect_custom_titles(char out[][ESE_SONG_TITLE_MAX], int cap) {
+    static ssn_inject_song_t songs[SSN_INJECT_MAX];
+    int n;
+    int i;
+
+    if (!out || cap <= 0)
+        return 0;
+    n = ssn_collect_cached_songs(songs, SSN_INJECT_MAX);
+    if (n > cap)
+        n = cap;
+    for (i = 0; i < n; i++) {
+        const char *t = songs[i].song.title[0] ? songs[i].song.title :
+            songs[i].short_id;
+        snprintf(out[i], ESE_SONG_TITLE_MAX, "%s", t);
+    }
+    return n;
+}
+
 static void ssn_patch_song_record_fields(uint32_t rec,
                                          const ssn_inject_song_t *song) {
     const char *subtitle = song->song.subtitle[0] ?
@@ -821,6 +1041,503 @@ static uint32_t ssn_texture_slot_handle(uint32_t slot, uint32_t *slot_rec) {
     if (slot_rec)
         *slot_rec = rec;
     return *(volatile uint32_t *)(uintptr_t)(rec + 0x04u);
+}
+
+static uint32_t ssn_texture_slot_owner(void) {
+    uint32_t state = ssn_songselect_state();
+
+    if (!ssn_ptr_sane(state))
+        return 0;
+    return *(volatile uint32_t *)(uintptr_t)(state + 0x08u);
+}
+
+static void ssn_log_texture_resource_record(uint32_t rec, uint32_t expected,
+                                            const char *label) {
+    static unsigned pointer_dumps;
+    uint32_t h0;
+    uint32_t h1;
+    uint32_t p08;
+    uint32_t p0c;
+    uint32_t p30;
+    uint32_t p34;
+    uint32_t p38;
+    uint32_t p3c;
+    uint32_t p60;
+    uint32_t p64;
+    uint32_t p74;
+    uint32_t p78;
+
+    if (!ssn_ptr_sane(rec))
+        return;
+
+    h0 = *(volatile uint32_t *)(uintptr_t)(rec + 0x14u);
+    h1 = *(volatile uint32_t *)(uintptr_t)(rec + 0x44u);
+    if (h0 != expected && h1 != expected) {
+        dbg_print("[ssn] ");
+        dbg_print(label);
+        dbg_print(" nonmatch\n");
+        dbg_print_hex32("  rec", rec);
+        dbg_print_hex32("  expected.handle", expected);
+        dbg_print_hex32("  rec.handle0", h0);
+        dbg_print_hex32("  rec.handle1", h1);
+        return;
+    }
+
+    p08 = *(volatile uint32_t *)(uintptr_t)(rec + 0x08u);
+    p0c = *(volatile uint32_t *)(uintptr_t)(rec + 0x0cu);
+    p30 = *(volatile uint32_t *)(uintptr_t)(rec + 0x30u);
+    p34 = *(volatile uint32_t *)(uintptr_t)(rec + 0x34u);
+    p38 = *(volatile uint32_t *)(uintptr_t)(rec + 0x38u);
+    p3c = *(volatile uint32_t *)(uintptr_t)(rec + 0x3cu);
+    p60 = *(volatile uint32_t *)(uintptr_t)(rec + 0x60u);
+    p64 = *(volatile uint32_t *)(uintptr_t)(rec + 0x64u);
+    p74 = *(volatile uint32_t *)(uintptr_t)(rec + 0x74u);
+    p78 = *(volatile uint32_t *)(uintptr_t)(rec + 0x78u);
+
+    dbg_print("[ssn] ");
+    dbg_print(label);
+    dbg_print("\n");
+    dbg_print_hex32("  rec", rec);
+    dbg_print_hex32("  expected.handle", expected);
+    dbg_print_hex32("  rec.vtable", *(volatile uint32_t *)(uintptr_t)(rec + 0x00u));
+    dbg_print_hex32("  rec.owner", *(volatile uint32_t *)(uintptr_t)(rec + 0x04u));
+    dbg_print_hex32("  rec.p08", p08);
+    dbg_print_hex32("  rec.p0c", p0c);
+    dbg_print_hex32("  rec.handle0", h0);
+    dbg_print_hex32("  rec.w0", *(volatile uint32_t *)(uintptr_t)(rec + 0x18u));
+    dbg_print_hex32("  rec.h0", *(volatile uint32_t *)(uintptr_t)(rec + 0x1cu));
+    dbg_print_hex32("  rec.tag0", *(volatile uint32_t *)(uintptr_t)(rec + 0x20u));
+    dbg_print_hex32("  rec.tag1", *(volatile uint32_t *)(uintptr_t)(rec + 0x24u));
+    dbg_print_hex32("  rec.p30", p30);
+    dbg_print_hex32("  rec.p34", p34);
+    dbg_print_hex32("  rec.p38", p38);
+    dbg_print_hex32("  rec.p3c", p3c);
+    dbg_print_hex32("  rec.handle1", h1);
+    dbg_print_hex32("  rec.w1", *(volatile uint32_t *)(uintptr_t)(rec + 0x48u));
+    dbg_print_hex32("  rec.h1", *(volatile uint32_t *)(uintptr_t)(rec + 0x4cu));
+    dbg_print_hex32("  rec.p60", p60);
+    dbg_print_hex32("  rec.p64", p64);
+    dbg_print_hex32("  rec.flag74", p74);
+    dbg_print_hex32("  rec.flag78", p78);
+
+    if (pointer_dumps >= LOG_TEXTURE_RESOURCE_POINTER_DUMP_MAX)
+        goto scan_candidates;
+    pointer_dumps++;
+    if (ssn_heap_ptr_sane(p08))
+        ssn_log_word_dump(p08, 0x40u, "texture resource rec.p08 heap");
+    if (ssn_heap_ptr_sane(p0c))
+        ssn_log_word_dump(p0c, 0x40u, "texture resource rec.p0c heap");
+    if (ssn_heap_ptr_sane(p3c))
+        ssn_log_word_dump(p3c, 0x40u, "texture resource rec.p3c heap");
+    if (ssn_heap_ptr_sane(p60))
+        ssn_log_word_dump(p60, 0x40u, "texture resource rec.p60 heap");
+    if (ssn_heap_ptr_sane(p64))
+        ssn_log_word_dump(p64, 0x40u, "texture resource rec.p64 heap");
+    if (ssn_heap_ptr_sane(p74))
+        ssn_log_word_dump(p74, 0x40u, "texture resource rec.flag74 heap");
+    if (ssn_heap_ptr_sane(p78))
+        ssn_log_word_dump(p78, 0x40u, "texture resource rec.flag78 heap");
+
+scan_candidates:
+    ssn_log_texture_candidate_object(p30, expected,
+                                     "texture candidate rec.p30 object");
+    ssn_log_texture_candidate_object(p34, expected,
+                                     "texture candidate rec.p34 object");
+    ssn_log_texture_candidate_object(p38, expected,
+                                     "texture candidate rec.p38 object");
+    ssn_log_texture_candidate_object(p60, expected,
+                                     "texture candidate rec.p60 object");
+    ssn_log_texture_candidate_object(p64, expected,
+                                     "texture candidate rec.p64 object");
+    if (ssn_heap_ptr_sane(p08)) {
+        uint32_t c00 = *(volatile uint32_t *)(uintptr_t)(p08 + 0x00u);
+        uint32_t c08 = *(volatile uint32_t *)(uintptr_t)(p08 + 0x08u);
+        uint32_t c30 = *(volatile uint32_t *)(uintptr_t)(p08 + 0x30u);
+        uint32_t c34 = *(volatile uint32_t *)(uintptr_t)(p08 + 0x34u);
+        uint32_t c38 = *(volatile uint32_t *)(uintptr_t)(p08 + 0x38u);
+        ssn_log_texture_candidate_object(c00, expected,
+                                         "texture candidate rec.p08+00 object");
+        ssn_log_texture_candidate_object(c08, expected,
+                                         "texture candidate rec.p08+08 object");
+        ssn_log_texture_candidate_object(c30, expected,
+                                         "texture candidate rec.p08+30 object");
+        ssn_log_texture_candidate_object(c34, expected,
+                                         "texture candidate rec.p08+34 object");
+        ssn_log_texture_candidate_object(c38, expected,
+                                         "texture candidate rec.p08+38 object");
+    }
+}
+
+static void ssn_log_texture_owner_probe(uint32_t type, uint32_t slot,
+                                        uint32_t handle) {
+    static unsigned logged;
+    static unsigned nested_logged;
+    uint32_t owner;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t count;
+    uint32_t rec;
+    uint32_t aux0_addr;
+    uint32_t aux1_addr;
+    uint32_t aux0;
+    uint32_t aux1;
+
+    if (!SSN_ENABLE_TEXTURE_OWNER_PROBE)
+        return;
+    if (logged >= LOG_TEXTURE_OWNER_PROBE_MAX)
+        return;
+
+    owner = ssn_texture_slot_owner();
+    if (!ssn_ptr_sane(owner))
+        return;
+    begin = *(volatile uint32_t *)(uintptr_t)(owner + 0x0cu);
+    end = *(volatile uint32_t *)(uintptr_t)(owner + 0x10u);
+    if (!ssn_ptr_sane(begin) || end < begin || ((end - begin) & 7u) != 0)
+        return;
+    count = (end - begin) >> 3;
+    if (slot >= count)
+        return;
+
+    rec = begin + slot * 8u;
+    aux0_addr = owner + 0x0d40u + slot * 4u;
+    aux1_addr = aux0_addr + 4u;
+    aux0 = *(volatile uint32_t *)(uintptr_t)aux0_addr;
+    aux1 = *(volatile uint32_t *)(uintptr_t)aux1_addr;
+
+    logged++;
+    dbg_print("[ssn] texture owner probe\n");
+    dbg_print_hex32("  type", type);
+    dbg_print_hex32("  slot", slot);
+    dbg_print_hex32("  handle", handle);
+    dbg_print_hex32("  owner", owner);
+    dbg_print_hex32("  owner.dirty", *(volatile uint8_t *)(uintptr_t)(owner + 0x04u));
+    dbg_print_hex32("  slots.begin", begin);
+    dbg_print_hex32("  slots.end", end);
+    dbg_print_hex32("  slots.count", count);
+    dbg_print_hex32("  slot.rec", rec);
+    dbg_print_hex32("  slot.word0", *(volatile uint32_t *)(uintptr_t)(rec + 0x00u));
+    dbg_print_hex32("  slot.word4", *(volatile uint32_t *)(uintptr_t)(rec + 0x04u));
+    dbg_print_hex32("  aux0.addr", aux0_addr);
+    dbg_print_hex32("  aux0", aux0);
+    dbg_print_hex32("  aux1.addr", aux1_addr);
+    dbg_print_hex32("  aux1", aux1);
+    ssn_log_word_dump(owner, 0x40u, "texture owner raw 00-3f");
+    ssn_log_word_dump(owner + 0x0d30u, 0xe0u,
+                      "texture owner raw d30-e0f");
+    if (ssn_ptr_sane(aux0)) {
+        ssn_log_word_dump(aux0, 0x80u, "texture owner aux0 object");
+        if (logged <= LOG_TEXTURE_OWNER_BYTE_PROBE_MAX)
+            ssn_log_byte_window(aux0, 0x00u, 0x60u,
+                                "texture owner aux0 bytes 00-5f");
+        if (nested_logged < LOG_TEXTURE_OWNER_NESTED_PROBE_MAX) {
+            uint32_t p04 = *(volatile uint32_t *)(uintptr_t)(aux0 + 0x04u);
+            uint32_t p44 = *(volatile uint32_t *)(uintptr_t)(aux0 + 0x44u);
+            nested_logged++;
+            dbg_print("[ssn] texture owner aux0 nested pointers\n");
+            dbg_print_hex32("  aux", aux0);
+            dbg_print_hex32("  aux.vtable", *(volatile uint32_t *)(uintptr_t)aux0);
+            dbg_print_hex32("  aux.p04", p04);
+            dbg_print_hex32("  aux.p44", p44);
+            ssn_log_texture_resource_record(p04, handle,
+                                            "texture owner aux0 p04 resource");
+        }
+    }
+    if (aux1 != aux0 && ssn_ptr_sane(aux1)) {
+        ssn_log_word_dump(aux1, 0x80u, "texture owner aux1 object");
+        if (logged <= LOG_TEXTURE_OWNER_BYTE_PROBE_MAX)
+            ssn_log_byte_window(aux1, 0x00u, 0x60u,
+                                "texture owner aux1 bytes 00-5f");
+        if (nested_logged < LOG_TEXTURE_OWNER_NESTED_PROBE_MAX) {
+            uint32_t p04 = *(volatile uint32_t *)(uintptr_t)(aux1 + 0x04u);
+            uint32_t p44 = *(volatile uint32_t *)(uintptr_t)(aux1 + 0x44u);
+            nested_logged++;
+            dbg_print("[ssn] texture owner aux1 nested pointers\n");
+            dbg_print_hex32("  aux", aux1);
+            dbg_print_hex32("  aux.vtable", *(volatile uint32_t *)(uintptr_t)aux1);
+            dbg_print_hex32("  aux.p04", p04);
+            dbg_print_hex32("  aux.p44", p44);
+            ssn_log_texture_resource_record(p04, handle,
+                                            "texture owner aux1 p04 resource");
+        }
+    }
+}
+
+static int ssn_texture_slot_write_handle(uint32_t slot, uint32_t handle) {
+    uint32_t state = ssn_songselect_state();
+    uint32_t owner;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t count;
+    uint32_t rec;
+    uint8_t dirty = 1;
+
+    if (!ssn_ptr_sane(state))
+        return 0;
+    owner = *(volatile uint32_t *)(uintptr_t)(state + 0x08u);
+    if (!ssn_ptr_sane(owner))
+        return 0;
+    begin = *(volatile uint32_t *)(uintptr_t)(owner + 0x0cu);
+    end = *(volatile uint32_t *)(uintptr_t)(owner + 0x10u);
+    if (!ssn_ptr_sane(begin) || end < begin || ((end - begin) & 7u) != 0)
+        return 0;
+    count = (end - begin) >> 3;
+    if (slot >= count)
+        return 0;
+    rec = begin + slot * 8u;
+    mem_write_and_flush((void *)(uintptr_t)(rec + 0x04u),
+                        &handle, sizeof handle);
+    mem_write_and_flush((void *)(uintptr_t)(owner + 0x04u),
+                        &dirty, sizeof dirty);
+    return 1;
+}
+
+static uint32_t ssn_texture_resource_owner(void) {
+    uint32_t state = ssn_songselect_state();
+
+    if (!ssn_ptr_sane(state))
+        return 0;
+    return *(volatile uint32_t *)(uintptr_t)(state + 0x00u);
+}
+
+static uint32_t ssn_texture_map_root(void) {
+    uint32_t owner = ssn_texture_resource_owner();
+
+    if (!ssn_ptr_sane(owner))
+        return 0;
+    return *(volatile uint32_t *)(uintptr_t)(owner + 0x9f8u);
+}
+
+static uint32_t ssn_texture_map_type_node(uint32_t type) {
+    uint32_t root = ssn_texture_map_root();
+    uint32_t node;
+    uint32_t best;
+    unsigned guard = 0;
+
+    if (!ssn_ptr_sane(root))
+        return 0;
+    node = *(volatile uint32_t *)(uintptr_t)(root + 0x04u);
+    best = root;
+    while (ssn_ptr_sane(node) &&
+           *(volatile uint8_t *)(uintptr_t)(node + 0x39u) == 0 &&
+           guard++ < 128u) {
+        uint32_t node_type = *(volatile uint32_t *)(uintptr_t)(node + 0x0cu);
+        if (type <= node_type) {
+            best = node;
+            node = *(volatile uint32_t *)(uintptr_t)(node + 0x00u);
+        } else {
+            node = *(volatile uint32_t *)(uintptr_t)(node + 0x08u);
+        }
+    }
+    if (best != root &&
+        *(volatile uint32_t *)(uintptr_t)(best + 0x0cu) <= type)
+        return best;
+    return 0;
+}
+
+static uint32_t ssn_resource_type_base(uint32_t node) {
+    if (!ssn_ptr_sane(node))
+        return 0;
+    return *(volatile uint32_t *)(uintptr_t)(node + 0x10u);
+}
+
+static uint32_t ssn_resource_key_from_handle(uint32_t node, uint32_t handle) {
+    uint32_t base = ssn_resource_type_base(node);
+
+    if (!base || handle < base)
+        return 0xffffffffu;
+    return handle - base;
+}
+
+/*
+ * Break the uid ceiling: the song-board title key is the song's uniqueid, which
+ * must fall inside a loaded 50-wide range in the type-9 (Long) / type-10 (Short)
+ * validator, else it resolves to the "dummy" texture. Ranges are built from the
+ * song DB at scene setup, so runtime-injected custom uids (6000+) have none.
+ * Fix: extend the highest-high range node to cover base+uid_hi, so our custom
+ * uids pass the validator and resolve to our songname_v* .nut textures. The
+ * holder-array range nodes are the same objects the validator walks, so writing
+ * node+0x08 (high) is seen by FUN_0018ffb8. Idempotent (call each native tick).
+ */
+static void ssn_extend_texture_range(uint32_t type, uint32_t uid_hi) {
+    uint32_t node = ssn_texture_map_type_node(type);
+    uint32_t base;
+    uint32_t count;
+    uint32_t holder;
+    uint32_t target;
+    uint32_t best = 0;
+    uint32_t best_hi = 0;
+
+    if (!ssn_ptr_sane(node))
+        return;
+    base = *(volatile uint32_t *)(uintptr_t)(node + 0x10u);
+    count = *(volatile uint32_t *)(uintptr_t)(node + 0x28u);
+    holder = *(volatile uint32_t *)(uintptr_t)(node + 0x24u);
+    if (!base || !count || !ssn_ptr_sane(holder))
+        return;
+    target = base + uid_hi;
+
+    for (uint32_t i = 0; i < count && i < 128u; i++) {
+        uint32_t r = *(volatile uint32_t *)(uintptr_t)(holder + i * 4u);
+        uint32_t hi;
+
+        if (!ssn_ptr_sane(r))
+            continue;
+        hi = *(volatile uint32_t *)(uintptr_t)(r + 0x08u);
+        if (hi >= best_hi) {
+            best_hi = hi;
+            best = r;
+        }
+    }
+    if (best && target > best_hi) {
+        static unsigned logged;
+        *(volatile uint32_t *)(uintptr_t)(best + 0x08u) = target;
+        if (logged < 4u) {
+            logged++;
+            dbg_print("[ssn] extended texture range\n");
+            dbg_print_hex32("  type", type);
+            dbg_print_hex32("  node", node);
+            dbg_print_hex32("  range", best);
+            dbg_print_hex32("  old.high", best_hi);
+            dbg_print_hex32("  new.high", target);
+        }
+    }
+}
+
+static void ssn_log_texture_range_list(uint32_t node, uint32_t key) {
+    uint32_t base;
+    uint32_t resolved;
+    uint32_t count;
+    uint32_t holder;
+    uint32_t first;
+    uint32_t matching = 0;
+
+    if (!ssn_ptr_sane(node))
+        return;
+
+    base = *(volatile uint32_t *)(uintptr_t)(node + 0x10u);
+    count = *(volatile uint32_t *)(uintptr_t)(node + 0x28u);
+    holder = *(volatile uint32_t *)(uintptr_t)(node + 0x24u);
+    resolved = base + key;
+    first = 0;
+    if (count && ssn_ptr_sane(holder))
+        first = *(volatile uint32_t *)(uintptr_t)holder;
+
+    dbg_print_hex32("  map.node", node);
+    dbg_print_hex32("  map.type", *(volatile uint32_t *)(uintptr_t)(node + 0x0cu));
+    dbg_print_hex32("  map.enabled", *(volatile uint8_t *)(uintptr_t)(node + 0x19u));
+    dbg_print_hex32("  map.base", base);
+    dbg_print_hex32("  map.range_count", count);
+    dbg_print_hex32("  map.range_holder", holder);
+    dbg_print_hex32("  map.range_first", first);
+    dbg_print_hex32("  map.resolved", resolved);
+
+    ssn_log_word_dump(node + 0x10u, 0x30u, "resource type node raw 10-3f");
+    if (ssn_ptr_sane(holder)) {
+        uint32_t holder_bytes = count * 4u;
+        if (holder_bytes > LOG_RESOURCE_RANGE_SCAN_MAX * 4u)
+            holder_bytes = LOG_RESOURCE_RANGE_SCAN_MAX * 4u;
+        ssn_log_word_dump(holder, holder_bytes, "resource range holder ptrs");
+        for (uint32_t i = 0; i < count && i < LOG_RESOURCE_RANGE_SCAN_MAX; i++) {
+            uint32_t range = *(volatile uint32_t *)(uintptr_t)(holder + i * 4u);
+            uint32_t lo;
+            uint32_t hi;
+
+            if (!ssn_ptr_sane(range))
+                continue;
+            lo = *(volatile uint32_t *)(uintptr_t)(range + 0x04u);
+            hi = *(volatile uint32_t *)(uintptr_t)(range + 0x08u);
+            if (resolved >= lo && resolved <= hi) {
+                matching = range;
+                dbg_print("[ssn] resource matching range\n");
+                dbg_print_hex32("  range.idx", i);
+                dbg_print_hex32("  range.ptr", range);
+                dbg_print_hex32("  range.low", lo);
+                dbg_print_hex32("  range.high", hi);
+                dbg_print_hex32("  range.enabled",
+                                *(volatile uint8_t *)(uintptr_t)(range + 0x0cu));
+                break;
+            }
+        }
+    }
+    if (ssn_ptr_sane(first))
+        ssn_log_word_dump(first, 0x10u, "resource first range raw");
+    if (matching && matching != first)
+        ssn_log_word_dump(matching, 0x10u, "resource matching range raw");
+#if 0
+    /* Disabled: the subrange object is not a simple forward list. The first
+     * live dump showed pointer-like fields at +04/+08 and following the guessed
+     * next link walked into handle space (0x00090000), crashing the game. Keep
+     * this off until the container layout is reversed statically. */
+    for (unsigned i = 0; i < 12u && ssn_ptr_sane(it); i++) {
+        char prefix[16];
+
+        if (it == node + 0x20u)
+            break;
+
+        prefix[0] = ' ';
+        prefix[1] = ' ';
+        prefix[2] = 'r';
+        prefix[3] = '0' + (char)((i / 10u) % 10u);
+        prefix[4] = '0' + (char)(i % 10u);
+        prefix[5] = '.';
+        prefix[6] = 'p';
+        prefix[7] = '\0';
+        dbg_print_hex32(prefix, it);
+
+        if (*(volatile uint32_t *)(uintptr_t)(it + 0x00u) == 0)
+            break;
+        it = *(volatile uint32_t *)(uintptr_t)
+            (*(volatile uint32_t *)(uintptr_t)(it + 0x00u) + 0x04u);
+    }
+#endif
+}
+
+static void ssn_log_resource_map_state(uint32_t type, uint32_t key,
+                                       const char *label) {
+    uint32_t owner;
+    uint32_t root;
+    uint32_t node;
+
+    owner = ssn_texture_resource_owner();
+    root = ssn_texture_map_root();
+    node = ssn_texture_map_type_node(type);
+
+    dbg_print("[ssn] ");
+    dbg_print(label);
+    dbg_print("\n");
+    dbg_print_hex32("  res.owner", owner);
+    dbg_print_hex32("  map.root", root);
+    dbg_print_hex32("  query.type", type);
+    dbg_print_hex32("  query.key", key);
+    if (!ssn_ptr_sane(node)) {
+        dbg_print("  type node missing\n");
+        return;
+    }
+    ssn_log_texture_range_list(node, key);
+}
+
+static void ssn_log_texture_map_state(uint32_t uid) {
+    uint32_t owner;
+    uint32_t root;
+    uint32_t node;
+
+    if (!SSN_ENABLE_TEXTURE_MAP_DUMP)
+        return;
+
+    owner = ssn_texture_resource_owner();
+    root = ssn_texture_map_root();
+    node = ssn_texture_map_type_node(9u);
+
+    dbg_print("[ssn] texture map state\n");
+    dbg_print_hex32("  res.owner", owner);
+    dbg_print_hex32("  map.root", root);
+    dbg_print_hex32("  query.type", 9u);
+    dbg_print_hex32("  query.uid", uid);
+    if (!ssn_ptr_sane(node)) {
+        dbg_print("  type node missing\n");
+        return;
+    }
+    ssn_log_texture_range_list(node, uid);
 }
 
 static uint32_t ssn_detail_entry_for_course_uniqueid(unsigned course,
@@ -1789,6 +2506,8 @@ static void ssn_log_basic_metadata_probe_from_vm(const char *label, void *vm) {
     uint32_t folder_value;
     uint32_t local_value;
 
+    if (!SSN_DETAIL_LOGGING_ENABLED)
+        return;
     if (logged >= LOG_BASIC_METADATA_DUMP_MAX)
         return;
     if (!ssn_arg_u32(folder, &folder_value) ||
@@ -1892,6 +2611,11 @@ static int ssn_append_songs_to_vector(uint32_t vec, const char *label,
             SSN_SONG_RECORD_SIZE;
         copy_record((void *)(uintptr_t)dst, (const void *)(uintptr_t)template_rec);
         ssn_patch_song_record_fields(dst, &songs[i]);
+        /* PoC: give each custom song a distinct uniqueid past stock (0..801)
+         * so its songname_vlong title comes from our added 00802_* file, not
+         * template 799's. ponytail: test-only; uid also keys difficulty. */
+        *(volatile uint32_t *)(uintptr_t)(dst + SSN_SONG_UNIQUEID_OFF) =
+            SSN_CUSTOM_UID_BASE + i;
     }
 
     dbg_print("[ssn] patched custom songs into visible tail\n");
@@ -2446,10 +3170,13 @@ static void ssn_log_resolved_song(const char *kind, uint32_t folder, uint32_t lo
     }
 }
 
-static void ssn_log_texture_result_from_vm(void *vm) {
+static void ssn_log_texture_result_from_vm_type(void *vm, uint32_t type) {
     ssn_arg_raw slot = ssn_arg(vm, 1);
     ssn_arg_raw folder = ssn_arg(vm, 2);
     ssn_arg_raw local = ssn_arg(vm, 3);
+    uint32_t slot_value;
+    uint32_t folder_value;
+    uint32_t local_value;
     uint32_t start = 0;
     uint32_t count = 0;
     uint32_t absolute;
@@ -2458,31 +3185,402 @@ static void ssn_log_texture_result_from_vm(void *vm) {
     const char *uid_source = NULL;
     uint32_t uid;
 
-    if (!(slot.type == 2 || slot.type == 3) ||
-        !(folder.type == 2 || folder.type == 3) ||
-        !(local.type == 2 || local.type == 3))
+    if (!ssn_arg_u32(slot, &slot_value) ||
+        !ssn_arg_u32(folder, &folder_value) ||
+        !ssn_arg_u32(local, &local_value))
         return;
 
     dbg_print("[ssn] texture result\n");
-    dbg_print_hex32("  slot", slot.value);
-    dbg_print_hex32("  folder", folder.value);
-    dbg_print_hex32("  local", local.value);
-    if (!ssn_get_board_range(folder.value, &start, &count) ||
-        local.value >= count) {
+    dbg_print_hex32("  slot", slot_value);
+    dbg_print_hex32("  folder", folder_value);
+    dbg_print_hex32("  local", local_value);
+    if (!ssn_get_board_range(folder_value, &start, &count) ||
+        local_value >= count) {
         dbg_print("  no resolved song\n");
         return;
     }
 
-    absolute = start + local.value;
+    absolute = start + local_value;
     uid = ssn_texture_uid_for_absolute(absolute, &uid_source);
-    handle = ssn_texture_slot_handle(slot.value, &slot_rec);
+    handle = ssn_texture_slot_handle(slot_value, &slot_rec);
     dbg_print_hex32("  absolute", absolute);
     dbg_print_hex32("  uid", uid);
+    dbg_print_hex32("  resource.type", type);
     dbg_print("  uid_source=");
     dbg_print(uid_source ? uid_source : "none");
     dbg_print("\n");
     dbg_print_hex32("  slot.rec", slot_rec);
     dbg_print_hex32("  texture.handle", handle);
+    if (type == 9u)
+        ssn_log_texture_map_state(uid);
+    else
+        ssn_log_resource_map_state(type, uid, "texture resource map state");
+}
+
+static void ssn_log_texture_result_from_vm(void *vm) {
+    ssn_log_texture_result_from_vm_type(vm, 9u);
+}
+
+/*
+ * Step 1 smoke test (see docs Option A): prove nuTextureLoadFromMemoryPointer
+ * works from the hook, in isolation from binding. One-shot: build a solid
+ * opaque-red A8R8G8B8 buffer at title dims, hand it to the loader, log the
+ * returned nu texture id. id >= 0 confirms the raw-pixel load path. The buffer
+ * is intentionally leaked (one-shot) so it stays mapped while we inspect.
+ * ponytail: solid fill, not the freetype renderer yet — isolates the loader.
+ */
+void *memalign(size_t alignment, size_t size); /* core/libc_stubs.c */
+#define SSN_TEXLOAD_SMOKETEST_W 56u
+#define SSN_TEXLOAD_SMOKETEST_H 400u
+static void ssn_texture_loader_smoketest(void) {
+    static unsigned done;
+    uint32_t w = SSN_TEXLOAD_SMOKETEST_W;
+    uint32_t h = SSN_TEXLOAD_SMOKETEST_H;
+    uint32_t bytes = w * h * 4u;
+    uint32_t *px;
+    int id;
+
+    if (done)
+        return;
+    done = 1;
+
+    /* nu textures require 128-byte (RSX) aligned pixel memory; plain malloc
+     * faults the loader's alignment assert (FUN_00551bdc). */
+    px = (uint32_t *)memalign(128, bytes);
+    if (!px) {
+        dbg_print("[ssn] texload smoketest: memalign failed\n");
+        return;
+    }
+    for (uint32_t i = 0; i < w * h; i++)
+        px[i] = 0xFFFF0000u; /* opaque red A8R8G8B8 */
+
+    id = ((nu_tex_load_fn)(uintptr_t)g_nu_tex_load_desc)(
+        px, bytes, 0x30000u, w, h, 0x82u, 0u, 0x70u);
+
+    dbg_print("[ssn] texload smoketest\n");
+    dbg_print_hex32("  pixels", (uint32_t)(uintptr_t)px);
+    dbg_print_hex32("  bytes", bytes);
+    dbg_print_hex32("  w", w);
+    dbg_print_hex32("  h", h);
+    dbg_print_hex32("  tex.id", (uint32_t)id);
+}
+
+/*
+ * B1 donor-overwrite test. The custom song's slot is remapped to a stock donor
+ * handle (below), so its slot->aux->p04 resource record is the donor's live
+ * texture. Fill the sub-object candidate buffers with distinct solid colors so
+ * we can SEE which one the movie samples: p60 -> red, p64 -> green. Whichever
+ * shows up in the custom song's title area is the display buffer; then step 2b
+ * swaps solid fill for the freetype render at the confirmed dims. dcbst/sync
+ * (icache_flush) pushes the CPU write to main memory for RSX. Runs every frame
+ * (buffer reloads); log rate-limited.
+ * ponytail: solid two-color probe, not the renderer yet — one iteration IDs the
+ * buffer instead of guessing offsets blind.
+ */
+static void ssn_donor_fill_object(uint32_t obj, uint32_t color,
+                                  const char *label, unsigned *logged) {
+    uint32_t data;
+    uint32_t size;
+
+    if (!ssn_heap_ptr_sane(obj))
+        return;
+    data = *(volatile uint32_t *)(uintptr_t)(obj + 0x34u);
+    size = *(volatile uint32_t *)(uintptr_t)(obj + 0x38u);
+    if (!ssn_heap_ptr_sane(data) || size == 0 || size > 0x80000u)
+        return;
+
+    for (uint32_t i = 0; i + 4u <= size; i += 4u)
+        *(volatile uint32_t *)(uintptr_t)(data + i) = color;
+    icache_flush((void *)(uintptr_t)data, size);
+
+    if (*logged < 24u) {
+        (*logged)++;
+        dbg_print("[ssn] titlebuf fill\n");
+        dbg_print("  which=");
+        dbg_print(label);
+        dbg_print("\n");
+        dbg_print_hex32("  obj", obj);
+        dbg_print_hex32("  data", data);
+        dbg_print_hex32("  size", size);
+    }
+}
+
+/*
+ * Decisive buffer test: for EVERY displayed song's own slot (no remap, no dirty
+ * race), fill all candidate sub-object buffers of its resource record with red.
+ * If real song titles turn red, buffer-overwrite is the display path and we then
+ * bisect which sub-object; if nothing turns red, the sampled pixels live
+ * elsewhere (or are re-uploaded from local RSX memory) and B1-by-CPU-fill won't
+ * work. Hard-validated to avoid the stale-aux crash.
+ */
+static void ssn_titlebuf_fill_test(uint32_t slot) {
+    static unsigned logged;
+    uint32_t owner = ssn_texture_slot_owner();
+    uint32_t begin;
+    uint32_t end;
+    uint32_t count;
+    uint32_t aux0;
+    uint32_t p04;
+    static const uint32_t cand_off[] = { 0x30u, 0x34u, 0x38u, 0x60u, 0x64u };
+
+    if (!SSN_ENABLE_DONOR_OVERWRITE_TEST || !ssn_ptr_sane(owner))
+        return;
+    begin = *(volatile uint32_t *)(uintptr_t)(owner + 0x0cu);
+    end = *(volatile uint32_t *)(uintptr_t)(owner + 0x10u);
+    if (!ssn_ptr_sane(begin) || end < begin || ((end - begin) & 7u) != 0)
+        return;
+    count = (end - begin) >> 3;
+    if (slot >= count)
+        return;
+
+    aux0 = *(volatile uint32_t *)(uintptr_t)(owner + 0x0d40u + slot * 4u);
+    if (!ssn_heap_ptr_sane(aux0))
+        return;
+    p04 = *(volatile uint32_t *)(uintptr_t)(aux0 + 0x04u);
+    if (!ssn_heap_ptr_sane(p04))
+        return;
+
+    for (unsigned i = 0; i < sizeof cand_off / sizeof cand_off[0]; i++) {
+        uint32_t obj = *(volatile uint32_t *)(uintptr_t)(p04 + cand_off[i]);
+        ssn_donor_fill_object(obj, 0xFFFF0000u, "red", &logged);
+    }
+}
+
+static void ssn_titlebuf_fill_from_vm(void *vm) {
+    ssn_arg_raw slot = ssn_arg(vm, 1);
+    uint32_t slot_value;
+
+    if (ssn_arg_u32(slot, &slot_value))
+        ssn_titlebuf_fill_test(slot_value);
+}
+
+/*
+ * Option-1 hijack test: the per-slot resource record selects its texture by the
+ * handle at +0x14 (+0x44 is the mirror). Stock = real handle, custom = dummy
+ * base (0x90000/0xa0000). Overwrite it with our matching custom handle
+ * (base + custom uid). If the real custom resource misses, the retrieval
+ * detour renders/uploads a FreeType title texture and returns a cloned stock
+ * resource for the custom song.
+ */
+static void ssn_hijack_custom_rec(void *vm, uint32_t type_base) {
+    ssn_arg_raw slot_arg = ssn_arg(vm, 1);
+    ssn_arg_raw folder_arg = ssn_arg(vm, 2);
+    ssn_arg_raw local_arg = ssn_arg(vm, 3);
+    uint32_t slot;
+    uint32_t folder;
+    uint32_t local;
+    uint32_t owner;
+    uint32_t aux;
+    uint32_t p04;
+    uint32_t virtual_index;
+    uint32_t want;
+
+    if (!ssn_arg_u32(slot_arg, &slot) || !ssn_arg_u32(folder_arg, &folder) ||
+        !ssn_arg_u32(local_arg, &local))
+        return;
+    if (!ssn_virtual_index_for_request(folder, local, &virtual_index, NULL))
+        return;
+    if (virtual_index >= 50u)
+        return;
+    (void)owner; (void)aux; (void)p04;
+    /* Force the bound slot handle to the virtual custom uid. The retrieval
+     * detour tries this real key first, then builds a runtime title resource. */
+    want = type_base + SSN_CUSTOM_UID_BASE + virtual_index;
+    ssn_texture_slot_write_handle(slot, want);
+}
+
+/*
+ * Option-1 recon: dump the drawn aux texture-object for a hovered song, split by
+ * stock vs custom, so the GPU-texture field (valid for stock, dummy for custom)
+ * is identifiable. aux slot = owner+0xd40+slot*4. Once we know the field, the
+ * hijack writes our nuTextureLoadFromMemoryPointer texture there for customs --
+ * no DB, no range, no resource registry.
+ */
+static void ssn_probe_slot_tex(void *vm) {
+    static unsigned stock_n;
+    static unsigned custom_n;
+    ssn_arg_raw slot_arg = ssn_arg(vm, 1);
+    ssn_arg_raw folder_arg = ssn_arg(vm, 2);
+    ssn_arg_raw local_arg = ssn_arg(vm, 3);
+    uint32_t slot;
+    uint32_t folder;
+    uint32_t local;
+    uint32_t owner;
+    uint32_t aux;
+    uint32_t p04;
+    uint32_t rec = 0;
+    int is_custom;
+    unsigned *ctr;
+
+    if (!ssn_arg_u32(slot_arg, &slot) || !ssn_arg_u32(folder_arg, &folder) ||
+        !ssn_arg_u32(local_arg, &local))
+        return;
+    owner = ssn_texture_slot_owner();
+    if (!ssn_ptr_sane(owner))
+        return;
+    is_custom = ssn_is_test_virtual_song(folder, local);
+    ctr = is_custom ? &custom_n : &stock_n;
+    if (*ctr >= 3u)
+        return;
+    (*ctr)++;
+
+    (void)ssn_texture_slot_handle(slot, &rec);
+    aux = *(volatile uint32_t *)(uintptr_t)(owner + 0x0d40u + slot * 4u);
+
+    dbg_print(is_custom ? "[ssn] slottex CUSTOM\n" : "[ssn] slottex STOCK\n");
+    dbg_print_hex32("  slot", slot);
+    dbg_print_hex32("  bound.handle", ssn_ptr_sane(rec) ?
+                    *(volatile uint32_t *)(uintptr_t)(rec + 0x04u) : 0);
+    dbg_print_hex32("  aux", aux);
+    if (!ssn_heap_ptr_sane(aux))
+        return;
+    p04 = *(volatile uint32_t *)(uintptr_t)(aux + 0x04u);
+    dbg_print_hex32("  aux.p04", p04);
+    if (!ssn_heap_ptr_sane(p04))
+        return;
+    ssn_log_word_dump(p04, 0x50u, "slottex rec");
+    /* rec sub-objects that hold the texture (compare stock vs custom) */
+    {
+        static const uint32_t off[] = { 0x00u, 0x08u, 0x0cu };
+        for (unsigned i = 0; i < 3u; i++) {
+            uint32_t so = *(volatile uint32_t *)(uintptr_t)(p04 + off[i]);
+            char lbl[24];
+            lbl[0]='r';lbl[1]='e';lbl[2]='c';lbl[3]='.';lbl[4]='p';
+            lbl[5]="0000"[0]; lbl[5]='0'+(char)(off[i]>>4); lbl[6]='0'+(char)(off[i]&0xf); lbl[7]=0;
+            dbg_print_hex32(lbl, so);
+            if (ssn_heap_ptr_sane(so))
+                ssn_log_word_dump(so, 0x40u, "slottex rec subobj");
+        }
+    }
+}
+
+static void install_texload_log_hook(void); /* defined after the hook macro */
+static void install_texretr_hook(void);      /* defined after the hook macro */
+
+static void ssn_apply_custom_texture_remap_test(void *vm, uint32_t type) {
+    static unsigned logged;
+    static unsigned map_logged_9;
+    static unsigned map_logged_10;
+    ssn_arg_raw slot_arg = ssn_arg(vm, 1);
+    ssn_arg_raw folder_arg = ssn_arg(vm, 2);
+    ssn_arg_raw local_arg = ssn_arg(vm, 3);
+    uint32_t slot;
+    uint32_t folder;
+    uint32_t local;
+    uint32_t test_uid;
+    uint32_t node;
+    uint32_t base;
+    uint32_t handle;
+
+    if (!SSN_ENABLE_CUSTOM_TEXTURE_REMAP_TEST)
+        return;
+    if (!ssn_arg_u32(slot_arg, &slot) ||
+        !ssn_arg_u32(folder_arg, &folder) ||
+        !ssn_arg_u32(local_arg, &local))
+        return;
+    if (!ssn_is_test_virtual_song(folder, local))
+        return;
+
+    test_uid = (type == 10u) ? SSN_CUSTOM_TEST_SHORT_UID :
+        SSN_CUSTOM_TEST_LONG_UID;
+    node = ssn_texture_map_type_node(type);
+    base = ssn_resource_type_base(node);
+    if (!base)
+        return;
+    handle = base + test_uid;
+    if (!ssn_texture_slot_write_handle(slot, handle))
+        return;
+    ssn_log_texture_owner_probe(type, slot, handle);
+
+    if (type == 9u && map_logged_9 < LOG_REMAP_TARGET_MAP_MAX) {
+        map_logged_9++;
+        ssn_log_resource_map_state(type, test_uid,
+                                   "remap target resource map state");
+    } else if (type == 10u && map_logged_10 < LOG_REMAP_TARGET_MAP_MAX) {
+        map_logged_10++;
+        ssn_log_resource_map_state(type, test_uid,
+                                   "remap target resource map state");
+    }
+
+    if (logged < 48u) {
+        logged++;
+        dbg_print("[ssn] remapped custom texture test handle\n");
+        dbg_print_hex32("  type", type);
+        dbg_print_hex32("  slot", slot);
+        dbg_print_hex32("  folder", folder);
+        dbg_print_hex32("  local", local);
+        dbg_print_hex32("  test.uid", test_uid);
+        dbg_print_hex32("  test.handle", handle);
+    }
+}
+
+static int ssn_last_texture_is_custom(void) {
+    return g_last_texture_valid &&
+        ssn_is_test_virtual_song(g_last_texture_folder, g_last_texture_local);
+}
+
+static void ssn_log_fillrect_result(void *vm, unsigned seq,
+                                    int force_custom_context) {
+    ssn_arg_raw slot = ssn_arg(vm, 1);
+    ssn_arg_raw a2 = ssn_arg(vm, 2);
+    ssn_arg_raw a3 = ssn_arg(vm, 3);
+    uint32_t slot_value;
+    uint32_t slot_rec = 0;
+    uint32_t handle;
+    uint32_t node;
+    uint32_t key = 0xffffffffu;
+
+    if (!ssn_arg_u32(slot, &slot_value))
+        return;
+
+    handle = ssn_texture_slot_handle(slot_value, &slot_rec);
+    node = ssn_texture_map_type_node(10u);
+    if (ssn_ptr_sane(node))
+        key = ssn_resource_key_from_handle(node, handle);
+
+    dbg_print("[ssn] fillrect result\n");
+    dbg_print_hex32("  seq", seq);
+    dbg_print_hex32("  slot", slot_value);
+    dbg_print_hex32("  arg2.type", a2.type);
+    dbg_print_hex32("  arg2.value", a2.value);
+    dbg_print_hex32("  arg3.type", a3.type);
+    dbg_print_hex32("  arg3.value", a3.value);
+    dbg_print_hex32("  slot.rec", slot_rec);
+    dbg_print_hex32("  fillrect.handle", handle);
+    dbg_print_hex32("  fillrect.key", key);
+    if (g_last_texture_valid) {
+        dbg_print_hex32("  last.tex.folder", g_last_texture_folder);
+        dbg_print_hex32("  last.tex.local", g_last_texture_local);
+        dbg_print_hex32("  last.tex.absolute", g_last_texture_absolute);
+        if (force_custom_context)
+            dbg_print("  last.tex.custom=1\n");
+    }
+    if (force_custom_context || seq < 8u)
+        ssn_log_resource_map_state(10u, key, "fillrect type-10 map state");
+}
+
+static void hk_RequestFillrect(void *vm) {
+#if SSN_ENABLE_FILLRECT_PROBE
+    static unsigned seq;
+    static unsigned custom_logged;
+    unsigned n = seq++;
+    int custom_context = ssn_last_texture_is_custom();
+    int log = n < LOG_FILLRECT_HEAD ||
+        (custom_context && custom_logged < LOG_FILLRECT_CUSTOM_MAX);
+
+    if (custom_context && custom_logged < LOG_FILLRECT_CUSTOM_MAX)
+        custom_logged++;
+
+    if (log)
+        ssn_log_args("RequestFillrect", vm, n, 3, 1);
+    if (g_orig_RequestFillrect_desc[0])
+        ((native_fn)(uintptr_t)g_orig_RequestFillrect_desc)(vm);
+    if (log)
+        ssn_log_fillrect_result(vm, n, custom_context);
+#else
+    if (g_orig_RequestFillrect_desc[0])
+        ((native_fn)(uintptr_t)g_orig_RequestFillrect_desc)(vm);
+#endif
 }
 
 static void ssn_log_vec16(const char *prefix, uint32_t vec, unsigned limit) {
@@ -2655,15 +3753,20 @@ static void ssn_log_board_candidates(const char *name, void *vm) {
                 ssn_note_last_row(folder.value, local.value, 0);
             ssn_log_resolved_song("song", folder.value, local.value);
         }
-    } else if (ssn_streq(name, "RequestSongBoardTexture_Long")) {
+    } else if (ssn_streq(name, "RequestSongBoardTexture_Long") ||
+               ssn_streq(name, "RequestSongBoardTexture_Short")) {
         ssn_arg_raw slot = ssn_arg(vm, 1);
         ssn_arg_raw folder = ssn_arg(vm, 2);
         ssn_arg_raw local = ssn_arg(vm, 3);
-        if (slot.type == 2 || slot.type == 3)
-            dbg_print_hex32("  tex.slot", slot.value);
-        if ((folder.type == 2 || folder.type == 3) && (local.type == 2 || local.type == 3)) {
-            ssn_note_last_row(folder.value, local.value, 1);
-            ssn_log_resolved_song("tex", folder.value, local.value);
+        uint32_t slot_value;
+        uint32_t folder_value;
+        uint32_t local_value;
+        if (ssn_arg_u32(slot, &slot_value))
+            dbg_print_hex32("  tex.slot", slot_value);
+        if (ssn_arg_u32(folder, &folder_value) &&
+            ssn_arg_u32(local, &local_value)) {
+            ssn_note_last_row(folder_value, local_value, 1);
+            ssn_log_resolved_song("tex", folder_value, local_value);
         }
     }
 
@@ -2780,6 +3883,8 @@ static void ssn_log_notify_course_star(void *vm, unsigned seq,
             ssn_patch_lemon_score_metadata_from_vm(vm);                        \
         if (ssn_streq(#name, "GetScore"))                                      \
             ssn_score_meta_patch_begin(vm, &score_patch);                      \
+        /* range extend disabled: passes validator (gate 1) but crashes on the\
+         * resource registry (gate 2) which has no object for out-of-DB uids. */\
         if (g_orig_##name)                                                     \
             g_orig_##name(vm);                                                 \
         if (ssn_streq(#name, "GetScore"))                                      \
@@ -2796,8 +3901,18 @@ static void ssn_log_notify_course_star(void *vm, unsigned seq,
         if (ssn_streq(#name, "GetRankingScore"))                               \
             ssn_log_ranking_detail_probe_from_vm(                              \
                 "GetRankingScore detail probe after original", vm);            \
+        if (ssn_streq(#name, "RequestSongBoardTexture_Long"))                   \
+            install_texretr_hook();                                           \
+        if (ssn_streq(#name, "RequestSongBoardTexture_Long"))                   \
+            ssn_hijack_custom_rec(vm, 0x90000u);                               \
+        if (ssn_streq(#name, "RequestSongBoardTexture_Short"))                  \
+            ssn_hijack_custom_rec(vm, 0xa0000u);                               \
+        if (ssn_streq(#name, "RequestSongBoardTexture_Short"))                  \
+            ssn_apply_custom_texture_remap_test(vm, 10u);                      \
         if (log && ssn_streq(#name, "RequestSongBoardTexture_Long"))           \
-            ssn_log_texture_result_from_vm(vm);                                \
+            ssn_log_texture_result_from_vm_type(vm, 9u);                       \
+        if (log && ssn_streq(#name, "RequestSongBoardTexture_Short"))          \
+            ssn_log_texture_result_from_vm_type(vm, 10u);                      \
         if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
             if (!replaying_detail && star_patch.count)                         \
                 ssn_replay_course_star_for_custom_from_vm(vm,                  \
@@ -3477,6 +4592,688 @@ static int ssn_ppc_branch(uint32_t src, uint32_t dst, int link,
     return 1;
 }
 
+/*
+ * Ground-truth instrument: head-detour nuTextureLoadFromMemoryPointer
+ * (FUN_001a8d14) to log every (pixels, size, flags, w, h, fmt) it's called
+ * with, so we can see the REAL song-title pixel source + dims. Entry instr
+ * `stdu r1,-0xc0(r1)` (0xf821ff41) is relocatable; the thunk re-executes it
+ * then jumps to entry+4. Installed lazily from the first song-board texture
+ * request so boot-time loads don't flood the (capped) log.
+ */
+#define SSN_TEXLOAD_ENTRY          0x001a8d14u
+#define SSN_TEXLOAD_RETURN         0x001a8d18u
+#define SSN_TEXLOAD_EXPECT_INSTR   0xf821ff41u
+
+extern char ssn_texload_detour_code[];
+__asm__(
+".globl ssn_texload_detour_code\n"
+"ssn_texload_detour_code:\n"
+"stdu 1,-0x120(1)\n"
+"mflr 0\n"
+"std 0,0x110(1)\n"
+"std 2,0x20(1)\n"
+"std 3,0x28(1)\n"
+"std 4,0x30(1)\n"
+"std 5,0x38(1)\n"
+"std 6,0x40(1)\n"
+"std 7,0x48(1)\n"
+"std 8,0x50(1)\n"
+"std 9,0x58(1)\n"
+"std 10,0x60(1)\n"
+"lis 11,hk_texload_log@ha\n"
+"ori 11,11,hk_texload_log@l\n"
+"lwz 12,0(11)\n"
+"lwz 2,4(11)\n"
+"mtctr 12\n"
+"bctrl\n"
+"ld 2,0x20(1)\n"
+"ld 3,0x28(1)\n"
+"ld 4,0x30(1)\n"
+"ld 5,0x38(1)\n"
+"ld 6,0x40(1)\n"
+"ld 7,0x48(1)\n"
+"ld 8,0x50(1)\n"
+"ld 9,0x58(1)\n"
+"ld 10,0x60(1)\n"
+"ld 0,0x110(1)\n"
+"mtlr 0\n"
+"addi 1,1,0x120\n"
+"stdu 1,-0xc0(1)\n"          /* re-execute overwritten original instruction */
+"lis 12,0x1a\n"
+"ori 12,12,0x8d18\n"          /* jump to SSN_TEXLOAD_RETURN = 0x001a8d18 */
+"mtctr 12\n"
+"bctr\n");
+
+void hk_texload_log(uint32_t pixels, uint64_t size, uint32_t flags,
+                    uint32_t w, uint32_t h, uint32_t fmt);
+void hk_texload_log(uint32_t pixels, uint64_t size, uint32_t flags,
+                    uint32_t w, uint32_t h, uint32_t fmt) {
+    static unsigned calls;
+
+    if (calls >= 128u)
+        return;
+    calls++;
+    dbg_print("[ssn] texload call\n");
+    dbg_print_hex32("  n", calls);
+    dbg_print_hex32("  pixels", pixels);
+    dbg_print_hex32("  size", (uint32_t)size);
+    dbg_print_hex32("  flags", flags);
+    dbg_print_hex32("  w", w);
+    dbg_print_hex32("  h", h);
+    dbg_print_hex32("  fmt", fmt);
+}
+
+static void install_texload_log_hook(void) {
+    static unsigned installed;
+    uint32_t cur;
+    uint32_t thunk;
+    uint32_t br;
+
+    if (installed)
+        return;
+    cur = *(volatile uint32_t *)(uintptr_t)SSN_TEXLOAD_ENTRY;
+    if (cur != SSN_TEXLOAD_EXPECT_INSTR) {
+        installed = 1;
+        dbg_print("[ssn] texload hook: unexpected entry instr, skip\n");
+        dbg_print_hex32("  cur", cur);
+        return;
+    }
+    thunk = (uint32_t)(uintptr_t)ssn_texload_detour_code;
+    if (!ssn_ppc_branch(SSN_TEXLOAD_ENTRY, thunk, 0, &br)) {
+        installed = 1;
+        dbg_print("[ssn] texload hook: branch out of range, skip\n");
+        dbg_print_hex32("  thunk", thunk);
+        return;
+    }
+    mem_write_and_flush((void *)(uintptr_t)SSN_TEXLOAD_ENTRY, &br, sizeof br);
+    installed = 1;
+    dbg_print("[ssn] texload hook installed\n");
+    dbg_print_hex32("  entry", SSN_TEXLOAD_ENTRY);
+    dbg_print_hex32("  thunk", thunk);
+    dbg_print_hex32("  branch", br);
+}
+
+/*
+ * Texture-retrieval detour: FUN_0054a988(map r3, key r4) is the key->resource
+ * hash lookup for the nu texture manager. For custom title handles
+ * (base+6000..6049), try the real custom key first. If the game did not
+ * register that key, probe runtime title upload/lookup, then fall back to a
+ * known donor resource until the actual texture-reference field is identified.
+ * First instr `lis r9,0x446f` (0x3d20446f) is relocatable; re-run in the thunk.
+ */
+#define SSN_TEXRETR_ENTRY        0x0054a988u
+#define SSN_TEXRETR_RETURN       0x0054a98cu
+#define SSN_TEXRETR_EXPECT_INSTR 0x3d20446fu
+
+static int ssn_rt_title_dims(uint32_t type, uint32_t *w, uint32_t *h) {
+    if (type == 9u) {
+        if (w)
+            *w = SSN_RT_TITLE_LONG_W;
+        if (h)
+            *h = SSN_RT_TITLE_H;
+        return 1;
+    }
+    if (type == 10u) {
+        if (w)
+            *w = SSN_RT_TITLE_SHORT_W;
+        if (h)
+            *h = SSN_RT_TITLE_H;
+        return 1;
+    }
+    return 0;
+}
+
+static ssn_runtime_title_entry_t *ssn_rt_title_find(uint32_t type,
+                                                    uint32_t index) {
+    for (unsigned i = 0; i < SSN_RT_TITLE_CACHE_MAX; i++) {
+        ssn_runtime_title_entry_t *e = &g_rt_title_cache[i];
+        if (e->valid && e->type == type && e->index == (uint16_t)index)
+            return e;
+    }
+    return NULL;
+}
+
+static ssn_runtime_title_entry_t *ssn_rt_title_alloc_slot(void) {
+    for (unsigned i = 0; i < SSN_RT_TITLE_CACHE_MAX; i++) {
+        if (!g_rt_title_cache[i].valid)
+            return &g_rt_title_cache[i];
+    }
+    return NULL;
+}
+
+static unsigned ssn_rt_title_slot_index(ssn_runtime_title_entry_t *e) {
+    if (!e || e < g_rt_title_cache ||
+        e >= g_rt_title_cache + SSN_RT_TITLE_CACHE_MAX)
+        return SSN_RT_TITLE_CACHE_MAX;
+    return (unsigned)(e - g_rt_title_cache);
+}
+
+static const char *ssn_rt_title_text(uint32_t index) {
+    if (index >= g_ssn_virtual_song_count || index >= SSN_INJECT_MAX)
+        return NULL;
+    if (g_ssn_virtual_songs[index].song.title[0])
+        return g_ssn_virtual_songs[index].song.title;
+    if (g_ssn_virtual_songs[index].short_id[0])
+        return g_ssn_virtual_songs[index].short_id;
+    return NULL;
+}
+
+static uint32_t ssn_rt_clone_resource(uint32_t donor_res, uint32_t key,
+                                      uint32_t donor_key, uint32_t type,
+                                      uint32_t index, int tex_id,
+                                      unsigned cache_slot) {
+    static unsigned logged;
+    uint32_t clone;
+    uint32_t tex_word = (uint32_t)tex_id;
+
+    if (!ssn_heap_ptr_sane(donor_res))
+        return 0;
+    if (cache_slot >= SSN_RT_TITLE_CACHE_MAX)
+        return 0;
+
+    clone = (uint32_t)(uintptr_t)g_rt_title_clone_pool[cache_slot];
+    memcpy((void *)(uintptr_t)clone, (const void *)(uintptr_t)donor_res,
+           SSN_RESOURCE_CLONE_BYTES);
+    icache_flush((void *)(uintptr_t)clone, SSN_RESOURCE_CLONE_BYTES);
+
+    if (logged < 16u) {
+        logged++;
+        dbg_print("[ssn] runtime title clone probe\n");
+        dbg_print_hex32("  type", type);
+        dbg_print_hex32("  index", index);
+        dbg_print_hex32("  key", key);
+        dbg_print_hex32("  donor", donor_key);
+        dbg_print_hex32("  cache.slot", cache_slot);
+        dbg_print_hex32("  donor.res", donor_res);
+        dbg_print_hex32("  clone.res", clone);
+        dbg_print_hex32("  tex.id", tex_word);
+        dbg_print_hex32("  return.enabled", SSN_RT_TITLE_RETURN_CLONE);
+        ssn_log_word_dump(donor_res, 0x80u, "runtime title donor resource");
+        ssn_log_word_dump(clone, 0x80u, "runtime title clone resource");
+    }
+
+    return clone;
+}
+
+static uint32_t ssn_rt_title_resource(uint32_t map, uint32_t key,
+                                      uint32_t donor_key, uint32_t type,
+                                      uint32_t index, uint32_t game_toc);
+
+static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
+                                        uint32_t game_toc) {
+    uint32_t ret;
+
+    __asm__ volatile(
+        "mflr 0\n"
+        "std 0,16(1)\n"
+        "stdu 1,-64(1)\n"
+        "std 2,48(1)\n"
+        "mr 2,%2\n"
+        "mr 3,%3\n"
+        "mr 4,%4\n"
+        "lis 9,0x446f\n"
+        "lis 12,0x0054\n"
+        "ori 12,12,0xa98c\n"
+        "mtctr 12\n"
+        "bctrl\n"
+        "mr %0,3\n"
+        "ld 2,48(1)\n"
+        "addi 1,1,64\n"
+        "ld 0,16(1)\n"
+        "mtlr 0\n"
+        : "=r"(ret)
+        : "0"(0), "r"(game_toc), "r"(map), "r"(key)
+        : "r0", "r3", "r4", "r9", "r12", "ctr", "memory", "lr");
+    return ret;
+}
+
+static void ssn_rt_title_lookup_probe(uint32_t map, uint32_t key,
+                                      uint32_t donor_key, uint32_t type,
+                                      uint32_t index, int tex_id,
+                                      uint32_t game_toc) {
+    static unsigned logged;
+    uint32_t tex_key;
+    uint32_t typed_tex_key;
+    uint32_t res_tex;
+    uint32_t res_typed;
+    uint32_t res_custom;
+    uint32_t res_donor;
+
+    if (logged >= SSN_RT_TITLE_LOOKUP_PROBE_MAX || tex_id < 0)
+        return;
+    logged++;
+
+    tex_key = (uint32_t)tex_id;
+    typed_tex_key = (type == 10u ? 0x000a0000u : 0x00090000u) + tex_key;
+    res_tex = ssn_texretr_orig_lookup(map, tex_key, game_toc);
+    res_typed = ssn_texretr_orig_lookup(map, typed_tex_key, game_toc);
+    res_custom = ssn_texretr_orig_lookup(map, key, game_toc);
+    res_donor = ssn_texretr_orig_lookup(map, donor_key, game_toc);
+
+    dbg_print("[ssn] runtime title lookup probe\n");
+    dbg_print_hex32("  type", type);
+    dbg_print_hex32("  index", index);
+    dbg_print_hex32("  tex.id", tex_key);
+    dbg_print_hex32("  key.custom", key);
+    dbg_print_hex32("  key.typed_tex", typed_tex_key);
+    dbg_print_hex32("  key.donor", donor_key);
+    dbg_print_hex32("  res.tex", res_tex);
+    dbg_print_hex32("  res.typed_tex", res_typed);
+    dbg_print_hex32("  res.custom", res_custom);
+    dbg_print_hex32("  res.donor", res_donor);
+    if (ssn_heap_ptr_sane(res_tex))
+        ssn_log_word_dump(res_tex, 0x80u, "runtime title res.tex");
+    if (ssn_heap_ptr_sane(res_typed) && res_typed != res_tex)
+        ssn_log_word_dump(res_typed, 0x80u, "runtime title res.typed_tex");
+}
+
+static uint32_t ssn_rt_title_typed_resource(uint32_t map, uint32_t type,
+                                            int tex_id, uint32_t game_toc) {
+    static unsigned logged;
+    uint32_t typed_key;
+    uint32_t res;
+
+    if (tex_id < 0)
+        return 0;
+    typed_key = (type == 10u ? 0x000a0000u : 0x00090000u) +
+                (uint32_t)tex_id;
+    res = ssn_texretr_orig_lookup(map, typed_key, game_toc);
+    if (logged < 16u) {
+        logged++;
+        dbg_print("[ssn] runtime title typed return probe\n");
+        dbg_print_hex32("  type", type);
+        dbg_print_hex32("  tex.id", (uint32_t)tex_id);
+        dbg_print_hex32("  typed.key", typed_key);
+        dbg_print_hex32("  typed.res", res);
+        dbg_print_hex32("  return.enabled", SSN_RT_TITLE_RETURN_TYPED_TEX);
+    }
+    return ssn_heap_ptr_sane(res) ? res : 0;
+}
+
+static uint32_t ssn_rt_title_alloc_upload_resource(uint32_t key, uint32_t type,
+                                                   uint32_t index, uint32_t w,
+                                                   uint32_t h,
+                                                   uint32_t bytes) {
+    static unsigned logged;
+    static unsigned logged_fail;
+    uint32_t mgr;
+    uint32_t res = 0;
+    uint32_t vtbl;
+    uint32_t upload_opd;
+    int alloc_rc;
+    int upload_rc;
+
+    mgr = *(volatile uint32_t *)(uintptr_t)SSN_NU_TEX_ALLOC_MGR_CELL;
+    if (!ssn_ptr_sane(mgr)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] runtime title direct alloc manager missing\n");
+            dbg_print_hex32("  mgr.cell", SSN_NU_TEX_ALLOC_MGR_CELL);
+            dbg_print_hex32("  mgr", mgr);
+        }
+        return 0;
+    }
+
+    /* Correct arg order from FUN_00539a80: (mgr, flags, format, w, h, 1, 0,
+     * &out). This is what reserves the RSX texture memory (+0x20 offset).
+     * Codex previously passed (mgr, bytes, h, flags, w) -> garbage RSX offset. */
+    (void)bytes;
+    alloc_rc = ((nu_tex_alloc_fn)(uintptr_t)g_nu_tex_alloc_desc)(
+        mgr, 0x30000u, 0x82u, w, h, 1u, 0u, &res);
+    if (alloc_rc != 0 || !ssn_heap_ptr_sane(res)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] runtime title direct alloc failed\n");
+            dbg_print_hex32("  type", type);
+            dbg_print_hex32("  index", index);
+            dbg_print_hex32("  key", key);
+            dbg_print_hex32("  mgr", mgr);
+            dbg_print_hex32("  alloc.rc", (uint32_t)alloc_rc);
+            dbg_print_hex32("  res", res);
+        }
+        return 0;
+    }
+
+    vtbl = *(volatile uint32_t *)(uintptr_t)res;
+    if (!ssn_ptr_sane(vtbl)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] runtime title direct bad vtable\n");
+            dbg_print_hex32("  res", res);
+            dbg_print_hex32("  vtbl", vtbl);
+        }
+        return 0;
+    }
+    upload_opd = *(volatile uint32_t *)(uintptr_t)(vtbl + 0x20u);
+    if (!ssn_ptr_sane(upload_opd)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] runtime title direct bad upload opd\n");
+            dbg_print_hex32("  res", res);
+            dbg_print_hex32("  vtbl", vtbl);
+            dbg_print_hex32("  upload.opd", upload_opd);
+        }
+        return 0;
+    }
+
+    /* Upload: FUN_00539a80 calls texinfo->vtbl[0x20](texinfo, pixels, 1, 0).
+     * 4th arg is the loader's arg7 (0), not the format. */
+    upload_rc = ((nu_tex_info_upload_fn)(uintptr_t)upload_opd)(
+        res, g_rt_title_pixels, 1u, 0u);
+    if (upload_rc != 0) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] runtime title direct upload failed\n");
+            dbg_print_hex32("  type", type);
+            dbg_print_hex32("  index", index);
+            dbg_print_hex32("  key", key);
+            dbg_print_hex32("  res", res);
+            dbg_print_hex32("  upload.rc", (uint32_t)upload_rc);
+        }
+        return 0;
+    }
+
+    /* alloc+upload set the dims/RSX fields; only stamp our handle at +0x08 so
+     * the record identifies as our custom key. Do NOT overwrite +0x0c/+0x10. */
+    *(volatile uint32_t *)(uintptr_t)(res + 0x08u) = key;
+    icache_flush((void *)(uintptr_t)res, 0x40u);
+
+    if (logged < 16u) {
+        logged++;
+        dbg_print("[ssn] runtime title direct resource\n");
+        dbg_print_hex32("  type", type);
+        dbg_print_hex32("  index", index);
+        dbg_print_hex32("  key", key);
+        dbg_print_hex32("  mgr", mgr);
+        dbg_print_hex32("  res", res);
+        dbg_print_hex32("  vtbl", vtbl);
+        dbg_print_hex32("  upload.opd", upload_opd);
+        dbg_print_hex32("  alloc.rc", (uint32_t)alloc_rc);
+        dbg_print_hex32("  upload.rc", (uint32_t)upload_rc);
+        dbg_print_hex32("  return.enabled", SSN_RT_TITLE_RETURN_DIRECT_TEXINFO);
+        ssn_log_word_dump(res, 0x80u, "runtime title direct texinfo");
+    }
+
+    return SSN_RT_TITLE_RETURN_DIRECT_TEXINFO ? res : 0;
+}
+
+static uint32_t ssn_rt_title_resource(uint32_t map, uint32_t key,
+                                      uint32_t donor_key, uint32_t type,
+                                      uint32_t index, uint32_t game_toc) {
+    static unsigned logged_fail;
+    static unsigned logged_ok;
+    static uint32_t g_slot_index[SSN_RT_DONOR_POOL * 2u]; /* [slot]=index+1 held, per type */
+    const char *title;
+    uint32_t w;
+    uint32_t h;
+    uint32_t bytes;
+    uint32_t dxt_size;
+    uint32_t slot;
+    uint32_t donor;
+    uint32_t donor_res;
+    uint32_t vram;
+    uint32_t *held;
+    (void)key;
+    (void)donor_key;
+
+    title = ssn_rt_title_text(index);
+    if (!title)
+        return 0;
+
+    /* Distinct visible customs -> distinct donor VRAM. */
+    slot = index % SSN_RT_DONOR_POOL;
+    donor = (type == 10u ? 0x000a0000u : 0x00090000u) +
+            SSN_RT_DONOR_BASE + slot;
+    donor_res = ssn_texretr_orig_lookup(map, donor, game_toc);
+    if (!ssn_heap_ptr_sane(donor_res)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] rt2 donor lookup failed\n");
+            dbg_print_hex32("  donor", donor);
+            dbg_print_hex32("  donor.res", donor_res);
+        }
+        return 0;
+    }
+    /* Match the DONOR texture's real dims (pitch = w/4*16 linear), else the GPU
+     * reads our DXT5 at the donor's pitch and it shears/wraps. */
+    w = *(volatile uint32_t *)(uintptr_t)(donor_res + 0x0cu);
+    h = *(volatile uint32_t *)(uintptr_t)(donor_res + 0x10u);
+    if ((w & 3u) || (h & 3u) || w < 16u || w > SSN_RT_TITLE_LONG_W ||
+        h < 16u || h > SSN_RT_TITLE_H) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] rt2 donor dims bad\n");
+            dbg_print_hex32("  w", w);
+            dbg_print_hex32("  h", h);
+        }
+        return 0;
+    }
+    vram = *(volatile uint32_t *)(uintptr_t)(donor_res + 0x34u);
+    if (!ssn_ptr_sane(vram)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] rt2 donor vram bad\n");
+            dbg_print_hex32("  donor.res", donor_res);
+            dbg_print_hex32("  vram", vram);
+        }
+        return 0;
+    }
+
+    /* Only re-render when this donor slot doesn't already hold this song. */
+    held = &g_slot_index[(type == 10u ? SSN_RT_DONOR_POOL : 0u) + slot];
+    if (*held == index + 1u)
+        return donor_res;
+
+    /* One-time: dump the donor's real layout fields + original VRAM head so we
+     * can compare swizzle/pitch against the linear .nut source. */
+    {
+        static unsigned dumped;
+        if (dumped < 2u && type == 9u) {
+            dumped++;
+            dbg_print("[ssn] rt2 donor layout\n");
+            dbg_print_hex32("  donor.res", donor_res);
+            dbg_print_hex32("  +0c.w", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x0cu));
+            dbg_print_hex32("  +10.h", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x10u));
+            dbg_print_hex32("  +14", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x14u));
+            dbg_print_hex32("  +24", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x24u));
+            dbg_print_hex32("  +28", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x28u));
+            dbg_print_hex32("  +2c.pitch", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x2cu));
+            dbg_print_hex32("  +30", *(volatile uint32_t *)(uintptr_t)(donor_res + 0x30u));
+            ssn_log_word_dump(vram, 0x40u, "rt2 donor vram head (orig)");
+        }
+    }
+
+    bytes = w * h * 4u;
+    dxt_size = (w / 4u) * (h / 4u) * 16u;
+    memset(g_rt_title_pixels, 0, bytes);
+    if (!taiko_title_render_argb(title, g_rt_title_pixels, w, h,
+                                 SSN_RT_TITLE_OUTLINE)) {
+        if (logged_fail < 8u) {
+            logged_fail++;
+            dbg_print("[ssn] rt2 render failed\n");
+            dbg_print_hex32("  index", index);
+        }
+        return 0;
+    }
+    /* DXT5-encode straight into the donor's IO-mapped VRAM buffer. */
+    dxt5_encode(g_rt_title_pixels, (int)w, (int)h, (uint8_t *)(uintptr_t)vram);
+    icache_flush((void *)(uintptr_t)vram, dxt_size);
+    *held = index + 1u;
+
+    if (logged_ok < 16u) {
+        logged_ok++;
+        dbg_print("[ssn] rt2 title written\n");
+        dbg_print_hex32("  type", type);
+        dbg_print_hex32("  index", index);
+        dbg_print_hex32("  slot", slot);
+        dbg_print_hex32("  donor.res", donor_res);
+        dbg_print_hex32("  vram", vram);
+        dbg_print_hex32("  dxt.size", dxt_size);
+    }
+    return donor_res;
+}
+
+static int ssn_custom_texture_key(uint32_t key, uint32_t *donor_key,
+                                  uint32_t *index, uint32_t *type) {
+    uint32_t off;
+
+    off = key - 0x00091770u;
+    if (off < 50u) {
+        if (donor_key)
+            *donor_key = 0x00090064u;
+        if (index)
+            *index = off;
+        if (type)
+            *type = 9u;
+        return 1;
+    }
+
+    off = key - 0x000a1770u;
+    if (off < 50u) {
+        if (donor_key)
+            *donor_key = 0x000a0064u;
+        if (index)
+            *index = off;
+        if (type)
+            *type = 10u;
+        return 1;
+    }
+
+    return 0;
+}
+
+uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc);
+uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc) {
+    static unsigned logged_hit;
+    static unsigned logged_fallback;
+    uint32_t donor_key;
+    uint32_t index;
+    uint32_t type;
+    uint32_t res;
+
+    if (!ssn_custom_texture_key(key, &donor_key, &index, &type))
+        return 0;
+
+    res = ssn_texretr_orig_lookup(map, key, game_toc);
+    if (res) {
+        if (logged_hit < 24u) {
+            logged_hit++;
+            dbg_print("[ssn] custom title resource hit\n");
+            dbg_print_hex32("  type", type);
+            dbg_print_hex32("  index", index);
+            dbg_print_hex32("  key", key);
+            dbg_print_hex32("  res", res);
+        }
+        return res;
+    }
+
+    res = ssn_rt_title_resource(map, key, donor_key, type, index, game_toc);
+    if (res)
+        return res;
+
+    res = ssn_texretr_orig_lookup(map, donor_key, game_toc);
+    if (logged_fallback < 24u) {
+        logged_fallback++;
+        dbg_print("[ssn] custom title resource fallback\n");
+        dbg_print_hex32("  type", type);
+        dbg_print_hex32("  index", index);
+        dbg_print_hex32("  key", key);
+        dbg_print_hex32("  donor", donor_key);
+        dbg_print_hex32("  res", res);
+    }
+    return res;
+}
+
+extern char ssn_texretr_detour_code[];
+__asm__(
+".globl ssn_texretr_detour_code\n"
+"ssn_texretr_detour_code:\n"
+"lis 12,0x0009\n"
+"ori 12,12,0x1770\n"          /* r12 = 0x00091770 (Long custom base) */
+"subf 0,12,4\n"               /* r0 = key - 0x91770 */
+"cmplwi 0,0,0x32\n"           /* < 50 ? */
+"blt 2f\n"
+"1:\n"
+"lis 12,0x000a\n"
+"ori 12,12,0x1770\n"          /* r12 = 0x000a1770 (Short custom base) */
+"subf 0,12,4\n"
+"cmplwi 0,0,0x32\n"
+"bge 3f\n"
+"2:\n"
+"stdu 1,-0x100(1)\n"
+"mflr 0\n"
+"std 0,0xf0(1)\n"
+"std 2,0x20(1)\n"
+"std 3,0x28(1)\n"
+"std 4,0x30(1)\n"
+"std 5,0x38(1)\n"
+"std 6,0x40(1)\n"
+"std 7,0x48(1)\n"
+"std 8,0x50(1)\n"
+"std 9,0x58(1)\n"
+"std 10,0x60(1)\n"
+"mr 5,2\n"                    /* helper arg3 = original game TOC */
+"lis 11,hk_texretr_lookup@ha\n"
+"ori 11,11,hk_texretr_lookup@l\n"
+"lwz 12,0(11)\n"
+"lwz 2,4(11)\n"
+"mtctr 12\n"
+"bctrl\n"
+"cmpwi 3,0\n"
+"beq 4f\n"
+"ld 2,0x20(1)\n"
+"ld 0,0xf0(1)\n"
+"mtlr 0\n"
+"addi 1,1,0x100\n"
+"blr\n"
+"4:\n"
+"ld 2,0x20(1)\n"
+"ld 3,0x28(1)\n"
+"ld 4,0x30(1)\n"
+"ld 5,0x38(1)\n"
+"ld 6,0x40(1)\n"
+"ld 7,0x48(1)\n"
+"ld 8,0x50(1)\n"
+"ld 9,0x58(1)\n"
+"ld 10,0x60(1)\n"
+"ld 0,0xf0(1)\n"
+"mtlr 0\n"
+"addi 1,1,0x100\n"
+"3:\n"
+"lis 9,0x446f\n"              /* re-execute overwritten original instruction */
+"lis 12,0x0054\n"
+"ori 12,12,0xa98c\n"          /* jump to SSN_TEXRETR_RETURN */
+"mtctr 12\n"
+"bctr\n");
+
+static void install_texretr_hook(void) {
+    static unsigned installed;
+    uint32_t cur;
+    uint32_t thunk;
+    uint32_t br;
+
+    if (installed)
+        return;
+    cur = *(volatile uint32_t *)(uintptr_t)SSN_TEXRETR_ENTRY;
+    if (cur != SSN_TEXRETR_EXPECT_INSTR) {
+        installed = 1;
+        dbg_print("[ssn] texretr hook: unexpected entry, skip\n");
+        dbg_print_hex32("  cur", cur);
+        return;
+    }
+    thunk = (uint32_t)(uintptr_t)ssn_texretr_detour_code;
+    if (!ssn_ppc_branch(SSN_TEXRETR_ENTRY, thunk, 0, &br)) {
+        installed = 1;
+        dbg_print("[ssn] texretr hook: branch out of range, skip\n");
+        return;
+    }
+    mem_write_and_flush((void *)(uintptr_t)SSN_TEXRETR_ENTRY, &br, sizeof br);
+    installed = 1;
+    dbg_print("[ssn] texretr hook installed\n");
+    dbg_print_hex32("  thunk", thunk);
+    dbg_print_hex32("  branch", br);
+}
+
 static uint32_t ssn_vec90_count_at(uint32_t vec) {
     uint32_t begin;
     uint32_t end;
@@ -3921,6 +5718,30 @@ static void log_install_one(uint32_t word_addr, const char *name, native_fn save
     }
 }
 
+static void install_descriptor_hook(uint32_t opd_addr, native_fn my,
+                                    uint32_t saved_desc[2],
+                                    const char *name) {
+    uint32_t *target = (uint32_t *)(uintptr_t)opd_addr;
+    uint32_t *my_desc = (uint32_t *)(uintptr_t)my;
+
+    if (!target || !my_desc || saved_desc[0])
+        return;
+
+    saved_desc[0] = target[0];
+    saved_desc[1] = target[1];
+    mem_write_and_flush(target + 0, my_desc + 0, sizeof(uint32_t));
+    mem_write_and_flush(target + 1, my_desc + 1, sizeof(uint32_t));
+
+    dbg_print("[ssn] hook descriptor ");
+    dbg_print(name);
+    dbg_print("\n");
+    dbg_print_hex32("  opd", opd_addr);
+    dbg_print_hex32("  orig.code", saved_desc[0]);
+    dbg_print_hex32("  orig.toc", saved_desc[1]);
+    dbg_print_hex32("  hook.code", my_desc[0]);
+    dbg_print_hex32("  hook.toc", my_desc[1]);
+}
+
 static void log_playerinfo_candidate(uint32_t addr, const char *name,
                                      uint32_t w0, uint32_t w1,
                                      const char *why) {
@@ -4055,6 +5876,18 @@ void songselect_natives_install(void) {
                 &g_orig_GetRankingScore);
     log_install_one(0x00f94790u, "GetRankingScore",
                     g_orig_GetRankingScore);
+    install_one(0x00f947f0u, (native_fn)&hk_RequestSongBoardTexture_Long,
+                &g_orig_RequestSongBoardTexture_Long);
+    log_install_one(0x00f947f0u, "RequestSongBoardTexture_Long",
+                    g_orig_RequestSongBoardTexture_Long);
+    install_one(0x00f947f8u, (native_fn)&hk_RequestSongBoardTexture_Short,
+                &g_orig_RequestSongBoardTexture_Short);
+    log_install_one(0x00f947f8u, "RequestSongBoardTexture_Short",
+                    g_orig_RequestSongBoardTexture_Short);
+#if SSN_ENABLE_FILLRECT_PROBE
+    install_descriptor_hook(0x00fc0098u, (native_fn)&hk_RequestFillrect,
+                            g_orig_RequestFillrect_desc, "RequestFillrect");
+#endif
 #endif
 #if SSN_ENABLE_PLAYERINFO_HOOKS
     install_playerinfo_hooks();
