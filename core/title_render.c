@@ -32,6 +32,35 @@ static struct FT_MemoryRec_ g_ftmem = { NULL, ft_alloc, ft_free_, ft_realloc };
 #define FONT_PATH "/dev_hdd0/plugins/taiko/font.ttf"
 #define REF_PX 48  /* native render size; downscaled to fit the 56x400 slot */
 
+/* --- Song-title texture tuning knobs -------------------------------------
+ * Native pixel size of each game title texture (see title_tex_* below). Edit
+ * here to match the real assets; the Python title generator mirrors these.
+ */
+#define TITLE_DIM_LONG_W   96u   /* songlist LONG  (selected song)   */
+#define TITLE_DIM_LONG_H   400u
+#define TITLE_DIM_SHORT_W  56u   /* songlist SHORT (side columns)    */
+#define TITLE_DIM_SHORT_H  400u
+#define TITLE_DIM_NAME_W   720u  /* song_name (HUD + transition)     */
+#define TITLE_DIM_NAME_H   64u
+
+/* Glyph-outline colour (0x00RRGGBB; fill is always white).
+ *   LONG + song_name titles are black.
+ *   SHORT titles are colour-coded by genre: the carousel swatch for the genre
+ *   darkened to 45% brightness. Index = category palette (see
+ *   taiko_custom_category_palette in custom_song_launcher.c):
+ *     pop->0  game->2  anime->3  vocaloid->7   else (category_index % 7)
+ */
+#define TITLE_OUTLINE_BLACK    0x000000u
+#define TITLE_OUTLINE_DEFAULT  0x141428u  /* SHORT fallback when no category  */
+#define TITLE_CAT_OUTLINE_CYAN    0x0A4B52u  /* 0  swatch 0xFF18A8B8 */
+#define TITLE_CAT_OUTLINE_PINK    0x721C3Du  /* 1  swatch 0xFFFF4088 */
+#define TITLE_CAT_OUTLINE_GREEN   0x175A21u  /* 2  swatch 0xFF35C84A */
+#define TITLE_CAT_OUTLINE_ORANGE  0x72440Au  /* 3  swatch 0xFFFF9818 */
+#define TITLE_CAT_OUTLINE_YELLOW  0x726212u  /* 4  swatch 0xFFFFDA28 */
+#define TITLE_CAT_OUTLINE_BROWN   0x4C2F0Eu  /* 5  swatch 0xFFA96A20 */
+#define TITLE_CAT_OUTLINE_RED     0x671A0Eu  /* 6  swatch 0xFFE63A20 */
+#define TITLE_CAT_OUTLINE_PALE    0x686C6Fu  /* 7  swatch 0xFFE8F1F8 */
+
 static FT_Library g_lib;
 static FT_Face    g_face;
 static int        g_font_state; /* 0 = untried, 1 = ready, -1 = failed */
@@ -770,3 +799,78 @@ static int font_ready(void) {
     return 1;
 }
 #endif /* !TITLE_RENDER_HOST_TEST */
+
+/* ==========================================================================
+ * Per-texture-type title rasterizers.
+ *
+ * The game loads per-song title textures from nutdata; for runtime-injected
+ * custom songs there is no such file, so the texretr hook (songselect_natives.c)
+ * renders them live through these. One entry point per texture type keeps each
+ * texture's size + style in one editable place, ported 1:1 to the Python tool.
+ * ======================================================================== */
+
+/* Category palette index -> SHORT-title outline colour (see #defines above). */
+unsigned int taiko_title_category_outline(int palette_index) {
+    switch (((palette_index % 8) + 8) % 8) {
+    case 0:  return TITLE_CAT_OUTLINE_CYAN;
+    case 1:  return TITLE_CAT_OUTLINE_PINK;
+    case 2:  return TITLE_CAT_OUTLINE_GREEN;
+    case 3:  return TITLE_CAT_OUTLINE_ORANGE;
+    case 4:  return TITLE_CAT_OUTLINE_YELLOW;
+    case 5:  return TITLE_CAT_OUTLINE_BROWN;
+    case 6:  return TITLE_CAT_OUTLINE_RED;
+    default: return TITLE_CAT_OUTLINE_PALE;
+    }
+}
+
+int title_tex_dims(unsigned int type, unsigned int *w, unsigned int *h) {
+    unsigned int tw;
+    unsigned int th;
+
+    switch (type) {
+    case TITLE_TEX_SONGLIST_LONG:
+        tw = TITLE_DIM_LONG_W;  th = TITLE_DIM_LONG_H;  break;
+    case TITLE_TEX_SONGLIST_SHORT:
+        tw = TITLE_DIM_SHORT_W; th = TITLE_DIM_SHORT_H; break;
+    case TITLE_TEX_SONG_NAME_HUD:
+    case TITLE_TEX_SONG_NAME_TRANS:
+        tw = TITLE_DIM_NAME_W;  th = TITLE_DIM_NAME_H;  break;
+    default:
+        return 0;
+    }
+    if (w) *w = tw;
+    if (h) *h = th;
+    return 1;
+}
+
+int title_tex_render(unsigned int type, const char *title, void *px,
+                     unsigned int w, unsigned int h,
+                     unsigned int genre_outline_rgb) {
+    if (!title || !px)
+        return 0;
+
+    switch (type) {
+    case TITLE_TEX_SONGLIST_LONG: {
+        /* 96x400 vertical, selected song in the yellow panel: genre-coloured
+         * outline (0 -> default). The game column-splits long titles; render
+         * via the columns path (one column here) so the split logic can be
+         * tuned later without changing the call site. */
+        const char *cols[1] = { title };
+        return taiko_title_render_columns_argb(cols, 1, px, w, h,
+                                               genre_outline_rgb ? genre_outline_rgb
+                                                                 : TITLE_OUTLINE_DEFAULT);
+    }
+    case TITLE_TEX_SONGLIST_SHORT:
+        /* 56x400 vertical, side-column spines: always-black outline (crisp
+         * white text on the shelf). */
+        return taiko_title_render_argb(title, px, w, h, TITLE_OUTLINE_BLACK);
+    case TITLE_TEX_SONG_NAME_HUD:
+        /* 720x64 horizontal HUD (enso) title, black outline. */
+        return taiko_text_render_argb(title, px, w, h, TITLE_OUTLINE_BLACK) > 0;
+    case TITLE_TEX_SONG_NAME_TRANS:
+        /* 720x64 horizontal rainbow-transition title, black outline. */
+        return taiko_text_render_argb(title, px, w, h, TITLE_OUTLINE_BLACK) > 0;
+    default:
+        return 0;
+    }
+}

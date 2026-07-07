@@ -4838,30 +4838,7 @@ static void install_texload_log_hook(void) {
 #define SSN_TEXRETR_EXPECT_INSTR 0x3d20446fu
 
 static int ssn_rt_title_dims(uint32_t type, uint32_t *w, uint32_t *h) {
-    if (type == 9u) {
-        if (w)
-            *w = SSN_RT_TITLE_LONG_W;
-        if (h)
-            *h = SSN_RT_TITLE_H;
-        return 1;
-    }
-    if (type == 10u) {
-        if (w)
-            *w = SSN_RT_TITLE_SHORT_W;
-        if (h)
-            *h = SSN_RT_TITLE_H;
-        return 1;
-    }
-    if (type == 11u || type == 12u) {
-        /* type 11 = gameplay HUD song_name, type 12 = scene-change (rainbow
-         * transition) song_name; same per-song horizontal title texture. */
-        if (w)
-            *w = SSN_RT_SONG_NAME_W;
-        if (h)
-            *h = SSN_RT_SONG_NAME_H;
-        return 1;
-    }
-    return 0;
+    return title_tex_dims(type, w, h);
 }
 
 static const char *ssn_rt_title_text(uint32_t index) {
@@ -5011,21 +4988,14 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
     if (!title)
         return 0;
     {
-        unsigned int outline = SSN_RT_TITLE_OUTLINE;
-        int ok;
-        if (index < g_ssn_virtual_song_count &&
-            g_ssn_virtual_songs[index].outline)
-            outline = g_ssn_virtual_songs[index].outline;
-        if (type == 11u || type == 12u)
-            outline = 0x000000u;
+        /* Per-type rasterizer lives in title_textures.c; pass the song's
+         * category outline (only the short songlist texture uses it). */
+        uint32_t genre_outline = 0;
+        if (index < g_ssn_virtual_song_count)
+            genre_outline = g_ssn_virtual_songs[index].outline;
         memset(g_rt_title_pixels, 0, w * h * 4u);
-        if (type == 11u || type == 12u)
-            ok = taiko_text_render_argb(title, g_rt_title_pixels, w, h,
-                                        outline) > 0;
-        else
-            ok = taiko_title_render_argb(title, g_rt_title_pixels, w, h,
-                                         outline);
-        if (!ok)
+        if (!title_tex_render(type, title, g_rt_title_pixels, w, h,
+                              genre_outline))
             return 0;
     }
 

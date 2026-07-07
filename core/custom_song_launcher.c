@@ -376,11 +376,10 @@ static struct {
 
 /* Darken a tab's ARGB to ~45% for the glyph outline, like the game. */
 static unsigned int outline_for_palette(int palette_index) {
-    unsigned int c = taiko_overlay_carousel_color_argb(palette_index);
-    unsigned int r = ((c >> 16) & 0xff) * 45 / 100;
-    unsigned int g = ((c >> 8) & 0xff) * 45 / 100;
-    unsigned int b = (c & 0xff) * 45 / 100;
-    return (r << 16) | (g << 8) | b;
+    /* Title-outline colours are the single source of truth in title_render.c
+     * (carousel swatch darkened to 45%), so the on-device render and the
+     * Python title tool stay in lockstep. */
+    return taiko_title_category_outline(palette_index);
 }
 
 static void render_lock(void) {
