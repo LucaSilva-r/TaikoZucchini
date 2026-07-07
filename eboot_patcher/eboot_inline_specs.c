@@ -22,6 +22,50 @@ extern const uint8_t taiko_kimidori_dani_type10_ready_hook_start[];
 extern const uint8_t taiko_kimidori_dani_type10_ready_hook_end[];
 extern const uint8_t taiko_kimidori_dani_resource_retain_hook_start[];
 extern const uint8_t taiko_kimidori_dani_resource_retain_hook_end[];
+extern const uint8_t taiko_momoiro_dani_resource_retain_hook_start[];
+extern const uint8_t taiko_momoiro_dani_resource_retain_hook_end[];
+extern const uint8_t taiko_momoiro_dani_type10_ready_hook_start[];
+extern const uint8_t taiko_momoiro_dani_type10_ready_hook_end[];
+extern const uint8_t taiko_momoiro_dani_emit_gate_hook_start[];
+extern const uint8_t taiko_momoiro_dani_emit_gate_hook_end[];
+extern const uint8_t taiko_momoiro_dani_select_row_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_select_row_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state10_set_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state10_set_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state10_result_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state10_result_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state10_prep_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state10_prep_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state10_after_queue_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state10_after_queue_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state11_expire_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state11_expire_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state8_result_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state8_result_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state8_to12_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state8_to12_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state12_entry_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state12_entry_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_state12_mode_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_state12_mode_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_dojo_ctor4_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_dojo_ctor4_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_dojo_ctor5_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_dojo_ctor5_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_status_set_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_status_set_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_status2_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_status2_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_status1_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_status1_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_callback_success_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_callback_success_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_callback_result_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_callback_result_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_request_index_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_request_index_diag_hook_end[];
+extern const uint8_t taiko_momoiro_dani_network_request_status2_diag_hook_start[];
+extern const uint8_t taiko_momoiro_dani_network_request_status2_diag_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
 
@@ -79,6 +123,151 @@ static const uint32_t MOMOIRO_ROW_WORDS[] = {
 };
 
 static const uint32_t ROW_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint32_t MOMOIRO_DANI_SELECT_ROW_WORDS[] = {
+    0x83E90000u, /* lwz r31,0(r9) */
+    0x2F9F000Du, /* cmpwi cr7,r31,0x0d */
+    0x419D0F48u, /* bgt cr7,loc_B7504 */
+    0x2F9F000Cu, /* cmpwi cr7,r31,0x0c */
+};
+
+static const uint32_t MOMOIRO_DANI_SELECT_ROW_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint32_t MOMOIRO_DANI_STATE10_SET_WORDS[] = {
+    0x39200004u, /* li r9,4 */
+    0x3800000Au, /* li r0,0x0a */
+    0x913B0014u, /* stw r9,0x14(r27) */
+    0x901B0010u, /* stw r0,0x10(r27) */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE10_RESULT_WORDS[] = {
+    0x419E071Cu, /* beq cr7,loc_B70DC */
+    0x813B0014u, /* lwz r9,0x14(r27) */
+    0x3960003Cu, /* li r11,0x3c */
+    0x3809FFFCu, /* addi r0,r9,-4 */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE10_PREP_WORDS[] = {
+    0x387900E4u, /* addi r3,r25,0xe4 */
+    0x38800006u, /* li r4,6 */
+    0x78630020u, /* clrldi r3,r3,32 */
+    0x38A00007u, /* li r5,7 */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE10_AFTER_QUEUE_WORDS[] = {
+    0x60000000u, /* nop */
+    0x4BFFEF30u, /* b loc_B69EC */
+    0x39E00000u, /* li r15,0 */
+    0x4BFFFB44u, /* b loc_B7608 */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE11_EXPIRE_WORDS[] = {
+    0x3800FFFFu, /* li r0,-1 */
+    0x39200008u, /* li r9,8 */
+    0x90030210u, /* stw r0,0x210(r3) */
+    0x91230010u, /* stw r9,0x10(r3) */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE8_RESULT_WORDS[] = {
+    0x419EF998u, /* beq cr7,loc_B5FF8 */
+    0x381B00E4u, /* addi r0,r27,0xe4 */
+    0x781F0020u, /* clrldi r31,r0,32 */
+    0x7FE3FB78u, /* mr r3,r31 */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE8_TO12_WORDS[] = {
+    0x901B0010u, /* stw r0,0x10(r27) */
+    0x4BFFF96Cu, /* b loc_B5FF8 */
+    0x39430070u, /* addi r10,r3,0x70 */
+    0x816A0010u, /* lwz r11,0x10(r10) */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE12_ENTRY_WORDS[] = {
+    0x386300A4u, /* addi r3,r3,0xa4 */
+    0x835B000Cu, /* lwz r26,0xc(r27) */
+    0x78630020u, /* clrldi r3,r3,32 */
+    0x4805B61Du, /* bl sub_1117DC */
+};
+
+static const uint32_t MOMOIRO_DANI_STATE12_MODE_WORDS[] = {
+    0x83BB0014u, /* lwz r29,0x14(r27) */
+    0x7C7E1B78u, /* mr r30,r3 */
+    0x2B9D0005u, /* cmplwi cr7,r29,5 */
+    0x419D09D4u, /* bgt cr7,def_B61F0 */
+};
+
+static const uint32_t MOMOIRO_DANI_DOJO_CTOR4_WORDS[] = {
+    0x48470A0Du, /* bl sub_527880 */
+    0x60000000u, /* nop */
+    0x78630020u, /* clrldi r3,r3,32 */
+    0x7BC40020u, /* clrldi r4,r30,32 */
+};
+
+static const uint32_t MOMOIRO_DANI_DOJO_CTOR5_WORDS[] = {
+    0x48470BEDu, /* bl sub_527880 */
+    0x60000000u, /* nop */
+    0x7C7F1B78u, /* mr r31,r3 */
+    0x7BC40020u, /* clrldi r4,r30,32 */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_STATUS_SET_WORDS[] = {
+    0x2F9E0002u, /* cmpwi cr7,r30,2 */
+    0x419E0060u, /* beq cr7,loc_116438 */
+    0x419D0038u, /* bgt cr7,loc_116414 */
+    0x2F9E0001u, /* cmpwi cr7,r30,1 */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_STATUS2_WORDS[] = {
+    0x881F00ABu, /* lbz r0,0xab(r31) */
+    0x2F800000u, /* cmpwi cr7,r0,0 */
+    0x419E0024u, /* beq cr7,loc_116B84 */
+    0x889F00AAu, /* lbz r4,0xaa(r31) */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_STATUS1_WORDS[] = {
+    0x893D00A8u, /* lbz r9,0xa8(r29) */
+    0x381D000Cu, /* addi r0,r29,0xc */
+    0x2F890000u, /* cmpwi cr7,r9,0 */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_WORDS[] = {
+    0x8122AE80u, /* lwz r9,(off_AC36A0 - 0xAC8820)(r2) */
+    0x7C0802A6u, /* mflr r0 */
+    0xF821FF71u, /* stdu r1,back_chain(r1) */
+    0xF80100A0u, /* std r0,0x90+sender_lr(r1) */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_WORDS[] = {
+    0x8122AE80u, /* lwz r9,(off_AC36A0 - 0xAC8820)(r2) */
+    0x7C0802A6u, /* mflr r0 */
+    0xF821FDA1u, /* stdu r1,back_chain(r1) */
+    0xF8010270u, /* std r0,0x260+sender_lr(r1) */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_REQUEST_INDEX_WORDS[] = {
+    0x815C00E8u, /* lwz r10,0xe8(r28) */
+    0x79490020u, /* clrldi r9,r10,32 */
+    0x7D5E5378u, /* mr r30,r10 */
+    0x81690004u, /* lwz r11,4(r9) */
+};
+
+static const uint32_t MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_WORDS[] = {
+    0x4BFFF949u, /* bl sub_116360 */
+    0x38600001u, /* li r3,1 */
+    0x4BFFFE94u, /* b loc_1168B4 */
+};
+
+static const uint32_t MOMOIRO_DANI_DIAG_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
     0xFFFFFFFFu,
     0xFFFFFFFFu,
 };
@@ -429,6 +618,78 @@ static const eboot_inline_signature_t
         },
     };
 
+static const uint32_t MOMOIRO_DANI_TYPE10_READY_WORDS[] = {
+    0x60000000u, /* nop */
+    0x8001009Cu, /* lwz r0,0x9C(r1) */
+    0x2B80000Fu, /* cmplwi cr7,r0,0xF */
+    0x38610088u, /* addi r3,r1,0x88 */
+    0x409D0008u, /* ble cr7,+8 */
+};
+
+static const uint32_t MOMOIRO_DANI_TYPE10_READY_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint32_t MOMOIRO_DANI_TYPE10_READY_CONTEXT_WORDS[] = {
+    0x787F0020u, /* clrldi r31,r3,32 */
+    0x7FC507B4u, /* extsw r5,r30 */
+    0x38610084u, /* addi r3,r1,0x84 */
+    0x7FE6FB78u, /* mr r6,r31 */
+    0x484403E1u, /* bl sub_46E7F0 */
+};
+
+static const uint32_t MOMOIRO_DANI_TYPE10_READY_CONTEXT_MASKS[] = {
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+    0xFFFFFFFFu,
+};
+
+static const uint8_t MOMOIRO_DANI_TYPE10_READY_CONTEXT_MATCH_TYPES[] = {
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_WORD,
+    EBOOT_INLINE_MATCH_BRANCH_LINK_TARGET,
+};
+
+static const uint32_t MOMOIRO_DANI_TYPE10_READY_CONTEXT_BRANCH_TARGETS[] = {
+    0u,
+    0u,
+    0u,
+    0u,
+    0x0046E7F0u,
+};
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_TYPE10_READY_SIGNATURES[] = {
+        {
+            "momoiro Dani RequestFillrect nop",
+            0x0002E414u,
+            MOMOIRO_DANI_TYPE10_READY_WORDS,
+            MOMOIRO_DANI_TYPE10_READY_MASKS,
+            sizeof(MOMOIRO_DANI_TYPE10_READY_WORDS) /
+                sizeof(MOMOIRO_DANI_TYPE10_READY_WORDS[0]),
+            NULL,
+            NULL,
+        },
+        {
+            "momoiro Dani RequestFillrect context",
+            0x0002E400u,
+            MOMOIRO_DANI_TYPE10_READY_CONTEXT_WORDS,
+            MOMOIRO_DANI_TYPE10_READY_CONTEXT_MASKS,
+            sizeof(MOMOIRO_DANI_TYPE10_READY_CONTEXT_WORDS) /
+                sizeof(MOMOIRO_DANI_TYPE10_READY_CONTEXT_WORDS[0]),
+            MOMOIRO_DANI_TYPE10_READY_CONTEXT_MATCH_TYPES,
+            MOMOIRO_DANI_TYPE10_READY_CONTEXT_BRANCH_TARGETS,
+        },
+    };
+
 static const uint32_t KIMIDORI_DANI_RESOURCE_RETAIN_WORDS[] = {
     0x4BFD86F5u, /* bl sub_3BF608 */
     0x60000000u, /* nop */
@@ -495,6 +756,37 @@ static const eboot_inline_signature_t
         },
     };
 
+static const uint32_t MOMOIRO_DANI_RESOURCE_RETAIN_BRANCH_TARGETS[] = {
+    0x003955CCu,
+    0u,
+    0u,
+    0u,
+};
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_RESOURCE_RETAIN_SIGNATURES[] = {
+        {
+            "momoiro Dani resource registry insert call",
+            0x003BCED8u,
+            KIMIDORI_DANI_RESOURCE_RETAIN_WORDS,
+            KIMIDORI_DANI_RESOURCE_RETAIN_MASKS,
+            sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_WORDS) /
+                sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_WORDS[0]),
+            KIMIDORI_DANI_RESOURCE_RETAIN_MATCH_TYPES,
+            MOMOIRO_DANI_RESOURCE_RETAIN_BRANCH_TARGETS,
+        },
+        {
+            "momoiro Dani resource registry insert context",
+            0x003BCEC8u,
+            KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS,
+            KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_MASKS,
+            sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS) /
+                sizeof(KIMIDORI_DANI_RESOURCE_RETAIN_CONTEXT_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
 static const uint32_t MOMOIRO_DANI_EMIT_BRANCH_TARGETS[] = {
     0x005285D0u,
     0u,
@@ -534,6 +826,258 @@ static const eboot_inline_signature_t MOMOIRO_DANI_EMIT_SIGNATURES[] = {
         MOMOIRO_DANI_ROW_BRANCH_TARGETS,
     },
 };
+
+static const eboot_inline_signature_t MOMOIRO_DANI_SELECT_ROW_SIGNATURES[] = {
+    {
+        "momoiro Dani state-6 row type dispatch",
+        0x000B65B4u,
+        MOMOIRO_DANI_SELECT_ROW_WORDS,
+        MOMOIRO_DANI_SELECT_ROW_MASKS,
+        sizeof(MOMOIRO_DANI_SELECT_ROW_WORDS) /
+            sizeof(MOMOIRO_DANI_SELECT_ROW_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE10_SET_SIGNATURES[] = {
+    {
+        "momoiro Dani row dispatch sets mode 4 state 10",
+        0x000B7894u,
+        MOMOIRO_DANI_STATE10_SET_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE10_SET_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE10_SET_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE10_RESULT_SIGNATURES[] = {
+    {
+        "momoiro Dani state-10 readiness branch",
+        0x000B69C0u,
+        MOMOIRO_DANI_STATE10_RESULT_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE10_RESULT_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE10_RESULT_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE10_PREP_SIGNATURES[] = {
+    {
+        "momoiro Dani state-10 mode-4 setup branch",
+        0x000B7AA4u,
+        MOMOIRO_DANI_STATE10_PREP_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE10_PREP_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE10_PREP_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE10_AFTER_QUEUE_SIGNATURES[] = {
+    {
+        "momoiro Dani state-10 post queue diagnostics",
+        0x000B7AB8u,
+        MOMOIRO_DANI_STATE10_AFTER_QUEUE_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE10_AFTER_QUEUE_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE10_AFTER_QUEUE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE11_EXPIRE_SIGNATURES[] = {
+    {
+        "momoiro Dani state-11 countdown expiry",
+        0x000B6A0Cu,
+        MOMOIRO_DANI_STATE11_EXPIRE_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE11_EXPIRE_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE11_EXPIRE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE8_RESULT_SIGNATURES[] = {
+    {
+        "momoiro Dani state-8 readiness branch",
+        0x000B6660u,
+        MOMOIRO_DANI_STATE8_RESULT_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE8_RESULT_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE8_RESULT_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE8_TO12_SIGNATURES[] = {
+    {
+        "momoiro Dani state-8 transition to state 12",
+        0x000B6688u,
+        MOMOIRO_DANI_STATE8_TO12_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE8_TO12_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE8_TO12_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE12_ENTRY_SIGNATURES[] = {
+    {
+        "momoiro Dani state-12 entry",
+        0x000B61B4u,
+        MOMOIRO_DANI_STATE12_ENTRY_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE12_ENTRY_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE12_ENTRY_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_STATE12_MODE_SIGNATURES[] = {
+    {
+        "momoiro Dani state-12 mode dispatch",
+        0x000B61C8u,
+        MOMOIRO_DANI_STATE12_MODE_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_STATE12_MODE_WORDS) /
+            sizeof(MOMOIRO_DANI_STATE12_MODE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_DOJO_CTOR4_SIGNATURES[] = {
+    {
+        "momoiro Dani mode-4 DojoSelect constructor call",
+        0x000B6E74u,
+        MOMOIRO_DANI_DOJO_CTOR4_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_DOJO_CTOR4_WORDS) /
+            sizeof(MOMOIRO_DANI_DOJO_CTOR4_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_DOJO_CTOR5_SIGNATURES[] = {
+    {
+        "momoiro Dani mode-5 DojoSelect constructor call",
+        0x000B6C94u,
+        MOMOIRO_DANI_DOJO_CTOR5_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_DOJO_CTOR5_WORDS) /
+            sizeof(MOMOIRO_DANI_DOJO_CTOR5_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_NETWORK_STATUS_SET_SIGNATURES[] = {
+        {
+            "momoiro Dani network wait status setter",
+            0x001163D4u,
+            MOMOIRO_DANI_NETWORK_STATUS_SET_WORDS,
+            MOMOIRO_DANI_DIAG_MASKS,
+            sizeof(MOMOIRO_DANI_NETWORK_STATUS_SET_WORDS) /
+                sizeof(MOMOIRO_DANI_NETWORK_STATUS_SET_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
+static const eboot_inline_signature_t MOMOIRO_DANI_NETWORK_STATUS2_SIGNATURES[] = {
+    {
+        "momoiro Dani network wait status-2 handler",
+        0x00116B58u,
+        MOMOIRO_DANI_NETWORK_STATUS2_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_NETWORK_STATUS2_WORDS) /
+            sizeof(MOMOIRO_DANI_NETWORK_STATUS2_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t MOMOIRO_DANI_NETWORK_STATUS1_SIGNATURES[] = {
+    {
+        "momoiro Dani network wait status-1 ready handler",
+        0x001189B4u,
+        MOMOIRO_DANI_NETWORK_STATUS1_WORDS,
+        MOMOIRO_DANI_DIAG_MASKS,
+        sizeof(MOMOIRO_DANI_NETWORK_STATUS1_WORDS) /
+            sizeof(MOMOIRO_DANI_NETWORK_STATUS1_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_SIGNATURES[] = {
+        {
+            "momoiro Dani network success callback",
+            0x0007B6D8u,
+            MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_WORDS,
+            MOMOIRO_DANI_DIAG_MASKS,
+            sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_WORDS) /
+                sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_SIGNATURES[] = {
+        {
+            "momoiro Dani network result callback",
+            0x0007B7B0u,
+            MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_WORDS,
+            MOMOIRO_DANI_DIAG_MASKS,
+            sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_WORDS) /
+                sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_NETWORK_REQUEST_INDEX_SIGNATURES[] = {
+        {
+            "momoiro Dani network request index",
+            0x00116790u,
+            MOMOIRO_DANI_NETWORK_REQUEST_INDEX_WORDS,
+            MOMOIRO_DANI_DIAG_MASKS,
+            sizeof(MOMOIRO_DANI_NETWORK_REQUEST_INDEX_WORDS) /
+                sizeof(MOMOIRO_DANI_NETWORK_REQUEST_INDEX_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
+
+static const eboot_inline_signature_t
+    MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_SIGNATURES[] = {
+        {
+            "momoiro Dani network request status-2 rearm",
+            0x00116A18u,
+            MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_WORDS,
+            MOMOIRO_DANI_DIAG_MASKS,
+            sizeof(MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_WORDS) /
+                sizeof(MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_WORDS[0]),
+            NULL,
+            NULL,
+        },
+    };
 
 static const eboot_inline_signature_t WHITE_DANI_TAIKOJUKU_SIGNATURES[] = {
     {
@@ -790,14 +1334,318 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         MOMOIRO_DANI_EMIT_SIGNATURES,
         sizeof(MOMOIRO_DANI_EMIT_SIGNATURES) /
             sizeof(MOMOIRO_DANI_EMIT_SIGNATURES[0]),
-        taiko_pre_red_dani_emit_gate_hook_start,
-        taiko_pre_red_dani_emit_gate_hook_end,
+        taiko_momoiro_dani_emit_gate_hook_start,
+        taiko_momoiro_dani_emit_gate_hook_end,
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x00528544u,
         NULL,
-        patch_pre_red_dani_emit_payload,
-        { 25u, 0x18u, 0x00528544u, 0x005285D0u },
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-select-row-diag",
+        0x000B65B4u,
+        MOMOIRO_DANI_SELECT_ROW_SIGNATURES,
+        sizeof(MOMOIRO_DANI_SELECT_ROW_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_SELECT_ROW_SIGNATURES[0]),
+        taiko_momoiro_dani_select_row_diag_hook_start,
+        taiko_momoiro_dani_select_row_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B65B8u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state10-set-diag",
+        0x000B7894u,
+        MOMOIRO_DANI_STATE10_SET_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE10_SET_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE10_SET_SIGNATURES[0]),
+        taiko_momoiro_dani_state10_set_diag_hook_start,
+        taiko_momoiro_dani_state10_set_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B7898u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state10-result-diag",
+        0x000B69C0u,
+        MOMOIRO_DANI_STATE10_RESULT_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE10_RESULT_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE10_RESULT_SIGNATURES[0]),
+        taiko_momoiro_dani_state10_result_diag_hook_start,
+        taiko_momoiro_dani_state10_result_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B69C4u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state10-prep-diag",
+        0x000B7AA4u,
+        MOMOIRO_DANI_STATE10_PREP_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE10_PREP_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE10_PREP_SIGNATURES[0]),
+        taiko_momoiro_dani_state10_prep_diag_hook_start,
+        taiko_momoiro_dani_state10_prep_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B7AA8u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state10-after-queue-diag",
+        0x000B7AB8u,
+        MOMOIRO_DANI_STATE10_AFTER_QUEUE_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE10_AFTER_QUEUE_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE10_AFTER_QUEUE_SIGNATURES[0]),
+        taiko_momoiro_dani_state10_after_queue_diag_hook_start,
+        taiko_momoiro_dani_state10_after_queue_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B7ABCu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state11-expire-diag",
+        0x000B6A0Cu,
+        MOMOIRO_DANI_STATE11_EXPIRE_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE11_EXPIRE_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE11_EXPIRE_SIGNATURES[0]),
+        taiko_momoiro_dani_state11_expire_diag_hook_start,
+        taiko_momoiro_dani_state11_expire_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B6A10u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state8-result-diag",
+        0x000B6660u,
+        MOMOIRO_DANI_STATE8_RESULT_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE8_RESULT_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE8_RESULT_SIGNATURES[0]),
+        taiko_momoiro_dani_state8_result_diag_hook_start,
+        taiko_momoiro_dani_state8_result_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B6664u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state8-to12-diag",
+        0x000B6688u,
+        MOMOIRO_DANI_STATE8_TO12_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE8_TO12_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE8_TO12_SIGNATURES[0]),
+        taiko_momoiro_dani_state8_to12_diag_hook_start,
+        taiko_momoiro_dani_state8_to12_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B668Cu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state12-entry-diag",
+        0x000B61B4u,
+        MOMOIRO_DANI_STATE12_ENTRY_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE12_ENTRY_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE12_ENTRY_SIGNATURES[0]),
+        taiko_momoiro_dani_state12_entry_diag_hook_start,
+        taiko_momoiro_dani_state12_entry_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B61B8u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-state12-mode-diag",
+        0x000B61C8u,
+        MOMOIRO_DANI_STATE12_MODE_SIGNATURES,
+        sizeof(MOMOIRO_DANI_STATE12_MODE_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_STATE12_MODE_SIGNATURES[0]),
+        taiko_momoiro_dani_state12_mode_diag_hook_start,
+        taiko_momoiro_dani_state12_mode_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B61CCu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-dojo-ctor4-diag",
+        0x000B6E74u,
+        MOMOIRO_DANI_DOJO_CTOR4_SIGNATURES,
+        sizeof(MOMOIRO_DANI_DOJO_CTOR4_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_DOJO_CTOR4_SIGNATURES[0]),
+        taiko_momoiro_dani_dojo_ctor4_diag_hook_start,
+        taiko_momoiro_dani_dojo_ctor4_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B6E78u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-dojo-ctor5-diag",
+        0x000B6C94u,
+        MOMOIRO_DANI_DOJO_CTOR5_SIGNATURES,
+        sizeof(MOMOIRO_DANI_DOJO_CTOR5_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_DOJO_CTOR5_SIGNATURES[0]),
+        taiko_momoiro_dani_dojo_ctor5_diag_hook_start,
+        taiko_momoiro_dani_dojo_ctor5_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x000B6C98u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-status-set-diag",
+        0x001163D4u,
+        MOMOIRO_DANI_NETWORK_STATUS_SET_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_STATUS_SET_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_STATUS_SET_SIGNATURES[0]),
+        taiko_momoiro_dani_network_status_set_diag_hook_start,
+        taiko_momoiro_dani_network_status_set_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x001163D8u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-status2-diag",
+        0x00116B58u,
+        MOMOIRO_DANI_NETWORK_STATUS2_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_STATUS2_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_STATUS2_SIGNATURES[0]),
+        taiko_momoiro_dani_network_status2_diag_hook_start,
+        taiko_momoiro_dani_network_status2_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x00116B5Cu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-status1-diag",
+        0x001189B4u,
+        MOMOIRO_DANI_NETWORK_STATUS1_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_STATUS1_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_STATUS1_SIGNATURES[0]),
+        taiko_momoiro_dani_network_status1_diag_hook_start,
+        taiko_momoiro_dani_network_status1_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x001189B8u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-callback-success-diag",
+        0x0007B6D8u,
+        MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_SUCCESS_SIGNATURES[0]),
+        taiko_momoiro_dani_network_callback_success_diag_hook_start,
+        taiko_momoiro_dani_network_callback_success_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0007B6DCu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-callback-result-diag",
+        0x0007B7B0u,
+        MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_CALLBACK_RESULT_SIGNATURES[0]),
+        taiko_momoiro_dani_network_callback_result_diag_hook_start,
+        taiko_momoiro_dani_network_callback_result_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0007B7B4u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-request-index-diag",
+        0x00116790u,
+        MOMOIRO_DANI_NETWORK_REQUEST_INDEX_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_REQUEST_INDEX_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_REQUEST_INDEX_SIGNATURES[0]),
+        taiko_momoiro_dani_network_request_index_diag_hook_start,
+        taiko_momoiro_dani_network_request_index_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x00116794u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-network-request-status2-diag",
+        0x00116A18u,
+        MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_SIGNATURES,
+        sizeof(MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_NETWORK_REQUEST_STATUS2_SIGNATURES[0]),
+        taiko_momoiro_dani_network_request_status2_diag_hook_start,
+        taiko_momoiro_dani_network_request_status2_diag_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x00116A1Cu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
     },
     {
         "dani_dojo_unlock",
@@ -859,6 +1707,38 @@ static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
         4u,
         EBOOT_INLINE_RETURN_EXPLICIT,
         0x003E6F18u,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-resource-retain",
+        0x003BCED8u,
+        MOMOIRO_DANI_RESOURCE_RETAIN_SIGNATURES,
+        sizeof(MOMOIRO_DANI_RESOURCE_RETAIN_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_RESOURCE_RETAIN_SIGNATURES[0]),
+        taiko_momoiro_dani_resource_retain_hook_start,
+        taiko_momoiro_dani_resource_retain_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x003BCEDCu,
+        NULL,
+        NULL,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "dani_dojo_unlock",
+        "momoiro-v04r00-dani-type10-ready",
+        0x0002E414u,
+        MOMOIRO_DANI_TYPE10_READY_SIGNATURES,
+        sizeof(MOMOIRO_DANI_TYPE10_READY_SIGNATURES) /
+            sizeof(MOMOIRO_DANI_TYPE10_READY_SIGNATURES[0]),
+        taiko_momoiro_dani_type10_ready_hook_start,
+        taiko_momoiro_dani_type10_ready_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_EXPLICIT,
+        0x0002E418u,
         NULL,
         NULL,
         { 0u, 0u, 0u, 0u },

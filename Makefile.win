@@ -119,6 +119,10 @@ ASM_OBJS = patches\asm\white_dani_taikojuku_hook.o \
            patches\asm\kimidori_dani_proc_main_hook.o \
            patches\asm\kimidori_dani_type10_ready_hook.o \
            patches\asm\kimidori_dani_resource_retain_hook.o \
+           patches\asm\momoiro_dani_emit_select_hook.o \
+           patches\asm\momoiro_dani_resource_retain_hook.o \
+           patches\asm\momoiro_dani_state_diag_hooks.o \
+           patches\asm\momoiro_dani_type10_ready_hook.o \
            patches\asm\pre_red_dani_emit_gate_hook.o
 
 SPU_QR_ELF = $(BIN_DIR)\qr_spu.elf
@@ -299,6 +303,18 @@ patches\asm\kimidori_dani_type10_ready_hook.o: patches\asm\kimidori_dani_type10_
 
 patches\asm\kimidori_dani_resource_retain_hook.o: patches\asm\kimidori_dani_resource_retain_hook.S
 	$(PPU_CC) $(CFLAGS) -c patches\asm\kimidori_dani_resource_retain_hook.S -o $@
+
+patches\asm\momoiro_dani_emit_select_hook.o: patches\asm\momoiro_dani_emit_select_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\momoiro_dani_emit_select_hook.S -o $@
+
+patches\asm\momoiro_dani_resource_retain_hook.o: patches\asm\momoiro_dani_resource_retain_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\momoiro_dani_resource_retain_hook.S -o $@
+
+patches\asm\momoiro_dani_state_diag_hooks.o: patches\asm\momoiro_dani_state_diag_hooks.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\momoiro_dani_state_diag_hooks.S -o $@
+
+patches\asm\momoiro_dani_type10_ready_hook.o: patches\asm\momoiro_dani_type10_ready_hook.S
+	$(PPU_CC) $(CFLAGS) -c patches\asm\momoiro_dani_type10_ready_hook.S -o $@
 
 patches\asm\pre_red_dani_emit_gate_hook.o: patches\asm\pre_red_dani_emit_gate_hook.S
 	$(PPU_CC) $(CFLAGS) -c patches\asm\pre_red_dani_emit_gate_hook.S -o $@
