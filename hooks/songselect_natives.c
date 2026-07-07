@@ -4853,6 +4853,9 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
     }
     *(volatile uint32_t *)(uintptr_t)(res + 0x34u) = slot->buf;
     *(volatile uint32_t *)(uintptr_t)(res + 0x30u) = slot->io;  /* our offset */
+    *(volatile uint32_t *)(uintptr_t)(res + 0x20u) = 0x0000aae4u; /* std ARGB
+        remap: the A1R5G5B5-derived default routed alpha from the wrong texel
+        component, so the opaque outline sampled as transparent. */
     *(volatile uint32_t *)(uintptr_t)(res + 0x18u) = 1u;        /* main mem */
     *(volatile uint32_t *)(uintptr_t)(res + 0x08u) = key;
     icache_flush((void *)(uintptr_t)res, 0x40u);
