@@ -286,6 +286,11 @@ static uint32_t g_basic_musicid_lookup_desc[2] = { 0x00632b5cu, 0x01037a88u };
 typedef uint32_t *(*basic_musicid_lookup_fn)(uint32_t *out,
                                              uint32_t map,
                                              uint32_t key_record);
+static uint32_t g_basic_lookup_hook_installed;
+static uint32_t g_custom_basic_meta[SSN_INJECT_MAX][0x44u];
+static uint32_t g_custom_basic_meta_ready[SSN_INJECT_MAX];
+static uint32_t g_current_custom_song_index;
+static uint32_t g_current_custom_song_valid;
 static uint32_t g_orig_RequestFillrect_desc[2];
 
 /*
@@ -311,11 +316,13 @@ typedef int (*nu_tex_info_upload_fn)(uint32_t resource, void *pixels,
 #define SSN_RT_TITLE_LONG_W    96u
 #define SSN_RT_TITLE_SHORT_W   56u
 #define SSN_RT_TITLE_H         400u
-#define SSN_RT_TITLE_PIXELS    (SSN_RT_TITLE_LONG_W * SSN_RT_TITLE_H)
+#define SSN_RT_SONG_NAME_W     720u
+#define SSN_RT_SONG_NAME_H     64u
+#define SSN_RT_MAX_PIXELS      (SSN_RT_SONG_NAME_W * SSN_RT_SONG_NAME_H)
 #define SSN_RT_TITLE_OUTLINE   0x141428u
 #define SSN_NU_TEX_ALLOC_MGR_CELL (0x01037a88u + 0x0000779cu)
 
-static uint32_t g_rt_title_pixels[SSN_RT_TITLE_PIXELS]
+static uint32_t g_rt_title_pixels[SSN_RT_MAX_PIXELS]
     __attribute__((aligned(128)));
 
 static int ssn_get_board_range(uint32_t idx, uint32_t *start, uint32_t *count);
@@ -470,6 +477,43 @@ static void ssn_log_string_field(uint32_t str, const char *name) {
             dbg_print("<bad-heap-string>");
     }
     dbg_print("\n");
+}
+
+static int ssn_song_string_equals_value(uint32_t str, const char *expected) {
+    uint32_t len;
+    uint32_t cap;
+    uint32_t ptr0;
+    uint32_t ptr4;
+    uint32_t src;
+    uint32_t i;
+
+    if (!ssn_ptr_sane(str) || !expected)
+        return 0;
+
+    len = *(volatile uint32_t *)(uintptr_t)
+        (str + SSN_INLINE_STRING_LEN_OFF);
+    cap = *(volatile uint32_t *)(uintptr_t)
+        (str + SSN_INLINE_STRING_CAP_OFF);
+    ptr0 = *(volatile uint32_t *)(uintptr_t)(str + 0x00u);
+    ptr4 = *(volatile uint32_t *)(uintptr_t)(str + 0x04u);
+
+    if (cap <= SSN_INLINE_STRING_CAP) {
+        src = str + SSN_INLINE_STRING_BUF_OFF;
+    } else if (ssn_ptr_sane(ptr4)) {
+        src = ptr4;
+    } else if (ssn_ptr_sane(ptr0)) {
+        src = ptr0;
+    } else {
+        return 0;
+    }
+
+    for (i = 0; expected[i]; i++) {
+        if (i >= len)
+            return 0;
+        if (*(volatile const char *)(uintptr_t)(src + i) != expected[i])
+            return 0;
+    }
+    return i == len;
 }
 
 static void ssn_log_song_record(uint32_t rec, const char *label) {
@@ -2215,6 +2259,107 @@ static uint32_t ssn_basic_metadata_for_record(uint32_t rec) {
     return out;
 }
 
+static int ssn_virtual_index_for_record(uint32_t rec, uint32_t *out_index) {
+    uint32_t uid;
+
+    if (!ssn_ptr_sane(rec))
+        return 0;
+    uid = *(volatile uint32_t *)(uintptr_t)(rec + SSN_SONG_UNIQUEID_OFF);
+    if (uid >= SSN_CUSTOM_UID_BASE) {
+        uint32_t v = uid - SSN_CUSTOM_UID_BASE;
+        if (v < g_ssn_virtual_song_count && v < SSN_INJECT_MAX) {
+            if (out_index)
+                *out_index = v;
+            return 1;
+        }
+    }
+    for (uint32_t v = 0; v < g_ssn_virtual_song_count && v < SSN_INJECT_MAX; v++) {
+        if (ssn_song_string_equals_value(rec + SSN_SONG_MUSICID_OFF,
+                                         g_ssn_virtual_songs[v].short_id)) {
+            if (out_index)
+                *out_index = v;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static uint32_t ssn_custom_basic_metadata_for_record(uint32_t rec,
+                                                     uint32_t virtual_index) {
+    uint32_t donor_rec;
+    uint32_t donor_meta;
+    uint32_t *meta;
+    uint32_t stars[4];
+
+    if (virtual_index >= g_ssn_virtual_song_count || virtual_index >= SSN_INJECT_MAX)
+        return 0;
+
+    meta = g_custom_basic_meta[virtual_index];
+    if (!g_custom_basic_meta_ready[virtual_index]) {
+        donor_rec = ssn_display_record_by_absolute(1u);
+        if (!donor_rec)
+            donor_rec = ssn_source_record_by_absolute(1u);
+        donor_meta = ssn_basic_metadata_for_record(donor_rec);
+        if (!ssn_ptr_sane(donor_meta))
+            return 0;
+
+        memcpy(meta, (const void *)(uintptr_t)donor_meta,
+               sizeof g_custom_basic_meta[virtual_index]);
+        g_custom_basic_meta_ready[virtual_index] = 1;
+    }
+
+    ssn_write_inline_string((uint32_t)(uintptr_t)meta,
+                            g_ssn_virtual_songs[virtual_index].short_id);
+    for (unsigned i = 0; i < 4u; i++) {
+        int v = g_ssn_virtual_songs[virtual_index].song.stars[i];
+        if (v < 1)
+            v = 1;
+        if (v > 10)
+            v = 10;
+        stars[i] = (uint32_t)v;
+    }
+    mem_write_and_flush((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x1cu),
+                        stars, sizeof stars);
+    mem_write_and_flush((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x30u),
+                        stars, sizeof stars);
+
+    (void)rec;
+    return (uint32_t)(uintptr_t)meta;
+}
+
+int hk_basic_musicid_lookup(uint32_t *out, uint32_t map, uint32_t key_record);
+int hk_basic_musicid_lookup(uint32_t *out, uint32_t map, uint32_t key_record) {
+    static unsigned logged;
+    uint32_t virtual_index = 0;
+    uint32_t meta;
+
+    if (!out || !ssn_ptr_sane(map) || !ssn_ptr_sane(key_record))
+        return 0;
+    if (!ssn_virtual_index_for_record(key_record, &virtual_index))
+        return 0;
+
+    meta = ssn_custom_basic_metadata_for_record(key_record, virtual_index);
+    if (!meta)
+        return 0;
+
+    g_current_custom_song_index = virtual_index;
+    g_current_custom_song_valid = 1;
+
+    *out = meta;
+    if (logged < 12u) {
+        logged++;
+        dbg_print("[ssn] custom basic metadata lookup\n");
+        dbg_print_hex32("  map", map);
+        dbg_print_hex32("  key.record", key_record);
+        dbg_print_hex32("  virtual.index", virtual_index);
+        dbg_print_hex32("  meta", meta);
+        dbg_print("  short=");
+        dbg_print(g_ssn_virtual_songs[virtual_index].short_id);
+        dbg_print("\n");
+    }
+    return 1;
+}
+
 /* Customs are inserted into their genre folders, so their absolute indices are
  * scattered (not one contiguous block). g_ssn_inject_abs[v] = absolute index of
  * virtual song v; look it up by scanning. */
@@ -3362,6 +3507,7 @@ static void ssn_probe_slot_tex(void *vm) {
 
 static void install_texload_log_hook(void); /* defined after the hook macro */
 static void install_texretr_hook(void);      /* defined after the hook macro */
+static void install_basic_lookup_hook(void); /* defined after the hook macro */
 
 static void ssn_apply_custom_texture_remap_test(void *vm, uint32_t type) {
     static unsigned logged;
@@ -4497,6 +4643,88 @@ static int ssn_ppc_branch(uint32_t src, uint32_t dst, int link,
 }
 
 /*
+ * Basic music metadata lookup detour. The gameplay launch path asks the
+ * game-owned basic-metadata hash map for the selected song record; injected
+ * records have custom ids/musicids and do not exist in that map. Intercept only
+ * misses we can identify as our injected records, otherwise re-enter the
+ * original lookup at entry+4 after replaying its overwritten stack prologue.
+ */
+#define SSN_BASIC_LOOKUP_ENTRY        0x00632b5cu
+#define SSN_BASIC_LOOKUP_RETURN       0x00632b60u
+#define SSN_BASIC_LOOKUP_EXPECT_INSTR 0xf821ff31u
+
+extern char ssn_basic_lookup_detour_code[];
+__asm__(
+".globl ssn_basic_lookup_detour_code\n"
+"ssn_basic_lookup_detour_code:\n"
+"stdu 1,-0x120(1)\n"
+"mflr 0\n"
+"std 0,0x110(1)\n"
+"std 2,0x20(1)\n"
+"std 3,0x28(1)\n"
+"std 4,0x30(1)\n"
+"std 5,0x38(1)\n"
+"lis 11,hk_basic_musicid_lookup@ha\n"
+"ori 11,11,hk_basic_musicid_lookup@l\n"
+"lwz 12,0(11)\n"
+"lwz 2,4(11)\n"
+"mtctr 12\n"
+"bctrl\n"
+"cmpwi 3,0\n"
+"beq 1f\n"
+"ld 2,0x20(1)\n"
+"ld 3,0x28(1)\n"             /* original out pointer = function return */
+"ld 0,0x110(1)\n"
+"mtlr 0\n"
+"addi 1,1,0x120\n"
+"blr\n"
+"1:\n"
+"ld 2,0x20(1)\n"
+"ld 3,0x28(1)\n"
+"ld 4,0x30(1)\n"
+"ld 5,0x38(1)\n"
+"ld 0,0x110(1)\n"
+"mtlr 0\n"
+"addi 1,1,0x120\n"
+"stdu 1,-0xd0(1)\n"          /* re-execute overwritten original instruction */
+"lis 12,0x0063\n"
+"ori 12,12,0x2b60\n"          /* jump to SSN_BASIC_LOOKUP_RETURN */
+"mtctr 12\n"
+"bctr\n");
+
+static void install_basic_lookup_hook(void) {
+    uint32_t cur;
+    uint32_t thunk;
+    uint32_t br;
+
+    if (g_basic_lookup_hook_installed)
+        return;
+    cur = *(volatile uint32_t *)(uintptr_t)SSN_BASIC_LOOKUP_ENTRY;
+    if (cur != SSN_BASIC_LOOKUP_EXPECT_INSTR) {
+        g_basic_lookup_hook_installed = 1;
+        dbg_print("[ssn] basic lookup hook: unexpected entry instr, skip\n");
+        dbg_print_hex32("  cur", cur);
+        dbg_print_hex32("  expect", SSN_BASIC_LOOKUP_EXPECT_INSTR);
+        return;
+    }
+    thunk = (uint32_t)(uintptr_t)ssn_basic_lookup_detour_code;
+    if (!ssn_ppc_branch(SSN_BASIC_LOOKUP_ENTRY, thunk, 0, &br)) {
+        g_basic_lookup_hook_installed = 1;
+        dbg_print("[ssn] basic lookup hook: branch out of range, skip\n");
+        dbg_print_hex32("  thunk", thunk);
+        return;
+    }
+
+    mem_write_and_flush((void *)(uintptr_t)SSN_BASIC_LOOKUP_ENTRY,
+                        &br, sizeof br);
+    g_basic_lookup_hook_installed = 1;
+    dbg_print("[ssn] basic metadata lookup hook installed\n");
+    dbg_print_hex32("  entry", SSN_BASIC_LOOKUP_ENTRY);
+    dbg_print_hex32("  thunk", thunk);
+    dbg_print_hex32("  branch", br);
+}
+
+/*
  * Ground-truth instrument: head-detour nuTextureLoadFromMemoryPointer
  * (FUN_001a8d14) to log every (pixels, size, flags, w, h, fmt) it's called
  * with, so we can see the REAL song-title pixel source + dims. Entry instr
@@ -4624,6 +4852,15 @@ static int ssn_rt_title_dims(uint32_t type, uint32_t *w, uint32_t *h) {
             *h = SSN_RT_TITLE_H;
         return 1;
     }
+    if (type == 11u || type == 12u) {
+        /* type 11 = gameplay HUD song_name, type 12 = scene-change (rainbow
+         * transition) song_name; same per-song horizontal title texture. */
+        if (w)
+            *w = SSN_RT_SONG_NAME_W;
+        if (h)
+            *h = SSN_RT_SONG_NAME_H;
+        return 1;
+    }
     return 0;
 }
 
@@ -4669,12 +4906,15 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
  * (allocated once) whose texel buffer we repoint at our OWN RSX-mapped memory,
  * so the RSX IO offset is known (no cellGcmAddressToOffset — the game buffer is
  * not reliably mapped) and slots are LRU-reused by re-uploading pixels. That
- * caps game-pool allocations at POOL_LONG+POOL_SHORT total, forever. */
+ * caps game-pool allocations at a fixed per-type total, forever. */
 #define SSN_RT_POOL_LONG  20u
 #define SSN_RT_POOL_SHORT 20u
-#define SSN_RT_POOL_TOTAL (SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT)
-/* uniform slot size = largest title (Long 96x400 A8R8G8B8); Short fits inside */
-#define SSN_RT_SLOT_BYTES ((SSN_RT_TITLE_LONG_W * SSN_RT_TITLE_H * 4u + 127u) \
+#define SSN_RT_POOL_HUD   4u
+#define SSN_RT_POOL_TRANS 4u   /* scene-change (rainbow) transition song_name */
+#define SSN_RT_POOL_TOTAL (SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT + \
+                           SSN_RT_POOL_HUD + SSN_RT_POOL_TRANS)
+/* uniform slot size = largest runtime title; every type fits inside */
+#define SSN_RT_SLOT_BYTES ((SSN_RT_MAX_PIXELS * 4u + 127u) \
                            & ~127u)
 #define SSN_RT_POOL_MEM_SIZE (((SSN_RT_POOL_TOTAL * SSN_RT_SLOT_BYTES) \
                                + 0xfffffu) & ~0xfffffu)  /* round to 1MB page */
@@ -4689,6 +4929,8 @@ typedef struct ssn_rt_pool_slot {
 
 static ssn_rt_pool_slot_t g_rt_pool_long[SSN_RT_POOL_LONG];
 static ssn_rt_pool_slot_t g_rt_pool_short[SSN_RT_POOL_SHORT];
+static ssn_rt_pool_slot_t g_rt_pool_hud[SSN_RT_POOL_HUD];
+static ssn_rt_pool_slot_t g_rt_pool_trans[SSN_RT_POOL_TRANS];
 static uint32_t g_rt_pool_tick;
 static int g_rt_pool_mem_ready;
 
@@ -4719,6 +4961,14 @@ static int ssn_rt_pool_mem_init(void) {
     for (i = 0; i < SSN_RT_POOL_SHORT; i++, ord++) {
         g_rt_pool_short[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
         g_rt_pool_short[i].io = io + ord * SSN_RT_SLOT_BYTES;
+    }
+    for (i = 0; i < SSN_RT_POOL_HUD; i++, ord++) {
+        g_rt_pool_hud[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
+        g_rt_pool_hud[i].io = io + ord * SSN_RT_SLOT_BYTES;
+    }
+    for (i = 0; i < SSN_RT_POOL_TRANS; i++, ord++) {
+        g_rt_pool_trans[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
+        g_rt_pool_trans[i].io = io + ord * SSN_RT_SLOT_BYTES;
     }
     g_rt_pool_mem_ready = 1;
     dbg_print("[ssn] owned pool mem ready\n");
@@ -4762,11 +5012,20 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
         return 0;
     {
         unsigned int outline = SSN_RT_TITLE_OUTLINE;
+        int ok;
         if (index < g_ssn_virtual_song_count &&
             g_ssn_virtual_songs[index].outline)
             outline = g_ssn_virtual_songs[index].outline;
+        if (type == 11u || type == 12u)
+            outline = 0x000000u;
         memset(g_rt_title_pixels, 0, w * h * 4u);
-        if (!taiko_title_render_argb(title, g_rt_title_pixels, w, h, outline))
+        if (type == 11u || type == 12u)
+            ok = taiko_text_render_argb(title, g_rt_title_pixels, w, h,
+                                        outline) > 0;
+        else
+            ok = taiko_title_render_argb(title, g_rt_title_pixels, w, h,
+                                         outline);
+        if (!ok)
             return 0;
     }
 
@@ -4803,8 +5062,12 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
 
 static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
                                       uint32_t index) {
-    ssn_rt_pool_slot_t *pool = (type == 10u) ? g_rt_pool_short : g_rt_pool_long;
-    unsigned n = (type == 10u) ? SSN_RT_POOL_SHORT : SSN_RT_POOL_LONG;
+    ssn_rt_pool_slot_t *pool = (type == 10u) ? g_rt_pool_short :
+        ((type == 11u) ? g_rt_pool_hud :
+         ((type == 12u) ? g_rt_pool_trans : g_rt_pool_long));
+    unsigned n = (type == 10u) ? SSN_RT_POOL_SHORT :
+        ((type == 11u) ? SSN_RT_POOL_HUD :
+         ((type == 12u) ? SSN_RT_POOL_TRANS : SSN_RT_POOL_LONG));
     ssn_rt_pool_slot_t *victim = NULL;
     unsigned i;
 
@@ -4849,8 +5112,11 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
     return victim->resource;
 }
 
-/* Decode a custom title handle: base 0x90000+6000 (Long/type9) or
- * 0xa0000+6000 (Short/type10), 50-wide range -> (index, type). */
+/* Decode a custom title handle: base 0x90000+6000 (Long/type9),
+ * 0xa0000+6000 (Short/type10), or 0xb0000+6000 (gameplay song_name/type11),
+ * 50-wide range -> (index, type). Gameplay may ask for the type11 dummy/base
+ * key after the stock validator rejects a custom uid; in that case use the
+ * selected custom song captured by the basic metadata lookup. */
 static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
                                   uint32_t *type) {
     uint32_t off;
@@ -4870,6 +5136,35 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
             *index = off;
         if (type)
             *type = 10u;
+        return 1;
+    }
+
+    off = key - 0x000b1770u;
+    if (off < 50u) {
+        if (index)
+            *index = off;
+        if (type)
+            *type = 11u;
+        return 1;
+    }
+
+    off = key - 0x000c1770u;
+    if (off < 50u) {
+        if (index)
+            *index = off;
+        if (type)
+            *type = 12u;
+        return 1;
+    }
+
+    if ((key == 0x000b0000u || key == 0x000c0000u) &&
+        g_current_custom_song_valid &&
+        g_current_custom_song_index < g_ssn_virtual_song_count &&
+        g_current_custom_song_index < SSN_INJECT_MAX) {
+        if (index)
+            *index = g_current_custom_song_index;
+        if (type)
+            *type = (key == 0x000c0000u) ? 12u : 11u;
         return 1;
     }
 
@@ -4902,7 +5197,26 @@ __asm__(
 "ori 12,12,0x1770\n"          /* r12 = 0x000a1770 (Short custom base) */
 "subf 0,12,4\n"
 "cmplwi 0,0,0x32\n"
-"bge 3f\n"
+"blt 2f\n"
+"lis 12,0x000b\n"
+"ori 12,12,0x1770\n"          /* r12 = 0x000b1770 (song_name custom base) */
+"subf 0,12,4\n"
+"cmplwi 0,0,0x32\n"
+"blt 2f\n"
+"lis 12,0x000b\n"             /* r12 = 0x000b0000 (song_name dummy/base key) */
+"subf 0,12,4\n"
+"cmpwi 0,0\n"
+"beq 2f\n"
+"lis 12,0x000c\n"
+"ori 12,12,0x1770\n"          /* r12 = 0x000c1770 (transition song_name base) */
+"subf 0,12,4\n"
+"cmplwi 0,0,0x32\n"
+"blt 2f\n"
+"lis 12,0x000c\n"            /* r12 = 0x000c0000 (transition dummy/base key) */
+"subf 0,12,4\n"
+"cmpwi 0,0\n"
+"beq 2f\n"
+"b 3f\n"
 "2:\n"
 "stdu 1,-0x100(1)\n"
 "mflr 0\n"
@@ -5678,6 +5992,7 @@ void songselect_natives_install(void) {
 #if SSN_ENABLE_MUSICINFO_HOOK
     install_musicinfo_deserialize_hook();
 #endif
+    install_basic_lookup_hook();
     /* Disabled after runtime logs showed 0x000fa0c0 is not the live
      * song-select build path in this run. */
     /* install_scene_tempvec_probe(); */
