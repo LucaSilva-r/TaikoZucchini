@@ -294,11 +294,14 @@ static int ascii_contains_ci(const char *s, const char *needle) {
     return 0;
 }
 
-static unsigned char picker_category_palette(const ese_category_entry_t *cat,
-                                             int idx) {
-    const char *id = cat ? cat->id : "";
-    const char *title = cat ? cat->title : "";
+static unsigned int outline_for_palette(int palette_index);
 
+/* Category -> carousel palette index. Shared by the picker overlay and the
+ * in-game song-board title outline so both colour a category identically. */
+unsigned char taiko_custom_category_palette(const char *id, const char *title,
+                                            int idx) {
+    if (!id) id = "";
+    if (!title) title = "";
     if (ascii_contains_ci(id, "anime") || ascii_contains_ci(title, "anime"))
         return 3; /* orange */
     if (ascii_contains_ci(id, "vocaloid") ||
@@ -310,6 +313,43 @@ static unsigned char picker_category_palette(const ese_category_entry_t *cat,
         return 0; /* cyan */
 
     return (unsigned char)(idx % 7);
+}
+
+static unsigned char picker_category_palette(const ese_category_entry_t *cat,
+                                             int idx) {
+    return taiko_custom_category_palette(cat ? cat->id : "",
+                                         cat ? cat->title : "", idx);
+}
+
+unsigned int taiko_custom_category_outline_argb(const char *id,
+                                                const char *title, int idx) {
+    return outline_for_palette(taiko_custom_category_palette(id, title, idx));
+}
+
+/* Category -> in-game genre/folder id (+0x78): 1 J-POP, 2 Anime, 3 Vocaloid,
+ * 4 Kids, 5 Variety, 6 Classic, 7 Game Music, 8 Namco Original. Unmatched ->
+ * Namco Original (8). */
+unsigned int taiko_custom_category_genre_id(const char *id, const char *title) {
+    if (!id) id = "";
+    if (!title) title = "";
+    if (ascii_contains_ci(id, "vocaloid") || ascii_contains_ci(title, "vocaloid"))
+        return 3;
+    if (ascii_contains_ci(id, "anime") || ascii_contains_ci(title, "anime"))
+        return 2;
+    if (ascii_contains_ci(id, "kids") || ascii_contains_ci(title, "kids") ||
+        ascii_contains_ci(title, "child"))
+        return 4;
+    if (ascii_contains_ci(id, "variety") || ascii_contains_ci(title, "variety"))
+        return 5;
+    if (ascii_contains_ci(id, "classic") || ascii_contains_ci(title, "classic"))
+        return 6;
+    if (ascii_contains_ci(id, "game") || ascii_contains_ci(title, "game"))
+        return 7;
+    if (ascii_contains_ci(id, "namco") || ascii_contains_ci(title, "namco"))
+        return 8;
+    if (ascii_contains_ci(id, "pop") || ascii_contains_ci(title, "pop"))
+        return 1;
+    return 8;
 }
 
 /* --- background title-render worker --------------------------------------

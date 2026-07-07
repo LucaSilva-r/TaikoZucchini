@@ -10,13 +10,21 @@ static uint32_t dbg_strlen(const char *s) {
     return len;
 }
 
+/* Master TTY switch. 0 = silence all sys_tty_write output (release/normal use);
+ * flip to 1 when you need the live log. diag_log (on-screen) is unaffected. */
+#define DBG_TTY_ENABLE 0
+
 static void dbg_write_tty(const char *s, uint32_t len) {
     /* sys_tty_write to channel 0 only. On RPCS3 writing to all four
      * channels quadruples every log line; on real hardware ProDG TTY
      * receives one channel anyway. */
+#if DBG_TTY_ENABLE
     uint32_t written;
     system_call_4(403, 0, (uint64_t)(uintptr_t)s, len,
                   (uint64_t)(uintptr_t)&written);
+#else
+    (void)s; (void)len;
+#endif
 }
 
 void dbg_log_reset(void) {

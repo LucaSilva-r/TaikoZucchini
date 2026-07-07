@@ -13,6 +13,7 @@
 #include "icache.h"
 #include "title_nut.h"
 #include "title_render.h"
+#include "custom_song_launcher.h"
 #include "network/custom_song_client.h"
 
 /*
@@ -164,7 +165,7 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_ENABLE_MUSICINFO_HOOK 0
 #define SSN_ENABLE_E46_CUSTOM_INJECTION 1
 #define SSN_ENABLE_E46_OBJECT_DUMP 0
-#define SSN_ENABLE_TEST_APPEND_PATH 1
+#define SSN_ENABLE_TEST_APPEND_PATH 0
 #define SSN_E46_DUMP_MAX_CALLS 1
 #define LOG_COURSESTAR_ARGS 12
 #define LOG_COURSESTAR_MAX 8
@@ -259,10 +260,13 @@ typedef void (*record_copy_fn)(void *dst, const void *src);
 typedef struct ssn_inject_song {
     ese_song_entry_t song;
     char short_id[ESE_SONG_SHORT_ID_MAX];
+    unsigned int outline;   /* category title-outline ARGB (0 = use default) */
+    unsigned int genre_id;  /* target in-game folder id (+0x78); 8 = Namco */
 } ssn_inject_song_t;
 
 static uint32_t g_ssn_injected_start;
 static uint32_t g_ssn_injected_count;
+static uint32_t g_ssn_inject_abs[SSN_INJECT_MAX]; /* virtual v -> absolute idx */
 static ssn_inject_song_t g_ssn_virtual_songs[SSN_INJECT_MAX];
 static uint32_t g_ssn_virtual_song_count;
 static uint32_t g_last_detail_folder;
@@ -846,7 +850,9 @@ static int ssn_collect_cached_songs(ssn_inject_song_t *out, int cap) {
     for (int i = 0; i < total && count < cap; i++) {
         ese_song_entry_t s;
         char short_id[ESE_SONG_SHORT_ID_MAX];
-        if (!ese_song_library_get_cached(i, &s))
+        int cat_idx = -1;
+        ese_category_entry_t cat;
+        if (!ese_song_library_get_cached2(i, &s, &cat_idx))
             continue;
         if (!ese_song_make_short_id(s.id, short_id, sizeof short_id))
             continue;
@@ -854,6 +860,13 @@ static int ssn_collect_cached_songs(ssn_inject_song_t *out, int cap) {
             continue;
         out[count].song = s;
         snprintf(out[count].short_id, sizeof out[count].short_id, "%s", short_id);
+        out[count].genre_id = 8u;   /* default Namco Original */
+        if (ese_category_get(cat_idx, &cat)) {
+            out[count].outline =
+                taiko_custom_category_outline_argb(cat.id, cat.title, cat_idx);
+            out[count].genre_id =
+                taiko_custom_category_genre_id(cat.id, cat.title);
+        }
         count++;
     }
     return count;
@@ -2202,18 +2215,19 @@ static uint32_t ssn_basic_metadata_for_record(uint32_t rec) {
     return out;
 }
 
+/* Customs are inserted into their genre folders, so their absolute indices are
+ * scattered (not one contiguous block). g_ssn_inject_abs[v] = absolute index of
+ * virtual song v; look it up by scanning. */
 static int ssn_virtual_index_for_absolute(uint32_t absolute,
                                           uint32_t *out_index) {
-    uint32_t start = g_ssn_injected_start;
-    uint32_t count = g_ssn_injected_count;
-
-    if (!count || absolute < start || absolute - start >= count)
-        return 0;
-    if (absolute - start >= g_ssn_virtual_song_count)
-        return 0;
-    if (out_index)
-        *out_index = absolute - start;
-    return 1;
+    for (uint32_t v = 0; v < g_ssn_virtual_song_count && v < SSN_INJECT_MAX; v++) {
+        if (g_ssn_inject_abs[v] == absolute) {
+            if (out_index)
+                *out_index = v;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 static int ssn_virtual_index_for_request(uint32_t folder, uint32_t local,
@@ -2526,87 +2540,6 @@ static void ssn_scan_detail_stars_once(void) {
         ssn_scan_songtable_7a8();
     if (ssn_scan_detail_stars(0) + ssn_scan_detail_stars(1) > 0 || tries >= 64u)
         done = 1;
-}
-
-static int ssn_append_songs_to_vector(uint32_t vec, const char *label,
-                                      const ssn_inject_song_t *songs,
-                                      int song_count, uint32_t *out_start,
-                                      uint32_t *out_count) {
-    static int logged_waiting;
-    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
-    uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
-    uint32_t cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
-    uint32_t count = 0;
-    uint32_t cap_count = 0;
-    uint32_t patch_count;
-
-    if (!ssn_ptr_sane(begin) || end < begin ||
-        cap < end ||
-        ((end - begin) % SSN_SONG_RECORD_SIZE) != 0) {
-        if (!logged_waiting) {
-            logged_waiting = 1;
-            dbg_print("[ssn] song vector not ready for insert patch\n");
-            dbg_print("  vec=");
-            dbg_print(label);
-            dbg_print("\n");
-            dbg_print_hex32("  vec.addr", vec);
-            dbg_print_hex32("  vec.begin", begin);
-            dbg_print_hex32("  vec.end", end);
-            dbg_print_hex32("  vec.cap", cap);
-        }
-        return 0;
-    }
-
-    count = (end - begin) / SSN_SONG_RECORD_SIZE;
-    cap_count = (cap - begin) / SSN_SONG_RECORD_SIZE;
-    if (count > cap_count || song_count <= 0)
-        return 0;
-
-    if (SSN_VISIBLE_APPEND_START >= count ||
-        SSN_TEMPLATE_ABSOLUTE >= count ||
-        song_count <= 0)
-        return 0;
-
-    patch_count = count - SSN_VISIBLE_APPEND_START;
-    if (patch_count > (uint32_t)song_count)
-        patch_count = (uint32_t)song_count;
-    if (patch_count > SSN_INJECT_MAX)
-        patch_count = SSN_INJECT_MAX;
-    if (!patch_count)
-        return 0;
-
-    uint32_t template_idx = SSN_TEMPLATE_ABSOLUTE;
-    uint32_t template_rec = begin + template_idx * SSN_SONG_RECORD_SIZE;
-    record_copy_fn copy_record = (record_copy_fn)(uintptr_t)g_record_copy_desc;
-
-    for (uint32_t i = 0; i < patch_count; i++) {
-        uint32_t dst = begin + (SSN_VISIBLE_APPEND_START + i) *
-            SSN_SONG_RECORD_SIZE;
-        copy_record((void *)(uintptr_t)dst, (const void *)(uintptr_t)template_rec);
-        ssn_patch_song_record_fields(dst, &songs[i]);
-        /* PoC: give each custom song a distinct uniqueid past stock (0..801)
-         * so its songname_vlong title comes from our added 00802_* file, not
-         * template 799's. ponytail: test-only; uid also keys difficulty. */
-        *(volatile uint32_t *)(uintptr_t)(dst + SSN_SONG_UNIQUEID_OFF) =
-            SSN_CUSTOM_UID_BASE + i;
-    }
-
-    dbg_print("[ssn] patched custom songs into visible tail\n");
-    dbg_print("  vec=");
-    dbg_print(label);
-    dbg_print("\n");
-    dbg_print_hex32("  start", SSN_VISIBLE_APPEND_START);
-    dbg_print_hex32("  count", patch_count);
-    dbg_print_hex32("  vec.count", count);
-    dbg_print_hex32("  cap.count", cap_count);
-    ssn_log_song_record(begin + SSN_VISIBLE_APPEND_START * SSN_SONG_RECORD_SIZE,
-                        "first visible-tail custom song");
-
-    if (out_start)
-        *out_start = SSN_VISIBLE_APPEND_START;
-    if (out_count)
-        *out_count = patch_count;
-    return 1;
 }
 
 static int ssn_patch_existing_range(uint32_t vec, const char *label,
@@ -4827,10 +4760,15 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
     title = ssn_rt_title_text(index);
     if (!title)
         return 0;
-    memset(g_rt_title_pixels, 0, w * h * 4u);
-    if (!taiko_title_render_argb(title, g_rt_title_pixels, w, h,
-                                 SSN_RT_TITLE_OUTLINE))
-        return 0;
+    {
+        unsigned int outline = SSN_RT_TITLE_OUTLINE;
+        if (index < g_ssn_virtual_song_count &&
+            g_ssn_virtual_songs[index].outline)
+            outline = g_ssn_virtual_songs[index].outline;
+        memset(g_rt_title_pixels, 0, w * h * 4u);
+        if (!taiko_title_render_argb(title, g_rt_title_pixels, w, h, outline))
+            return 0;
+    }
 
     vtbl = *(volatile uint32_t *)(uintptr_t)res;
     if (!ssn_ptr_sane(vtbl))
@@ -5356,6 +5294,59 @@ void hk_e46_listbuild_probe(uint32_t owner, uint32_t temp, uint32_t object) {
     calls++;
 }
 
+/* Last record index in `vec` whose +0x78 genre id == id, +1 (= insert point at
+ * the end of that genre's contiguous block). 0 if none found. */
+static uint32_t ssn_vec90_genre_block_end(uint32_t vec, uint32_t id) {
+    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
+    uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    uint32_t count;
+    uint32_t last = 0;
+    uint32_t found = 0;
+
+    if (!ssn_ptr_sane(begin) || end < begin ||
+        ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
+        return 0;
+    count = (end - begin) / SSN_SONG_RECORD_SIZE;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t g = *(volatile uint32_t *)(uintptr_t)
+            (begin + i * SSN_SONG_RECORD_SIZE + 0x78u);
+        if (g == id) { last = i; found = 1; }
+    }
+    return found ? last + 1u : 0u;
+}
+
+/* Insert one 0x90 record at index `at`, shifting the tail down. Copies
+ * template_rec (pick a same-genre record so +0x78 and genre fields are right).
+ * Returns the inserted record address, 0 on failure. */
+static uint32_t ssn_vec90_insert(uint32_t vec, uint32_t at,
+                                 uint32_t template_rec) {
+    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
+    uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    uint32_t cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
+    record_copy_fn copy_record = (record_copy_fn)(uintptr_t)g_record_copy_desc;
+    uint32_t count, cap_count, at_addr, new_end;
+
+    if (!ssn_ptr_sane(begin) || end < begin || cap < end ||
+        ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
+        return 0;
+    count = (end - begin) / SSN_SONG_RECORD_SIZE;
+    cap_count = (cap - begin) / SSN_SONG_RECORD_SIZE;
+    if (count + 1u > cap_count || at > count)
+        return 0;
+
+    at_addr = begin + at * SSN_SONG_RECORD_SIZE;
+    memmove((void *)(uintptr_t)(at_addr + SSN_SONG_RECORD_SIZE),
+            (const void *)(uintptr_t)at_addr,
+            (size_t)(count - at) * SSN_SONG_RECORD_SIZE);
+    copy_record((void *)(uintptr_t)at_addr,
+                (const void *)(uintptr_t)template_rec);
+    new_end = end + SSN_SONG_RECORD_SIZE;
+    mem_write_and_flush((void *)(uintptr_t)(vec + 0x04u), &new_end, 4u);
+    icache_flush((void *)(uintptr_t)at_addr,
+                 (size_t)(count + 1u - at) * SSN_SONG_RECORD_SIZE);
+    return at_addr;
+}
+
 static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp)
     __attribute__((unused));
 static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
@@ -5378,28 +5369,51 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
         return;
     }
 
-    if (!ssn_append_songs_to_vector(temp + 0x04u, "e46 temp+04",
-                                    songs, song_count,
-                                    &temp_start, &temp_count))
-        return;
+    (void)temp_start; (void)temp_count; (void)source_count;
 
-    (void)ssn_append_songs_to_vector(owner + SSN_SOURCE_VECTOR_OFF,
-                                     "e46 owner source+d04",
-                                     songs, song_count,
-                                     NULL, &source_count);
+    /* Insert each custom into its category's genre block (both the temp list and
+     * the owner source list, in lockstep). Process genre ids ascending = source
+     * position ascending, so each insert lands at a position >= every already-
+     * recorded custom and never shifts a recorded absolute index. */
+    {
+        uint32_t tvec = temp + 0x04u;
+        uint32_t svec = owner + SSN_SOURCE_VECTOR_OFF;
+        uint32_t n_injected = 0;
 
-    memcpy(g_ssn_virtual_songs, songs,
-           sizeof(g_ssn_virtual_songs[0]) * (size_t)temp_count);
-    g_ssn_virtual_song_count = temp_count;
-    g_ssn_injected_start = temp_start;
-    g_ssn_injected_count = temp_count;
-    patched_owner = owner;
+        for (uint32_t gid = 1u; gid <= 8u; gid++) {
+            for (int s = 0; s < song_count && n_injected < SSN_INJECT_MAX; s++) {
+                uint32_t at, tbegin, template_rec, tdst, sdst;
+                if (songs[s].genre_id != gid)
+                    continue;
+                at = ssn_vec90_genre_block_end(tvec, gid);
+                tbegin = *(volatile uint32_t *)(uintptr_t)(tvec + 0x00u);
+                if (!at || !ssn_ptr_sane(tbegin))
+                    continue;   /* genre folder absent this build */
+                template_rec = tbegin + (at - 1u) * SSN_SONG_RECORD_SIZE;
+                tdst = ssn_vec90_insert(tvec, at, template_rec);
+                sdst = ssn_vec90_insert(svec, at, template_rec);
+                if (!tdst || !sdst)
+                    continue;
+                ssn_patch_song_record_fields(tdst, &songs[s]);
+                ssn_patch_song_record_fields(sdst, &songs[s]);
+                *(volatile uint32_t *)(uintptr_t)(tdst + SSN_SONG_UNIQUEID_OFF) =
+                    SSN_CUSTOM_UID_BASE + n_injected;
+                *(volatile uint32_t *)(uintptr_t)(sdst + SSN_SONG_UNIQUEID_OFF) =
+                    SSN_CUSTOM_UID_BASE + n_injected;
+                memcpy(&g_ssn_virtual_songs[n_injected], &songs[s],
+                       sizeof g_ssn_virtual_songs[0]);
+                g_ssn_inject_abs[n_injected] = at;
+                n_injected++;
+            }
+        }
 
-    dbg_print("[ssn] e46 custom injection ready\n");
-    dbg_print_hex32("  owner", owner);
-    dbg_print_hex32("  injected.start", g_ssn_injected_start);
-    dbg_print_hex32("  injected.count", g_ssn_injected_count);
-    dbg_print_hex32("  source.count", source_count);
+        g_ssn_virtual_song_count = n_injected;
+        g_ssn_injected_count = n_injected;   /* legacy display-count consumers */
+        patched_owner = owner;
+
+        dbg_print("[ssn] e46 folder injection ready\n");
+        dbg_print_hex32("  injected", n_injected);
+    }
 }
 
 static void install_e46_listbuild_probe(void) {

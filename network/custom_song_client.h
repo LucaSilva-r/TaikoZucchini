@@ -52,6 +52,9 @@ int ese_song_library_count(void);
 int ese_song_library_get(int index, ese_song_entry_t *out);
 int ese_song_library_cached_count(void);
 int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out);
+int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
+                                 int *out_cat_idx);
+int ese_category_get(int idx, ese_category_entry_t *out);
 int ese_song_make_short_id(const char *song_id, char *out, int cap);
 int ese_song_resolve_short_id(const char *short_id, char *out, int cap);
 int ese_song_map_course_for_short_id(const char *short_id, const char *requested,

@@ -620,8 +620,17 @@ int ese_song_library_cached_count(void) {
 }
 
 int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out) {
+    return ese_song_library_get_cached2(cached_index, out, NULL);
+}
+
+/* Like ese_song_library_get_cached but also yields the song's category index
+ * (into g_lib_cats), -1 if unknown. Used to colour/route custom songs. */
+int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
+                                 int *out_cat_idx) {
     int seen = 0;
 
+    if (out_cat_idx)
+        *out_cat_idx = -1;
     if (!out || cached_index < 0 || !g_lib_loaded)
         return 0;
     if (!g_lib_cache_scanned)
@@ -634,11 +643,20 @@ int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out) {
             continue;
         if (seen == cached_index) {
             *out = g_lib_songs[i];
+            if (out_cat_idx && g_lib_song_cat)
+                *out_cat_idx = g_lib_song_cat[i];
             return 1;
         }
         seen++;
     }
     return 0;
+}
+
+int ese_category_get(int idx, ese_category_entry_t *out) {
+    if (!out || idx < 0 || idx >= g_lib_cat_count)
+        return 0;
+    *out = g_lib_cats[idx];
+    return 1;
 }
 
 int ese_song_make_short_id(const char *song_id, char *out, int cap) {
