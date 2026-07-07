@@ -270,6 +270,7 @@ patches/asm/kimidori_dani_type10_ready_hook.o: patches/asm/kimidori_dani_type10_
 patches/asm/kimidori_dani_resource_retain_hook.o: patches/asm/kimidori_dani_resource_retain_hook.S
 patches/asm/momoiro_dani_emit_select_hook.o: patches/asm/momoiro_dani_emit_select_hook.S
 patches/asm/momoiro_dani_resource_retain_hook.o: patches/asm/momoiro_dani_resource_retain_hook.S
+patches/asm/momoiro_dani_request_status2_guard_hook.o: patches/asm/momoiro_dani_request_status2_guard_hook.S
 patches/asm/momoiro_dani_type10_ready_hook.o: patches/asm/momoiro_dani_type10_ready_hook.S
 patches/asm/pre_red_dani_emit_gate_hook.o: patches/asm/pre_red_dani_emit_gate_hook.S
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
