@@ -133,7 +133,7 @@ ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
             patches/asm/kimidori_dani_resource_retain_hook.S \
             patches/asm/momoiro_dani_emit_select_hook.S \
             patches/asm/momoiro_dani_resource_retain_hook.S \
-            patches/asm/momoiro_dani_state_diag_hooks.S \
+            patches/asm/momoiro_dani_request_status2_guard_hook.S \
             patches/asm/momoiro_dani_type10_ready_hook.S \
             patches/asm/pre_red_dani_emit_gate_hook.S
 ASM_OBJS := $(ASM_SRCS:.S=.o)

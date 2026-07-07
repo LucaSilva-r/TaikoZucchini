@@ -2052,3 +2052,68 @@ Conclusion:
   state visible to native state8.
 - Native state8 then advances to state12, mode4 dispatch constructs the Dani
   Dojo select scene, and the expected Dani Dojo resources are opened.
+
+## Cleanup Build: Remove Diagnostic Hook Noise
+
+After committing the accepted diagnostic checkpoint, the Momoiro patch was
+trimmed to keep only behavior-changing hooks:
+
+```text
+momoiro-v04r00-dani-emit-gate
+momoiro-v04r00-dani-request-status2-guard
+momoiro-v04r00-dani-resource-retain
+momoiro-v04r00-dani-type10-ready
+```
+
+Removed from the cleaned patch:
+
+```text
+momoiro-v04r00-dani-select-row-diag
+momoiro-v04r00-dani-state10-*
+momoiro-v04r00-dani-state11-*
+momoiro-v04r00-dani-state8-*
+momoiro-v04r00-dani-state12-*
+momoiro-v04r00-dani-dojo-ctor*-diag
+momoiro-v04r00-dani-network-status*-diag
+momoiro-v04r00-dani-network-callback-*-diag
+momoiro-v04r00-dani-network-request-index-diag
+TTY marker writes such as [tz] rqsk / [tz] m8 ok
+```
+
+The final request-status2 hook is now a no-log guard at Momoiro `0x00116A18`:
+
+```text
+if (state == 8 && mode == 4)
+    return to 0x00116A1C without sub_116360(wait, 2)
+else
+    call sub_116360(wait, 2), then return to 0x00116A1C
+```
+
+Build/install:
+
+```text
+cmd /c .codex-tmp\build-win.cmd
+result: passed
+install: copied bin\zucchini.sprx to H:\RPCS3\rpcs3-blue\dev_hdd0\plugins\taiko\zucchini.sprx
+```
+
+Installed cleanup artifact:
+
+```text
+bin\zucchini.sprx LastWriteTime=2026-07-07 21:52:17 Length=1003385
+H:\RPCS3\rpcs3-blue\dev_hdd0\plugins\taiko\zucchini.sprx LastWriteTime=2026-07-07 21:52:17 Length=1003385
+
+SHA-1:   F4FDBE134F54A00D425F319767D12A33E9D28219
+SHA-256: E62753B97C7A19C7AD739638282096F856AE7D10D9BF60FB5386255F93CF62E6
+```
+
+Static artifact check:
+
+```text
+rg -a "momoiro-v04r00-dani-(select-row|state|network|dojo-ctor|request-index).*diag|\[tz\]" bin\zucchini.sprx installed-zucchini.sprx
+result: no matches
+```
+
+Runtime note: this cleanup build is build/install verified but still needs a
+fresh RPCS3 Dani Dojo load to confirm the no-log guard preserves the accepted
+runtime behavior.
