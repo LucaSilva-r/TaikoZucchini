@@ -12,7 +12,7 @@ static uint32_t dbg_strlen(const char *s) {
 
 /* Master TTY switch. 0 = silence all sys_tty_write output (release/normal use);
  * flip to 1 when you need the live log. diag_log (on-screen) is unaffected. */
-#define DBG_TTY_ENABLE 1
+#define DBG_TTY_ENABLE 0
 
 static void dbg_write_tty(const char *s, uint32_t len) {
     /* sys_tty_write to channel 0 only. On RPCS3 writing to all four

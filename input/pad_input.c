@@ -96,6 +96,13 @@ static uint8_t     g_hit_edges[PAD_INPUT_PORTS][4];
 static uint16_t    g_coin_edges;
 static uint16_t    g_test_edges;
 
+/* Coin (L3) and Service (R3) share the menu-entry combo, so they fire on
+ * RELEASE not press: a press only arms; the release emits the credit.
+ * Opening a menu calls pad_input_cancel_pending() to clear the armed flag
+ * so the combo's eventual release injects nothing. */
+static uint8_t     g_coin_armed[PAD_INPUT_PORTS];
+static uint8_t     g_svc_armed[PAD_INPUT_PORTS];
+
 /* Owned solely by the polling thread; no lock needed. */
 static uint32_t    g_prev_raw[PAD_INPUT_PORTS];
 
@@ -242,6 +249,9 @@ static void poll_and_accumulate_locked(void) {
         /* Action-bit level for non-edge buttons. */
         uint32_t lvl = 0;
         for (int act = 0; act < PAD_ACT_COUNT; act++) {
+            /* Service is deferred to release (see below); never report it
+             * as a held level or the game credits a coin during the combo. */
+            if (act == PAD_ACT_BTN_SERVICE) continue;
             if ((g_keymap[port][act] & raw) != 0)
                 lvl |= PAD_ACT_BIT(act);
         }
@@ -260,12 +270,25 @@ static void poll_and_accumulate_locked(void) {
                 g_hit_edges[port][i] = 1;
         }
 
+        /* Coin (L3) and Service (R3): arm on press, emit on release.
+         * A menu open clears the armed flag so the combo hold injects
+         * nothing. */
         bind_mask_t cm = g_keymap[port][PAD_ACT_BTN_COIN];
-        uint32_t coin_rise = rising & cm;
-        while (coin_rise) {
-            coin_rise &= coin_rise - 1u;
+        int coin_now = (raw & cm) != 0, coin_prev = (prev & cm) != 0;
+        if (coin_now && !coin_prev) g_coin_armed[port] = 1;
+        if (!coin_now && coin_prev && g_coin_armed[port]) {
+            g_coin_armed[port] = 0;
             if (g_coin_edges < 0xFFFFu) g_coin_edges++;
         }
+
+        bind_mask_t sm = g_keymap[port][PAD_ACT_BTN_SERVICE];
+        int svc_now = (raw & sm) != 0, svc_prev = (prev & sm) != 0;
+        if (svc_now && !svc_prev) g_svc_armed[port] = 1;
+        if (!svc_now && svc_prev && g_svc_armed[port]) {
+            g_svc_armed[port] = 0;
+            g_sticky_press[port] |= PAD_ACT_BIT(PAD_ACT_BTN_SERVICE);
+        }
+
         bind_mask_t tm = g_keymap[port][PAD_ACT_BTN_TEST];
         uint32_t test_rise = rising & tm;
         while (test_rise) {
@@ -326,6 +349,16 @@ void pad_input_consume(pad_snapshot_t *out) {
     /* Fold keyboard accumulators into the same snapshot so USIO sees a
      * single merged view. No-op if kb_input hasn't initialized. */
     kb_input_merge(out);
+}
+
+void pad_input_cancel_pending(void) {
+    if (!g_initialized) return;
+    sys_lwmutex_lock(&g_pad_lock, 0);
+    for (int p = 0; p < PAD_INPUT_PORTS; p++) {
+        g_coin_armed[p] = 0;
+        g_svc_armed[p]  = 0;
+    }
+    sys_lwmutex_unlock(&g_pad_lock);
 }
 
 void pad_input_init(void) {

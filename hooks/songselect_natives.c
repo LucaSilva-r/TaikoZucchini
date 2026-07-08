@@ -6096,20 +6096,9 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
         return;
 
     src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
-    {
-        static unsigned e46_calls;
-        if (e46_calls < 16u) {
-            e46_calls++;
-            dbg_print("[ssn] e46 call\n");
-            dbg_print_hex32("  src_begin", src_begin);
-            dbg_print_hex32("  last_begin", g_ssn_src_begin);
-            dbg_print_hex32("  have", g_ssn_virtual_song_count);
-        }
-    }
 
-    /* Fresh game-built array: it has none of our customs, so start over. Reset
-     * the per-virtual caches (textures/meta key on virtual index). Same array:
-     * keep the existing customs + their indices untouched and only append. */
+    /* Reset the per-virtual caches only on a FRESH array (game rebuilt its list
+     * -> no customs present); otherwise append into the same persistent array. */
     if (src_begin != g_ssn_src_begin) {
         ssn_rt_reset_descriptors();
         for (uint32_t v = 0; v < SSN_INJECT_MAX; v++)
@@ -6155,10 +6144,6 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     if (added)
         ssn_recompute_inject_abs(svec);
     g_ssn_injected_count = g_ssn_virtual_song_count;
-
-    dbg_print("[ssn] e46 append\n");
-    dbg_print_hex32("  added", added);
-    dbg_print_hex32("  total", g_ssn_virtual_song_count);
 }
 
 static void install_e46_listbuild_probe(void) {

@@ -15,6 +15,7 @@
 #include "overlay.h"
 #include "taiko_frame.h"
 #include "kb_input.h"
+#include "pad_input.h"
 #include "runtime.h"
 #include "menu_pad.h"
 #include "menu_osk.h"
@@ -244,6 +245,7 @@ static int confirm_delete(const char *label) {
 }
 
 static void run_chooser(void) {
+    pad_input_cancel_pending();  /* discard the entry combo's held L3/R3 */
     taiko_frame_set_gated(1);
     camera_qr_set_suppress(1);  /* no auto-login while the overlay is open */
     card_store_load();

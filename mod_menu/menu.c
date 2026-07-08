@@ -16,6 +16,7 @@
 #include "rsx_init.h"
 #include "menu_draw.h"
 #include "menu_pad.h"
+#include "pad_input.h"
 #include "menu_actions.h"
 #include "menu_font_30.h"
 #include "menu_font_42.h"
@@ -1300,6 +1301,8 @@ static void ig_activate(int code, uint32_t edge, int *close) {
 static void menu_ingame_run(void) {
     if (g_ingame_open) return;
     g_ingame_open = 1;
+
+    pad_input_cancel_pending();  /* discard the entry combo's held L3/R3 */
 
     g_status = NULL;
     ig_build_rows();

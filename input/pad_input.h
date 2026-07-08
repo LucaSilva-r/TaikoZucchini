@@ -41,6 +41,11 @@ void pad_input_init(void);
  * to be invoked once per USIO frame from the bpreader hook. */
 void pad_input_consume(pad_snapshot_t *out);
 
+/* Discard any coin/service press that is armed-but-not-yet-released.
+ * Called when a menu opens so the entry combo's held L3+R3 don't inject a
+ * credit when finally released. Safe from any thread. */
+void pad_input_cancel_pending(void);
+
 /* Config-file integration. Called by the runtime cfg loader. */
 void pad_input_seed_defaults(void);                 /* fill g_keymap with built-in defaults */
 void pad_input_cfg_kv(int player,
