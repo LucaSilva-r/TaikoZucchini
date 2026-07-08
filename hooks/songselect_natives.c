@@ -6,6 +6,8 @@
 #include <cell/fs/cell_fs_file_api.h>
 #include <cell/gcm.h>
 #include <sys/memory.h>
+#include <sys/sys_time.h>
+#include <sys/timer.h>
 
 #include "songselect_natives.h"
 #include "debug.h"
@@ -318,12 +320,17 @@ typedef int (*nu_tex_info_upload_fn)(uint32_t resource, void *pixels,
 #define SSN_RT_TITLE_H         400u
 #define SSN_RT_SONG_NAME_W     720u
 #define SSN_RT_SONG_NAME_H     64u
-#define SSN_RT_MAX_PIXELS      (SSN_RT_SONG_NAME_W * SSN_RT_SONG_NAME_H)
+#define SSN_RT_SONG_NAME_TRANS_H 104u
+#define SSN_RT_MAX_PIXELS      (SSN_RT_SONG_NAME_W * SSN_RT_SONG_NAME_TRANS_H)
 #define SSN_RT_TITLE_OUTLINE   0x141428u
 #define SSN_NU_TEX_ALLOC_MGR_CELL (0x01037a88u + 0x0000779cu)
 
 static uint32_t g_rt_title_pixels[SSN_RT_MAX_PIXELS]
     __attribute__((aligned(128)));
+
+static uint8_t g_rt_cache_fill[SSN_RT_MAX_PIXELS];
+static uint8_t g_rt_cache_outline[SSN_RT_MAX_PIXELS];
+static uint8_t g_rt_cache_payload[SSN_RT_MAX_PIXELS * 4u];
 
 static int ssn_get_board_range(uint32_t idx, uint32_t *start, uint32_t *count);
 static int ssn_is_test_virtual_song(uint32_t folder, uint32_t local);
@@ -4380,6 +4387,7 @@ static void ssn_log_scene_enter_snapshot(uint32_t scene, const char *phase) {
 }
 
 void hk_scene_enter(void *scene, uint32_t param2, uint32_t toc);
+static void ssn_rt_reset_descriptors(void);
 void hk_scene_enter(void *scene, uint32_t param2, uint32_t toc) {
     static unsigned dumped;
     uint32_t scene_u = (uint32_t)(uintptr_t)scene;
@@ -4388,9 +4396,10 @@ void hk_scene_enter(void *scene, uint32_t param2, uint32_t toc) {
     if (SSN_DETAIL_LOGGING_ENABLED && dumped < 4u)
         ssn_log_scene_enter_snapshot(scene_u, "pre");
 
-    /* Owned title textures persist across scene visits (the game does not free
-     * them on exit), so the cache is kept — alloc once per (type,index), reuse
-     * forever. Resetting here would re-alloc every visit and leak VRAM (lag). */
+    /* The game tears scene texture resources down. Keep our mapped pixel memory,
+     * but forget game-owned descriptors so re-entering song select does not
+     * hand stale resource pointers back to the texture lookup path. */
+    ssn_rt_reset_descriptors();
 
     if (g_scene_enter_orig_code)
         ssn_call_scene_enter_orig(g_scene_enter_orig_code,
@@ -4851,6 +4860,330 @@ static const char *ssn_rt_title_text(uint32_t index) {
     return NULL;
 }
 
+#define SSN_RT_CACHE_DIR "/dev_hdd0/plugins/taiko/title_cache"
+#define SSN_RT_CACHE_MAGIC 0x545a5443u /* TZTC */
+#define SSN_RT_CACHE_VERSION 1u
+#define SSN_RT_CACHE_RENDERER_VERSION 6u
+
+typedef struct ssn_rt_cache_header {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t renderer_version;
+    uint32_t type;
+    uint32_t width;
+    uint32_t height;
+    uint32_t cache_key_hi;
+    uint32_t cache_key_lo;
+    uint32_t outline_rgb;
+    uint32_t fill_bytes;
+    uint32_t outline_bytes;
+} ssn_rt_cache_header_t;
+
+static uint64_t ssn_hash64_byte(uint64_t h, uint8_t v) {
+    h ^= (uint64_t)v;
+    h *= 1099511628211ULL;
+    return h;
+}
+
+static uint64_t ssn_hash64_u32(uint64_t h, uint32_t v) {
+    h = ssn_hash64_byte(h, (uint8_t)(v >> 24));
+    h = ssn_hash64_byte(h, (uint8_t)(v >> 16));
+    h = ssn_hash64_byte(h, (uint8_t)(v >> 8));
+    h = ssn_hash64_byte(h, (uint8_t)v);
+    return h;
+}
+
+static uint64_t ssn_rt_cache_key(uint32_t type, const char *title,
+                                 uint32_t outline_rgb, uint32_t w,
+                                 uint32_t h) {
+    uint64_t key = 1469598103934665603ULL;
+    const unsigned char *p = (const unsigned char *)title;
+
+    key = ssn_hash64_u32(key, SSN_RT_CACHE_RENDERER_VERSION);
+    key = ssn_hash64_u32(key, type);
+    key = ssn_hash64_u32(key, w);
+    key = ssn_hash64_u32(key, h);
+    key = ssn_hash64_u32(key, outline_rgb & 0xffffffu);
+    while (p && *p)
+        key = ssn_hash64_byte(key, *p++);
+    return key ? key : 1ULL;
+}
+
+static int ssn_rt_cache_ensure_dir(void) {
+    static int ready;
+    int rc;
+
+    if (ready)
+        return 1;
+    rc = cellFsMkdir(SSN_RT_CACHE_DIR, CELL_FS_DEFAULT_CREATE_MODE_1);
+    if (rc == CELL_FS_SUCCEEDED || rc == CELL_FS_EEXIST) {
+        ready = 1;
+        return 1;
+    }
+    dbg_print("[ssn] title cache mkdir failed\n");
+    dbg_print_hex32("  rc", (uint32_t)rc);
+    return 0;
+}
+
+static void ssn_hex_fixed(char *out, uint32_t v, unsigned digits) {
+    static const char hex[] = "0123456789abcdef";
+    for (unsigned i = 0; i < digits; i++) {
+        unsigned shift = (digits - 1u - i) * 4u;
+        out[i] = hex[(v >> shift) & 0xfu];
+    }
+}
+
+static void ssn_dec3_fixed(char *out, uint32_t v) {
+    out[0] = (char)('0' + ((v / 100u) % 10u));
+    out[1] = (char)('0' + ((v / 10u) % 10u));
+    out[2] = (char)('0' + (v % 10u));
+}
+
+static void ssn_rt_cache_path(char *out, unsigned cap, uint64_t cache_key) {
+    const char *dir = SSN_RT_CACHE_DIR;
+    unsigned dir_len;
+    char *p;
+
+    if (!out || cap == 0)
+        return;
+    dir_len = (unsigned)strlen(dir);
+    if (cap < dir_len + 1u + 3u + 1u + 16u + 5u + 1u) {
+        out[0] = '\0';
+        return;
+    }
+    memcpy(out, dir, dir_len);
+    p = out + dir_len;
+    *p++ = '/';
+    ssn_dec3_fixed(p, SSN_RT_CACHE_RENDERER_VERSION);
+    p += 3;
+    *p++ = '_';
+    ssn_hex_fixed(p, (uint32_t)(cache_key >> 32), 8u);
+    p += 8;
+    ssn_hex_fixed(p, (uint32_t)cache_key, 8u);
+    p += 8;
+    memcpy(p, ".tztc", 6);
+}
+
+static uint32_t ssn_rt_cache_rle_encode(const uint8_t *src, uint32_t n,
+                                        uint8_t *dst, uint32_t cap) {
+    uint32_t si = 0;
+    uint32_t di = 0;
+
+    while (si < n) {
+        uint8_t v = src[si];
+        uint32_t run = 1;
+        while (si + run < n && run < 255u && src[si + run] == v)
+            run++;
+        if (di + 2u > cap)
+            return 0;
+        dst[di++] = (uint8_t)run;
+        dst[di++] = v;
+        si += run;
+    }
+    return di;
+}
+
+static int ssn_rt_cache_rle_decode(const uint8_t *src, uint32_t bytes,
+                                   uint8_t *dst, uint32_t n) {
+    uint32_t si = 0;
+    uint32_t di = 0;
+
+    while (si + 1u < bytes && di < n) {
+        uint32_t run = src[si++];
+        uint8_t v = src[si++];
+        if (run == 0 || di + run > n)
+            return 0;
+        memset(dst + di, v, run);
+        di += run;
+    }
+    return si == bytes && di == n;
+}
+
+static uint8_t ssn_clamp_u8_i(int v) {
+    if (v < 0)
+        return 0;
+    if (v > 255)
+        return 255;
+    return (uint8_t)v;
+}
+
+static void ssn_rt_cache_split_planes(const uint32_t *argb, uint32_t pixels,
+                                      uint32_t outline_rgb) {
+    int or_ = (int)((outline_rgb >> 16) & 0xffu);
+    int og_ = (int)((outline_rgb >> 8) & 0xffu);
+    int ob_ = (int)(outline_rgb & 0xffu);
+
+    for (uint32_t i = 0; i < pixels; i++) {
+        uint32_t p = argb[i];
+        int a = (int)((p >> 24) & 0xffu);
+        int r = (int)((p >> 16) & 0xffu);
+        int g = (int)((p >> 8) & 0xffu);
+        int b = (int)(p & 0xffu);
+        int sum = 0;
+        int cnt = 0;
+        int f;
+        int o;
+
+        if (!a) {
+            g_rt_cache_fill[i] = 0;
+            g_rt_cache_outline[i] = 0;
+            continue;
+        }
+        if (or_ < 255) {
+            sum += (255 * r - or_ * a) / (255 - or_);
+            cnt++;
+        }
+        if (og_ < 255) {
+            sum += (255 * g - og_ * a) / (255 - og_);
+            cnt++;
+        }
+        if (ob_ < 255) {
+            sum += (255 * b - ob_ * a) / (255 - ob_);
+            cnt++;
+        }
+        f = cnt ? (sum + cnt / 2) / cnt : a;
+        if (f < 0)
+            f = 0;
+        if (f > a)
+            f = a;
+        o = (f >= 255) ? 0 : ((a - f) * 255 + (255 - f) / 2) / (255 - f);
+        g_rt_cache_fill[i] = ssn_clamp_u8_i(f);
+        g_rt_cache_outline[i] = ssn_clamp_u8_i(o);
+    }
+}
+
+static void ssn_rt_cache_compose_argb(uint32_t *argb, uint32_t pixels,
+                                      uint32_t outline_rgb) {
+    uint32_t or_ = (outline_rgb >> 16) & 0xffu;
+    uint32_t og_ = (outline_rgb >> 8) & 0xffu;
+    uint32_t ob_ = outline_rgb & 0xffu;
+
+    for (uint32_t i = 0; i < pixels; i++) {
+        uint32_t f = g_rt_cache_fill[i];
+        uint32_t o = g_rt_cache_outline[i];
+        uint32_t obg = (o * (255u - f) + 127u) / 255u;
+        uint32_t a = f + obg;
+        uint32_t r = f + (or_ * obg + 127u) / 255u;
+        uint32_t g = f + (og_ * obg + 127u) / 255u;
+        uint32_t b = f + (ob_ * obg + 127u) / 255u;
+        if (a > 255u) a = 255u;
+        if (r > 255u) r = 255u;
+        if (g > 255u) g = 255u;
+        if (b > 255u) b = 255u;
+        argb[i] = (a << 24) | (r << 16) | (g << 8) | b;
+    }
+}
+
+static int ssn_rt_cache_load(uint32_t type, const char *title,
+                             uint32_t outline_rgb, uint32_t w,
+                             uint32_t h, uint32_t *argb) {
+    char path[192];
+    ssn_rt_cache_header_t hdr;
+    uint32_t pixels = w * h;
+    uint64_t cache_key = ssn_rt_cache_key(type, title, outline_rgb, w, h);
+    uint64_t got = 0;
+    int fd = -1;
+    int rc;
+
+    if (!argb || pixels == 0 || pixels > SSN_RT_MAX_PIXELS)
+        return 0;
+    ssn_rt_cache_path(path, sizeof path, cache_key);
+    if (!path[0])
+        return 0;
+    rc = cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0);
+    if (rc != CELL_FS_SUCCEEDED)
+        return 0;
+    rc = cellFsRead(fd, &hdr, sizeof hdr, &got);
+    if (rc != CELL_FS_SUCCEEDED || got != sizeof hdr)
+        goto fail;
+    if (hdr.magic != SSN_RT_CACHE_MAGIC ||
+        hdr.version != SSN_RT_CACHE_VERSION ||
+        hdr.renderer_version != SSN_RT_CACHE_RENDERER_VERSION ||
+        hdr.type != type || hdr.width != w || hdr.height != h ||
+        hdr.cache_key_hi != (uint32_t)(cache_key >> 32) ||
+        hdr.cache_key_lo != (uint32_t)cache_key ||
+        hdr.outline_rgb != outline_rgb ||
+        hdr.fill_bytes > pixels * 2u || hdr.outline_bytes > pixels * 2u ||
+        hdr.fill_bytes + hdr.outline_bytes > sizeof g_rt_cache_payload)
+        goto fail;
+    rc = cellFsRead(fd, g_rt_cache_payload,
+                    hdr.fill_bytes + hdr.outline_bytes, &got);
+    cellFsClose(fd);
+    if (rc != CELL_FS_SUCCEEDED ||
+        got != (uint64_t)(hdr.fill_bytes + hdr.outline_bytes))
+        return 0;
+    if (!ssn_rt_cache_rle_decode(g_rt_cache_payload, hdr.fill_bytes,
+                                 g_rt_cache_fill, pixels))
+        return 0;
+    if (!ssn_rt_cache_rle_decode(g_rt_cache_payload + hdr.fill_bytes,
+                                 hdr.outline_bytes, g_rt_cache_outline, pixels))
+        return 0;
+    ssn_rt_cache_compose_argb(argb, pixels, outline_rgb);
+    return 1;
+
+fail:
+    cellFsClose(fd);
+    return 0;
+}
+
+static void ssn_rt_cache_store(uint32_t type, const char *title,
+                               uint32_t outline_rgb, uint32_t w,
+                               uint32_t h, const uint32_t *argb) {
+    char path[192];
+    ssn_rt_cache_header_t hdr;
+    uint32_t pixels = w * h;
+    uint64_t cache_key = ssn_rt_cache_key(type, title, outline_rgb, w, h);
+    uint32_t fill_bytes;
+    uint32_t outline_bytes;
+    uint64_t wrote = 0;
+    int fd = -1;
+    int rc;
+
+    if (!argb || pixels == 0 || pixels > SSN_RT_MAX_PIXELS)
+        return;
+    if (!ssn_rt_cache_ensure_dir())
+        return;
+    ssn_rt_cache_split_planes(argb, pixels, outline_rgb);
+    fill_bytes = ssn_rt_cache_rle_encode(
+        g_rt_cache_fill, pixels, g_rt_cache_payload,
+        (uint32_t)sizeof g_rt_cache_payload);
+    if (!fill_bytes)
+        return;
+    outline_bytes = ssn_rt_cache_rle_encode(
+        g_rt_cache_outline, pixels, g_rt_cache_payload + fill_bytes,
+        (uint32_t)sizeof g_rt_cache_payload - fill_bytes);
+    if (!outline_bytes)
+        return;
+
+    hdr.magic = SSN_RT_CACHE_MAGIC;
+    hdr.version = SSN_RT_CACHE_VERSION;
+    hdr.renderer_version = SSN_RT_CACHE_RENDERER_VERSION;
+    hdr.type = type;
+    hdr.width = w;
+    hdr.height = h;
+    hdr.cache_key_hi = (uint32_t)(cache_key >> 32);
+    hdr.cache_key_lo = (uint32_t)cache_key;
+    hdr.outline_rgb = outline_rgb;
+    hdr.fill_bytes = fill_bytes;
+    hdr.outline_bytes = outline_bytes;
+
+    ssn_rt_cache_path(path, sizeof path, cache_key);
+    if (!path[0])
+        return;
+    rc = cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
+                    &fd, NULL, 0);
+    if (rc != CELL_FS_SUCCEEDED)
+        return;
+    rc = cellFsWrite(fd, &hdr, sizeof hdr, &wrote);
+    if (rc == CELL_FS_SUCCEEDED && wrote == sizeof hdr)
+        rc = cellFsWrite(fd, g_rt_cache_payload,
+                         fill_bytes + outline_bytes, &wrote);
+    cellFsClose(fd);
+    if (rc != CELL_FS_SUCCEEDED ||
+        wrote != (uint64_t)(fill_bytes + outline_bytes))
+        cellFsUnlink(path);
+}
+
 static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
                                         uint32_t game_toc) {
     uint32_t ret;
@@ -4880,26 +5213,38 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
 }
 
 /* Fixed per-type texture pool. Each slot owns ONE game-pool descriptor
- * (allocated once) whose texel buffer we repoint at our OWN RSX-mapped memory,
- * so the RSX IO offset is known (no cellGcmAddressToOffset — the game buffer is
- * not reliably mapped) and slots are LRU-reused by re-uploading pixels. That
- * caps game-pool allocations at a fixed per-type total, forever. */
+ * (allocated once). The descriptor keeps its game-owned CPU buffer pointer so
+ * the game allocator can tear it down safely; after each upload we copy the
+ * produced texels into our RSX-mapped memory and redirect only the sampled IO
+ * offset to our buffer. Slots are LRU-reused by re-uploading pixels. */
 #define SSN_RT_POOL_LONG  20u
 #define SSN_RT_POOL_SHORT 20u
-#define SSN_RT_POOL_HUD   4u
-#define SSN_RT_POOL_TRANS 4u   /* scene-change (rainbow) transition song_name */
+#define SSN_RT_POOL_HUD   1u   /* gameplay/result horizontal texture on demand */
+#define SSN_RT_POOL_TRANS 1u   /* scene-change texture is rendered on demand */
 #define SSN_RT_POOL_TOTAL (SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT + \
                            SSN_RT_POOL_HUD + SSN_RT_POOL_TRANS)
-/* uniform slot size = largest runtime title; every type fits inside */
-#define SSN_RT_SLOT_BYTES ((SSN_RT_MAX_PIXELS * 4u + 127u) \
-                           & ~127u)
-#define SSN_RT_POOL_MEM_SIZE (((SSN_RT_POOL_TOTAL * SSN_RT_SLOT_BYTES) \
-                               + 0xfffffu) & ~0xfffffu)  /* round to 1MB page */
+#define SSN_RT_SLOT_BYTES(w, h) ((((w) * (h) * 4u) + 127u) & ~127u)
+#define SSN_RT_SLOT_LONG_BYTES \
+    SSN_RT_SLOT_BYTES(SSN_RT_TITLE_LONG_W, SSN_RT_TITLE_H)
+#define SSN_RT_SLOT_SHORT_BYTES \
+    SSN_RT_SLOT_BYTES(SSN_RT_TITLE_SHORT_W, SSN_RT_TITLE_H)
+#define SSN_RT_SLOT_HUD_BYTES \
+    SSN_RT_SLOT_BYTES(SSN_RT_SONG_NAME_W, SSN_RT_SONG_NAME_H)
+#define SSN_RT_SLOT_TRANS_BYTES \
+    SSN_RT_SLOT_BYTES(SSN_RT_SONG_NAME_W, SSN_RT_SONG_NAME_TRANS_H)
+#define SSN_RT_POOL_MEM_USED \
+    ((SSN_RT_POOL_LONG * SSN_RT_SLOT_LONG_BYTES) + \
+     (SSN_RT_POOL_SHORT * SSN_RT_SLOT_SHORT_BYTES) + \
+     (SSN_RT_POOL_HUD * SSN_RT_SLOT_HUD_BYTES) + \
+     (SSN_RT_POOL_TRANS * SSN_RT_SLOT_TRANS_BYTES))
+#define SSN_RT_POOL_MEM_SIZE ((SSN_RT_POOL_MEM_USED + 0xfffffu) & ~0xfffffu)
 
 typedef struct ssn_rt_pool_slot {
     uint32_t resource;   /* game-pool descriptor (0 = slot never allocated) */
     uint32_t buf;        /* our mapped texel buffer (CPU EA) */
     uint32_t io;         /* our RSX IO offset for buf */
+    uint32_t game_buf;   /* descriptor's original game-owned texel buffer */
+    uint32_t game_io;    /* descriptor's original game-owned IO offset */
     uint32_t index;      /* song index currently loaded into this slot */
     uint32_t lru;        /* last-use tick */
 } ssn_rt_pool_slot_t;
@@ -4911,11 +5256,31 @@ static ssn_rt_pool_slot_t g_rt_pool_trans[SSN_RT_POOL_TRANS];
 static uint32_t g_rt_pool_tick;
 static int g_rt_pool_mem_ready;
 
+static void ssn_rt_reset_pool_descriptors(ssn_rt_pool_slot_t *pool,
+                                          unsigned n) {
+    unsigned i;
+    for (i = 0; i < n; i++) {
+        pool[i].resource = 0;
+        pool[i].game_buf = 0;
+        pool[i].game_io = 0;
+        pool[i].index = 0;
+        pool[i].lru = 0;
+    }
+}
+
+static void ssn_rt_reset_descriptors(void) {
+    ssn_rt_reset_pool_descriptors(g_rt_pool_long, SSN_RT_POOL_LONG);
+    ssn_rt_reset_pool_descriptors(g_rt_pool_short, SSN_RT_POOL_SHORT);
+    ssn_rt_reset_pool_descriptors(g_rt_pool_hud, SSN_RT_POOL_HUD);
+    ssn_rt_reset_pool_descriptors(g_rt_pool_trans, SSN_RT_POOL_TRANS);
+    g_rt_pool_tick = 0;
+}
+
 /* One-time: allocate + RSX-map our texel memory, assign each slot a buffer. */
 static int ssn_rt_pool_mem_init(void) {
     sys_addr_t addr = 0;
     uint32_t io = 0;
-    uint32_t ord = 0;
+    uint32_t off = 0;
     unsigned i;
 
     if (g_rt_pool_mem_ready)
@@ -4931,21 +5296,25 @@ static int ssn_rt_pool_mem_init(void) {
         dbg_print("[ssn] owned pool cellGcmMapMainMemory failed\n");
         return 0;
     }
-    for (i = 0; i < SSN_RT_POOL_LONG; i++, ord++) {
-        g_rt_pool_long[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
-        g_rt_pool_long[i].io = io + ord * SSN_RT_SLOT_BYTES;
+    for (i = 0; i < SSN_RT_POOL_LONG; i++) {
+        g_rt_pool_long[i].buf = (uint32_t)addr + off;
+        g_rt_pool_long[i].io = io + off;
+        off += SSN_RT_SLOT_LONG_BYTES;
     }
-    for (i = 0; i < SSN_RT_POOL_SHORT; i++, ord++) {
-        g_rt_pool_short[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
-        g_rt_pool_short[i].io = io + ord * SSN_RT_SLOT_BYTES;
+    for (i = 0; i < SSN_RT_POOL_SHORT; i++) {
+        g_rt_pool_short[i].buf = (uint32_t)addr + off;
+        g_rt_pool_short[i].io = io + off;
+        off += SSN_RT_SLOT_SHORT_BYTES;
     }
-    for (i = 0; i < SSN_RT_POOL_HUD; i++, ord++) {
-        g_rt_pool_hud[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
-        g_rt_pool_hud[i].io = io + ord * SSN_RT_SLOT_BYTES;
+    for (i = 0; i < SSN_RT_POOL_HUD; i++) {
+        g_rt_pool_hud[i].buf = (uint32_t)addr + off;
+        g_rt_pool_hud[i].io = io + off;
+        off += SSN_RT_SLOT_HUD_BYTES;
     }
-    for (i = 0; i < SSN_RT_POOL_TRANS; i++, ord++) {
-        g_rt_pool_trans[i].buf = (uint32_t)addr + ord * SSN_RT_SLOT_BYTES;
-        g_rt_pool_trans[i].io = io + ord * SSN_RT_SLOT_BYTES;
+    for (i = 0; i < SSN_RT_POOL_TRANS; i++) {
+        g_rt_pool_trans[i].buf = (uint32_t)addr + off;
+        g_rt_pool_trans[i].io = io + off;
+        off += SSN_RT_SLOT_TRANS_BYTES;
     }
     g_rt_pool_mem_ready = 1;
     dbg_print("[ssn] owned pool mem ready\n");
@@ -4990,13 +5359,49 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
     {
         /* Per-type rasterizer lives in title_textures.c; pass the song's
          * category outline (only the short songlist texture uses it). */
+        static unsigned cache_hit_logs;
+        static unsigned cache_miss_logs;
         uint32_t genre_outline = 0;
+        uint32_t actual_outline = 0;
+        uint64_t t0;
+        uint64_t dt;
+        uint64_t render_key;
         if (index < g_ssn_virtual_song_count)
             genre_outline = g_ssn_virtual_songs[index].outline;
-        memset(g_rt_title_pixels, 0, w * h * 4u);
-        if (!title_tex_render(type, title, g_rt_title_pixels, w, h,
-                              genre_outline))
-            return 0;
+        if (type == TITLE_TEX_SONGLIST_SHORT)
+            actual_outline = genre_outline ? genre_outline : SSN_RT_TITLE_OUTLINE;
+        render_key = ssn_rt_cache_key(type, title, actual_outline, w, h);
+        t0 = (uint64_t)sys_time_get_system_time();
+        if (!ssn_rt_cache_load(type, title, actual_outline, w, h,
+                               g_rt_title_pixels)) {
+            dt = (uint64_t)sys_time_get_system_time() - t0;
+            memset(g_rt_title_pixels, 0, w * h * 4u);
+            t0 = (uint64_t)sys_time_get_system_time();
+            if (!title_tex_render(type, title, g_rt_title_pixels, w, h,
+                                  genre_outline))
+                return 0;
+            ssn_rt_cache_store(type, title, actual_outline, w, h,
+                               g_rt_title_pixels);
+            dt = (uint64_t)sys_time_get_system_time() - t0;
+            if (cache_miss_logs < 24u) {
+                cache_miss_logs++;
+                dbg_print("[ssn] title cache miss render\n");
+                dbg_print_hex32("  type", type);
+                dbg_print_hex32("  key.hi", (uint32_t)(render_key >> 32));
+                dbg_print_hex32("  key.lo", (uint32_t)render_key);
+                dbg_print_hex32("  us", (uint32_t)dt);
+            }
+        } else {
+            dt = (uint64_t)sys_time_get_system_time() - t0;
+            if (cache_hit_logs < 24u) {
+                cache_hit_logs++;
+                dbg_print("[ssn] title cache hit load\n");
+                dbg_print_hex32("  type", type);
+                dbg_print_hex32("  key.hi", (uint32_t)(render_key >> 32));
+                dbg_print_hex32("  key.lo", (uint32_t)render_key);
+                dbg_print_hex32("  us", (uint32_t)dt);
+            }
+        }
     }
 
     vtbl = *(volatile uint32_t *)(uintptr_t)res;
@@ -5005,9 +5410,15 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
     upload_opd = *(volatile uint32_t *)(uintptr_t)(vtbl + 0x20u);
     if (!ssn_ptr_sane(upload_opd))
         return 0;
-    /* Let the game upload into its OWN buffer (it ignores +0x34 as a dest),
-     * then copy the produced (possibly swizzled) texels into our mapped buffer
-     * and repoint the descriptor at ours + our known IO offset. */
+    if (slot->game_buf) {
+        *(volatile uint32_t *)(uintptr_t)(res + 0x34u) = slot->game_buf;
+        *(volatile uint32_t *)(uintptr_t)(res + 0x30u) = slot->game_io;
+        icache_flush((void *)(uintptr_t)res, 0x40u);
+    }
+
+    /* Let the game upload into its OWN buffer, then copy the produced
+     * (possibly swizzled) texels into our mapped buffer. Do not replace +0x34:
+     * scene teardown treats that as an allocator-owned CPU pointer. */
     if (((nu_tex_info_upload_fn)(uintptr_t)upload_opd)(res, g_rt_title_pixels,
                                                        1u, 0u) != 0)
         return 0;
@@ -5018,7 +5429,6 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
         memcpy((void *)(uintptr_t)slot->buf, (const void *)(uintptr_t)gbuf,
                w * h * 4u);
     }
-    *(volatile uint32_t *)(uintptr_t)(res + 0x34u) = slot->buf;
     *(volatile uint32_t *)(uintptr_t)(res + 0x30u) = slot->io;  /* our offset */
     *(volatile uint32_t *)(uintptr_t)(res + 0x20u) = 0x0000aae4u; /* std ARGB
         remap: the A1R5G5B5-derived default routed alpha from the wrong texel
@@ -5074,6 +5484,8 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
         if (!res)
             return 0;
         victim->resource = res;      /* cache BEFORE upload: never re-alloc */
+        victim->game_io = *(volatile uint32_t *)(uintptr_t)(res + 0x30u);
+        victim->game_buf = *(volatile uint32_t *)(uintptr_t)(res + 0x34u);
     }
     if (!ssn_rt_slot_upload(victim, key, type, index))
         return 0;
@@ -5082,11 +5494,12 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
     return victim->resource;
 }
 
-/* Decode a custom title handle: base 0x90000+6000 (Long/type9),
- * 0xa0000+6000 (Short/type10), or 0xb0000+6000 (gameplay song_name/type11),
- * 50-wide range -> (index, type). Gameplay may ask for the type11 dummy/base
- * key after the stock validator rejects a custom uid; in that case use the
- * selected custom song captured by the basic metadata lookup. */
+/* Decode a custom title handle. The game's visible songlist usage is inverted
+ * relative to the old file naming: the 0x0009 range is the outside/short
+ * column, while 0x000a is the inside/long selected-song column. Gameplay may
+ * ask for the type11/type12 dummy/base key after the stock validator rejects a
+ * custom uid; in that case use the selected custom song captured by the basic
+ * metadata lookup. */
 static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
                                   uint32_t *type) {
     uint32_t off;
@@ -5096,7 +5509,7 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
         if (index)
             *index = off;
         if (type)
-            *type = 9u;
+            *type = TITLE_TEX_SONGLIST_SHORT;
         return 1;
     }
 
@@ -5105,7 +5518,7 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
         if (index)
             *index = off;
         if (type)
-            *type = 10u;
+            *type = TITLE_TEX_SONGLIST_LONG;
         return 1;
     }
 
@@ -5158,13 +5571,13 @@ __asm__(
 ".globl ssn_texretr_detour_code\n"
 "ssn_texretr_detour_code:\n"
 "lis 12,0x0009\n"
-"ori 12,12,0x1770\n"          /* r12 = 0x00091770 (Long custom base) */
+"ori 12,12,0x1770\n"          /* r12 = 0x00091770 (outside/short base) */
 "subf 0,12,4\n"               /* r0 = key - 0x91770 */
 "cmplwi 0,0,0x32\n"           /* < 50 ? */
 "blt 2f\n"
 "1:\n"
 "lis 12,0x000a\n"
-"ori 12,12,0x1770\n"          /* r12 = 0x000a1770 (Short custom base) */
+"ori 12,12,0x1770\n"          /* r12 = 0x000a1770 (inside/long base) */
 "subf 0,12,4\n"
 "cmplwi 0,0,0x32\n"
 "blt 2f\n"

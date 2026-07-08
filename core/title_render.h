@@ -39,18 +39,26 @@ int taiko_text_render_argb(const char *utf8, void *out, unsigned int max_w,
 #define TITLE_TEX_SONGLIST_LONG   9u   /* selected-song vertical title  (96x400)  */
 #define TITLE_TEX_SONGLIST_SHORT  10u  /* side-column vertical title    (56x400)  */
 #define TITLE_TEX_SONG_NAME_HUD   11u  /* in-game (enso) horizontal name (720x64) */
-#define TITLE_TEX_SONG_NAME_TRANS 12u  /* rainbow scene-change name      (720x64) */
+#define TITLE_TEX_SONG_NAME_TRANS 12u  /* rainbow scene-change name      (720x104) */
 
 /* Native pixel size of `type`'s texture. Returns 1 if the type is known. */
 int title_tex_dims(unsigned int type, unsigned int *w, unsigned int *h);
 
 /* Render `title` (UTF-8) into `px`, a w*h A8R8G8B8 buffer the caller has
  * zeroed and sized via title_tex_dims(type). `genre_outline_rgb` is the song's
- * category outline colour (0 = none); only the SHORT songlist texture uses it.
+ * category outline colour (0 = fallback); only the SHORT songlist texture uses it.
  * Returns 1 on success, 0 on failure. */
 int title_tex_render(unsigned int type, const char *title, void *px,
                      unsigned int w, unsigned int h,
                      unsigned int genre_outline_rgb);
+
+/* Same renderer with an optional subtitle/artist string. Currently used by the
+ * calibrated long songlist and transition profiles when a caller has subtitle
+ * data; title_tex_render() passes NULL for existing runtime call sites. */
+int title_tex_render_ex(unsigned int type, const char *title,
+                        const char *subtitle, void *px,
+                        unsigned int w, unsigned int h,
+                        unsigned int genre_outline_rgb);
 
 /* Category palette index -> SHORT-title outline colour (0x00RRGGBB). */
 unsigned int taiko_title_category_outline(int palette_index);

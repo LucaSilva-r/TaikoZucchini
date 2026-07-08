@@ -172,6 +172,8 @@ OBJS            += $(QUIRC_OBJS)
 # Custom ftmodule.h/ftoption.h in include/freetype/config trim everything else.
 # Compiled with FT2_BUILD_LIBRARY; we supply FT_Memory, so no ftsystem.c.
 FREETYPE_SRCS := $(FREETYPE_DIR)/src/base/ftbase.c \
+                 $(FREETYPE_DIR)/src/base/ftglyph.c \
+                 $(FREETYPE_DIR)/src/base/ftstroke.c \
                  $(FREETYPE_DIR)/src/base/ftinit.c \
                  $(FREETYPE_DIR)/src/base/ftdebug.c \
                  $(FREETYPE_DIR)/src/base/ftsystem.c \
