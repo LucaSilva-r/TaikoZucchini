@@ -98,6 +98,7 @@ static uint32_t map_raw(uint16_t d1, uint16_t d2) {
     if (d1 & CELL_PAD_CTRL_R3)       m |= MENU_BTN_R3;
     if (d2 & CELL_PAD_CTRL_CROSS)    m |= MENU_BTN_CROSS;
     if (d2 & CELL_PAD_CTRL_CIRCLE)   m |= MENU_BTN_CIRCLE;
+    if (d2 & CELL_PAD_CTRL_SQUARE)   m |= MENU_BTN_SQUARE;
     return m;
 }
 

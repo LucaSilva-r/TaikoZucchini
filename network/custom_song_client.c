@@ -54,14 +54,6 @@ static void copy_limited(char *out, size_t cap, const char *src,
  * (no percentage). ponytail: per-asset/per-poll granularity, no chunk-level
  * progress. */
 static void loading_screen(const char *message, int num, int den) {
-    /* When the difficulty page is open, show progress there (a real bar) instead
-     * of the popup card. */
-    if (taiko_overlay_diffmode_is_on()) {
-        int pct = (den > 0 && num >= 0) ? num * 100 / den : -1;
-        taiko_overlay_diffmode_busy(message, pct);
-        return;
-    }
-
     static unsigned spin;            /* advances each indeterminate frame */
     char bar[48];
     int determinate = (den > 0 && num >= 0);

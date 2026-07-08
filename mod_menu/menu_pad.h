@@ -25,6 +25,7 @@ enum {
      * boot. F2 chosen because ESC appears to be swallowed by the system
      * during the early-boot window. */
     MENU_BTN_KB_ENTRY = 1 << 10,
+    MENU_BTN_SQUARE   = 1 << 11,
 };
 
 /* One-time init. Refcounted by libio; safe to call before/after the
