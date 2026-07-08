@@ -41,6 +41,10 @@ void pad_input_init(void);
  * to be invoked once per USIO frame from the bpreader hook. */
 void pad_input_consume(pad_snapshot_t *out);
 
+/* Inject one synthetic TEST-button edge (toggles the operator test/service
+ * menu, same as a real test press). Safe from any thread. */
+void pad_input_inject_test_edge(void);
+
 /* Discard any coin/service press that is armed-but-not-yet-released.
  * Called when a menu opens so the entry combo's held L3+R3 don't inject a
  * credit when finally released. Safe from any thread. */

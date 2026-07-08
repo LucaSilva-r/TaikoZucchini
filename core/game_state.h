@@ -18,6 +18,7 @@ typedef enum taiko_game_state {
     TAIKO_GAME_STATE_INTERMISSION,
     TAIKO_GAME_STATE_REWARD,
     TAIKO_GAME_STATE_SHOP,
+    TAIKO_GAME_STATE_SERVICE,   /* operator test/service menu (game paused) */
 } taiko_game_state_t;
 
 taiko_game_state_t taiko_game_state_current(void);

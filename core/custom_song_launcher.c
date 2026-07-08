@@ -12,6 +12,7 @@
 #include "game_state.h"
 #include "kb_input.h"
 #include "menu_pad.h"
+#include "pad_input.h"
 #include "network/custom_song_client.h"
 #include "overlay.h"
 #include "taiko_frame.h"
@@ -261,6 +262,18 @@ static void songs_screen(const ese_category_entry_t *cat) {
     }
 }
 
+/* Frames to let a scene toggle present behind our opaque cover. The game (not
+ * us) flips, so we set the cover active and sleep long enough for a few flips. */
+#define SETTLE_US (150 * 1000)
+
+/* Put the opaque cover on screen with a one-line status. */
+static void show_cover(const char *status) {
+    const char *line = status ? status : "";
+    taiko_overlay_menu_opaque(1);
+    taiko_overlay_menu_set("Custom Songs", &line, NULL, NULL, 1, 0, 0, NULL, NULL);
+    taiko_overlay_menu_active(1);
+}
+
 static void run_downloader(void) {
     ese_category_entry_t cats[ESE_CATEGORY_LIST_MAX];
     int cat_sel = 0;
@@ -270,26 +283,42 @@ static void run_downloader(void) {
         return;
     }
 
+    /* Gate first: input is suppressed so our menu navigation can't leak into
+     * the test menu underneath. The TEST-switch control below is applied every
+     * frame independent of gating, so gating doesn't block enter/exit. */
     taiko_frame_set_gated(1);
+
+    /* 1. Cover the screen FIRST so the test-menu transition is never seen. */
+    show_cover("Loading...");
+    sys_timer_usleep(SETTLE_US);
+
+    /* 2. Hold the TEST switch on -> game drops into the paused, silent test menu
+     * behind the cover. */
+    taiko_frame_set_test(1);
+    sys_timer_usleep(SETTLE_US);
     (void)menu_pad_pressed();
 
+    /* 3. Real menu. */
     int cat_count = ese_song_fetch_categories(cats, ESE_CATEGORY_LIST_MAX);
-    if (cat_count <= 0) {
+    if (cat_count > 0) {
+        for (;;) {
+            int cat = categories_screen(cats, cat_count, &cat_sel);
+            if (cat < 0)
+                break;                 /* O on categories = close */
+            songs_screen(&cats[cat]);  /* returns here on O / Back */
+        }
+    } else {
         taiko_overlay_show_prompt("Categories failed");
-        taiko_overlay_menu_active(0);
-        taiko_frame_set_gated(0);
-        (void)menu_pad_pressed();
-        return;
     }
 
-    for (;;) {
-        int cat = categories_screen(cats, cat_count, &cat_sel);
-        if (cat < 0)
-            break;                 /* O on categories = close */
-        songs_screen(&cats[cat]);  /* returns here on O / Back */
-    }
+    /* 4. Release the TEST switch behind the cover -> game exits to attract; let
+     * it settle, THEN drop the cover so the transition is never seen. */
+    show_cover("Closing...");
+    taiko_frame_set_test(0);
+    sys_timer_usleep(SETTLE_US);
 
     taiko_overlay_menu_active(0);
+    taiko_overlay_menu_opaque(0);
     taiko_frame_set_gated(0);
     (void)menu_pad_pressed();
 }
@@ -302,32 +331,43 @@ static void custom_song_launcher_thread(uint64_t arg) {
     int hold = 0;
     int refresh = 0;
     int f6_prev = 0;
+    int suppressing = 0;
 
     for (;;) {
-        /* Advertise the combo anywhere except mid-chart, where a recurring
-         * toast would nag over gameplay. The trigger itself still works. */
+        uint32_t held = menu_pad_held();
+
+        /* While a combo modifier (L3/R3) is held, gate USIO input to the game so
+         * the combo buttons (e.g. Square) don't leak through as a drum hit /
+         * scene advance during detection. menu_pad reads the pad directly, so we
+         * still see the combo. Released -> ungate. */
+        int mod = (held & (MENU_BTN_L3 | MENU_BTN_R3)) != 0;
+        if (mod && !suppressing) {
+            taiko_frame_set_gated(1);
+            suppressing = 1;
+        } else if (!mod && suppressing) {
+            taiko_frame_set_gated(0);
+            suppressing = 0;
+        }
+
+        /* Openable anywhere except mid-chart. run_downloader bounces into the
+         * paused test menu for the actual download, so it can't race the
+         * song-list build regardless of where it was opened. */
         if ((refresh % PROMPT_REFRESH_TICKS) == 0 &&
             taiko_game_state_current() != TAIKO_GAME_STATE_GAMEPLAY)
             taiko_overlay_show_prompt("Hold L3+Square or F6 to download songs");
         refresh++;
 
-        uint32_t held = menu_pad_held();
         int combo_held = (held & MENU_BTN_L3) && (held & MENU_BTN_SQUARE);
         int f6 = kb_input_keycode_held(CELL_KEYC_F6);
         int f6_edge = f6 && !f6_prev;
         f6_prev = f6;
 
-        if (f6_edge) {
-            run_downloader();
+        if (f6_edge || (combo_held && ++hold >= OPEN_HOLD_TICKS)) {
+            run_downloader();       /* manages its own gate; leaves ungated */
+            suppressing = 0;        /* resync: run_downloader ungated on exit */
             hold = 0;
             refresh = 0;
-        } else if (combo_held) {
-            if (++hold >= OPEN_HOLD_TICKS) {
-                run_downloader();
-                hold = 0;
-                refresh = 0;
-            }
-        } else {
+        } else if (!combo_held) {
             hold = 0;
         }
 

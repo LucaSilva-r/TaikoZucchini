@@ -161,6 +161,7 @@ static char g_message_box_title[OVERLAY_TEXT_CAP];
 static char g_message_box[OVERLAY_MESSAGE_CAP];
 
 static volatile int g_menu_active;
+static volatile int g_menu_opaque;   /* full-screen opaque backdrop under menu */
 static volatile int g_menu_cur = -1;
 static volatile int g_menu_reading = -1;
 static overlay_menu_state_t g_menu_state[3];
@@ -885,6 +886,13 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
     if (!vtx)
         return;
 
+    /* Opaque full-screen backdrop (downloader over the test menu): SWATCH_DARK
+     * is opaque black, matching the operator menu's background, so its entries
+     * are fully hidden behind ours. */
+    if (g_menu_opaque &&
+        !append_rect(&cmd, &b, 0, 0, (int)b.width, (int)b.height, SWATCH_DARK))
+        return;
+
     /* Panel + accent top bar. */
     if (!append_rect(&cmd, &b, x, y, box_w, box_h, 1) ||
         !append_rect(&cmd, &b, x, y, box_w, 3, 2))
@@ -1049,6 +1057,11 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
     int vtx_count = 0;
     overlay_vertex_t *vtx = text_begin(&vtx_io, &max_vtx);
     if (!vtx)
+        return;
+
+    /* Opaque full-screen backdrop (download progress over the test menu). */
+    if (g_menu_opaque &&
+        !append_rect(&cmd, &b, 0, 0, (int)b.width, (int)b.height, SWATCH_DARK))
         return;
 
     /* Background rects + the QR blit first; all text batched on top after. */
@@ -1251,6 +1264,10 @@ void taiko_overlay_menu_set(const char *title,
     copy_str(m->desc, sizeof m->desc, desc);
     copy_str(m->footer, sizeof m->footer, footer);
     g_menu_cur = slot;
+}
+
+void taiko_overlay_menu_opaque(int on) {
+    g_menu_opaque = on ? 1 : 0;
 }
 
 void taiko_overlay_menu_active(int on) {

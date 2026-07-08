@@ -38,6 +38,9 @@ void taiko_overlay_menu_set(const char *title,
                             int selected, int top,
                             const char *desc, const char *footer);
 void taiko_overlay_menu_active(int on);
+/* Draw an opaque full-screen backdrop under the menu (hides whatever is behind,
+ * e.g. the operator test menu). Off by default. */
+void taiko_overlay_menu_opaque(int on);
 
 /* Static info card surface with an optional QR code, blitted centred over the
  * game each flip while active (takes priority over the menu). Used for the

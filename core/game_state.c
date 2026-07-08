@@ -106,6 +106,7 @@ const char *taiko_game_state_name(taiko_game_state_t state) {
     case TAIKO_GAME_STATE_INTERMISSION:       return "intermission";
     case TAIKO_GAME_STATE_REWARD:             return "reward";
     case TAIKO_GAME_STATE_SHOP:               return "shop";
+    case TAIKO_GAME_STATE_SERVICE:            return "service";
     case TAIKO_GAME_STATE_UNKNOWN:
     default:                                  return "unknown";
     }
@@ -213,6 +214,11 @@ static int extract_fumen_info(const char *path, char *song, unsigned int song_ca
 static taiko_game_state_t classify_open_path(const char *path) {
     if (!path)
         return TAIKO_GAME_STATE_UNKNOWN;
+
+    /* Operator test/service menu (game logic + audio fully paused). Detected by
+     * its own asset dir so the song downloader can gate to this safe state. */
+    if (path_contains(path, "/testmode/"))
+        return TAIKO_GAME_STATE_SERVICE;
 
     if (path_contains(path, "/data/movie/attract_") ||
         path_contains(path, "/data/lumendata/packed/attract/"))

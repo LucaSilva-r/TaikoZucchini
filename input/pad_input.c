@@ -321,6 +321,19 @@ static void worker_main(uint64_t arg) {
     sys_ppu_thread_exit(0);
 }
 
+/* Inject one synthetic TEST-button edge into the USIO stream. The game reads it
+ * exactly like a real operator test press: toggles the test/service menu (enter
+ * if outside, exit if inside). Used by the song downloader to bounce into the
+ * quiescent test menu for a safe DB refresh, then back out. */
+void pad_input_inject_test_edge(void) {
+    if (!g_initialized)
+        return;
+    sys_lwmutex_lock(&g_pad_lock, 0);
+    if (g_test_edges < 0xFFFFu)
+        g_test_edges++;
+    sys_lwmutex_unlock(&g_pad_lock);
+}
+
 void pad_input_consume(pad_snapshot_t *out) {
     if (!out) return;
     if (!g_initialized) {

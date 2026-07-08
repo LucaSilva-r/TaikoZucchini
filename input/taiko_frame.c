@@ -48,6 +48,12 @@ void taiko_frame_set_gated(int on) {
     }
 }
 
+void taiko_frame_set_test(int on) {
+    /* g_test_on drives the 0x0080 digital bit every frame (outside the gate's
+     * snapshot clear), so this holds the test switch regardless of gating. */
+    g_test_on = on ? 1 : 0;
+}
+
 void taiko_frame_init(void) {
     g_coin_counter = 0;
     g_test_on = 0;
