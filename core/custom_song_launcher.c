@@ -53,19 +53,31 @@ static int ascii_contains_ci(const char *s, const char *needle) {
  * the in-game song-board title outline (used by hooks/songselect_natives.c). */
 unsigned char taiko_custom_category_palette(const char *id, const char *title,
                                             int idx) {
+    (void)idx;
     if (!id) id = "";
     if (!title) title = "";
+    if (ascii_contains_ci(id, "pop") || ascii_contains_ci(title, "pop"))
+        return 0; /* J-POP: cyan */
     if (ascii_contains_ci(id, "anime") || ascii_contains_ci(title, "anime"))
-        return 3; /* orange */
+        return 3; /* Anime: orange */
     if (ascii_contains_ci(id, "vocaloid") ||
         ascii_contains_ci(title, "vocaloid"))
-        return 7; /* pale */
+        return 7; /* Vocaloid: pale */
+    if (ascii_contains_ci(id, "kids") || ascii_contains_ci(title, "kids") ||
+        ascii_contains_ci(title, "child"))
+        return 1; /* Kids: pink */
+    if (ascii_contains_ci(id, "variety") || ascii_contains_ci(title, "variety"))
+        return 2; /* Variety: green */
+    if (ascii_contains_ci(id, "classic") || ascii_contains_ci(title, "classic"))
+        return 4; /* Classic: yellow/brown */
     if (ascii_contains_ci(id, "game") || ascii_contains_ci(title, "game"))
-        return 2; /* green */
-    if (ascii_contains_ci(id, "pop") || ascii_contains_ci(title, "pop"))
-        return 0; /* cyan */
+        return 5; /* Game Music: purple */
+    if (ascii_contains_ci(id, "namco") || ascii_contains_ci(title, "namco") ||
+        ascii_contains_ci(id, "bandai") || ascii_contains_ci(title, "bandai") ||
+        ascii_contains_ci(id, "original") || ascii_contains_ci(title, "original"))
+        return 6; /* Namco Original: red */
 
-    return (unsigned char)(idx % 7);
+    return 6; /* Match the genre-id fallback: Namco Original. */
 }
 
 unsigned int taiko_custom_category_outline_argb(const char *id,

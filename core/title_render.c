@@ -89,7 +89,8 @@ static struct FT_MemoryRec_ g_ftmem = { NULL, ft_alloc, ft_free_, ft_realloc };
  *   LONG + song_name titles are black.
  *   SHORT titles are colour-coded by genre. Index = category palette (see
  *   taiko_custom_category_palette in custom_song_launcher.c):
- *     pop->0  game->2  anime->3  vocaloid->7   else (category_index % 7)
+ *     pop->0  kids->1  variety->2  anime->3  classic->4
+ *     game->5  namco->6  vocaloid->7
  */
 #define TITLE_OUTLINE_BLACK    0x000000u
 #define TITLE_OUTLINE_DEFAULT  0x141428u  /* SHORT fallback when no category  */

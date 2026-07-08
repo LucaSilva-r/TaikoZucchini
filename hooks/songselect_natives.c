@@ -4863,7 +4863,7 @@ static const char *ssn_rt_title_text(uint32_t index) {
 #define SSN_RT_CACHE_DIR "/dev_hdd0/plugins/taiko/title_cache"
 #define SSN_RT_CACHE_MAGIC 0x545a5443u /* TZTC */
 #define SSN_RT_CACHE_VERSION 1u
-#define SSN_RT_CACHE_RENDERER_VERSION 6u
+#define SSN_RT_CACHE_RENDERER_VERSION 7u
 
 typedef struct ssn_rt_cache_header {
     uint32_t magic;
