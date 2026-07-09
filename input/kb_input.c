@@ -90,6 +90,10 @@ static sys_lwmutex_t g_kb_lock;
 static uint8_t  g_kb_keymap[KB_PORTS][PAD_ACT_COUNT][KB_MAX_BINDS]; /* 0 = end */
 static uint32_t g_kb_level[KB_PORTS];
 static uint8_t  g_kb_hit_edges[KB_PORTS][4];
+/* Menu-nav drum latch, mirror of pad_input's g_menu_hit_edges: set from the
+ * same rising edges as g_kb_hit_edges, consumed independently by the mod menu
+ * so keyboard drum hits drive nav without being stolen from the USIO frame. */
+static uint8_t  g_kb_menu_hit_edges[KB_PORTS][4];
 static uint16_t g_kb_coin_edges;
 static uint16_t g_kb_test_edges;
 static uint32_t g_kb_prev_pressed[8];  /* 256-bit bitmap, owned by worker */
@@ -397,8 +401,10 @@ static void poll_and_accumulate_locked(void) {
         g_kb_level[p] = lvl;
 
         for (int i = 0; i < 4; i++) {
-            if (any_rising(g_kb_keymap[p][hit_acts[i]], pressed, g_kb_prev_pressed))
+            if (any_rising(g_kb_keymap[p][hit_acts[i]], pressed, g_kb_prev_pressed)) {
                 g_kb_hit_edges[p][i] = 1;
+                g_kb_menu_hit_edges[p][i] = 1;
+            }
         }
     }
 
@@ -451,6 +457,17 @@ void kb_input_poll_tick(void) {
     sys_lwmutex_unlock(&g_kb_lock);
 }
 
+void kb_input_consume_menu_drum(uint8_t out[4]) {
+    if (!g_initialized) return;
+    sys_lwmutex_lock(&g_kb_lock, 0);
+    for (int p = 0; p < KB_PORTS; p++)
+        for (int i = 0; i < 4; i++) {
+            out[i] |= g_kb_menu_hit_edges[p][i];
+            g_kb_menu_hit_edges[p][i] = 0;
+        }
+    sys_lwmutex_unlock(&g_kb_lock);
+}
+
 void kb_input_merge(pad_snapshot_t *out) {
     if (!out || !g_initialized) return;
     sys_lwmutex_lock(&g_kb_lock, 0);
@@ -500,6 +517,7 @@ void kb_input_init(void) {
     memset(g_kb_port_state, 0, sizeof g_kb_port_state);
     memset(g_kb_level, 0, sizeof g_kb_level);
     memset(g_kb_hit_edges, 0, sizeof g_kb_hit_edges);
+    memset(g_kb_menu_hit_edges, 0, sizeof g_kb_menu_hit_edges);
     g_kb_coin_edges = 0;
     g_kb_test_edges = 0;
 

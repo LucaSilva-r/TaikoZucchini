@@ -27,6 +27,11 @@ void kb_input_merge(pad_snapshot_t *out);
  * "is key X held" probe without going through the per-player binding
  * table. */
 int kb_input_keycode_held(unsigned char code);
+
+/* OR the keyboard menu-nav drum edges (PAD_ACT_HIT_* slot order) into out[]
+ * and clear them. Independent latch from kb_input_merge's game-side edges.
+ * Safe no-op until kb_input_init has run. */
+void kb_input_consume_menu_drum(uint8_t out[4]);
 int kb_input_saved_cards_held(void);
 
 void kb_input_seed_defaults(void);

@@ -93,6 +93,10 @@ static bind_mask_t g_keymap[PAD_INPUT_PORTS][PAD_ACT_COUNT];
 static uint32_t    g_live_level[PAD_INPUT_PORTS];
 static uint32_t    g_sticky_press[PAD_INPUT_PORTS];
 static uint8_t     g_hit_edges[PAD_INPUT_PORTS][4];
+/* Second drum-edge latch, read by the mod menu (pad_input_consume_menu_drum).
+ * Set from the same rising edges as g_hit_edges but consumed independently so
+ * the menu and the game-side USIO frame don't steal hits from each other. */
+static uint8_t     g_menu_hit_edges[PAD_INPUT_PORTS][4];
 static uint16_t    g_coin_edges;
 static uint16_t    g_test_edges;
 
@@ -266,8 +270,10 @@ static void poll_and_accumulate_locked(void) {
         uint32_t rising = raw & ~prev;
         for (int i = 0; i < 4; i++) {
             bind_mask_t m = g_keymap[port][hit_acts[i]];
-            if ((rising & m) != 0)
+            if ((rising & m) != 0) {
                 g_hit_edges[port][i] = 1;
+                g_menu_hit_edges[port][i] = 1;
+            }
         }
 
         /* Coin (L3) and Service (R3): arm on press, emit on release.
@@ -332,6 +338,21 @@ void pad_input_inject_test_edge(void) {
     if (g_test_edges < 0xFFFFu)
         g_test_edges++;
     sys_lwmutex_unlock(&g_pad_lock);
+}
+
+void pad_input_consume_menu_drum(uint8_t out[4]) {
+    out[0] = out[1] = out[2] = out[3] = 0;
+    if (g_initialized) {
+        sys_lwmutex_lock(&g_pad_lock, 0);
+        for (int p = 0; p < PAD_INPUT_PORTS; p++)
+            for (int i = 0; i < 4; i++) {
+                out[i] |= g_menu_hit_edges[p][i];
+                g_menu_hit_edges[p][i] = 0;
+            }
+        sys_lwmutex_unlock(&g_pad_lock);
+    }
+    /* Fold in keyboard drum hits (no-op until kb_input inits). */
+    kb_input_consume_menu_drum(out);
 }
 
 void pad_input_consume(pad_snapshot_t *out) {

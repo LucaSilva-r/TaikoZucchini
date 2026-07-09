@@ -994,6 +994,16 @@ void menu_maybe_open(void) {
 #define MAIN_PAD_COMBO       (MENU_BTN_L3 | MENU_BTN_R3)
 #define MAIN_PAD_HOLD_TICKS  15   /* ~0.25 s @ IG_TICK_US */
 
+/* Drum open trigger: a deliberate side-specific ka sequence — double ka-left,
+ * double ka-right, double ka-left (L L R R L L). Harder to hit by accident than
+ * a plain roll. A don, a ka on the wrong side, or two rims in one tick resets
+ * the match; a gap longer than KAT_STEP_WINDOW also resets. Only advanced while
+ * the game state allows the menu (attract/shop). */
+#define KAT_STEP_WINDOW      45   /* ~0.75 s @ IG_TICK_US between hits */
+/* 0 = ka-left (SL), 1 = ka-right (SR). */
+static const uint8_t KAT_PATTERN[] = { 0, 0, 1, 1, 0, 0 };
+#define KAT_PATTERN_LEN ((int)(sizeof(KAT_PATTERN) / sizeof(KAT_PATTERN[0])))
+
 /* Row codes stored in g_ig_rows[]. */
 #define IG_Q_RESUME    0
 #define IG_Q_SAVE      1
@@ -1200,7 +1210,7 @@ static void ig_render(void) {
 
     const char *footer = g_status
         ? g_status
-        : "ARROWS move  X select  START/F10 save  O close  -  changes apply next boot";
+        : "ARROWS move  X select  O close  -  Drum: ka=move don-R=select don-L=back";
     const char *desc = ig_desc_for(g_ig_rows[g_ig_sel]);
 
     taiko_overlay_menu_set("Mod Settings", lptrs, vptrs, kinds,
@@ -1503,7 +1513,7 @@ static void main_render(const int *rows, int count, int sel) {
 
     taiko_overlay_menu_set(title, lines, values, kinds,
                            count, sel, 0, main_row_desc(rows[sel]),
-                           "Up/Down  X:select  O/F4:close");
+                           "Up/Down  X:select  O/F4:close  -  Drum: ka=move don-R=select don-L=back");
     taiko_overlay_menu_active(1);
 }
 
@@ -1598,6 +1608,8 @@ static void ingame_menu_thread(uint64_t arg) {
 
     int f4_prev = 0;
     int pad_hold = 0;
+    int kat_step = 0;     /* how many pattern hits matched so far */
+    int kat_window = 0;   /* ticks left to land the next hit */
     for (;;) {
         int open = 0;
 
@@ -1618,12 +1630,46 @@ static void ingame_menu_thread(uint64_t arg) {
             pad_hold = 0;
         }
 
+        /* Drum kat sequence (see KAT_PATTERN). Drain the menu-drum latch every
+         * tick regardless so hits don't pile up while closed; only advance the
+         * match when the game state allows opening (else a song's kas arm it). */
+        uint8_t drum[4];
+        pad_input_consume_menu_drum(drum);
+        if (taiko_game_state_allows_mod_menu()) {
+            if (kat_step > 0 && --kat_window <= 0)
+                kat_step = 0;   /* too slow — restart */
+
+            int ka_l = drum[PAD_ACT_HIT_SL], ka_r = drum[PAD_ACT_HIT_SR];
+            int don  = drum[PAD_ACT_HIT_CL] || drum[PAD_ACT_HIT_CR];
+
+            if (don || (ka_l && ka_r)) {
+                kat_step = 0;   /* a don, or both rims at once, breaks it */
+            } else if (ka_l || ka_r) {
+                int side = ka_r ? 1 : 0;
+                if (side == KAT_PATTERN[kat_step]) {
+                    kat_step++;
+                    kat_window = KAT_STEP_WINDOW;
+                    if (kat_step >= KAT_PATTERN_LEN)
+                        open = 1;
+                } else {
+                    /* Wrong side: restart, but this hit may itself be step 0. */
+                    kat_step = (side == KAT_PATTERN[0]) ? 1 : 0;
+                    kat_window = KAT_STEP_WINDOW;
+                }
+            }
+        } else {
+            kat_step = 0;
+            kat_window = 0;
+        }
+
         if (open && !g_main_menu_open && taiko_game_state_allows_mod_menu()) {
             menu_main_run();
             /* Resync: the trigger key/combo is likely still held from the
              * close action. Require a fresh release before the next open. */
             f4_prev = 1;
             pad_hold = 0;
+            kat_step = 0;
+            kat_window = 0;
         } else if (open) {
             pad_hold = 0;
         }

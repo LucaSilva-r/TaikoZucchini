@@ -45,6 +45,13 @@ void pad_input_consume(pad_snapshot_t *out);
  * menu, same as a real test press). Safe from any thread. */
 void pad_input_inject_test_edge(void);
 
+/* Snapshot + clear the mod-menu drum-nav edges. Independent latch from the
+ * game-side hit edges (pad_input_consume): the menu can read drum hits
+ * without stealing them from the USIO frame, and vice-versa. out[i] uses the
+ * PAD_ACT_HIT_* slot order (SL, CL, CR, SR), OR'd across both ports. Safe
+ * from any thread. */
+void pad_input_consume_menu_drum(uint8_t out[4]);
+
 /* Discard any coin/service press that is armed-but-not-yet-released.
  * Called when a menu opens so the entry combo's held L3+R3 don't inject a
  * credit when finally released. Safe from any thread. */

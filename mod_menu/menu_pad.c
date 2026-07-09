@@ -9,6 +9,7 @@
 
 #include "debug.h"
 #include "kb_input.h"
+#include "pad_input.h"
 
 #define MAX_PADS 2
 #define KB_SCAN_PORTS 4
@@ -207,11 +208,27 @@ uint32_t menu_pad_held(void) {
  * during a steady hold. */
 static uint32_t g_armed = 0xFFFFFFFFu;
 
+/* Drum-nav edges. Drum hits are momentary pulses latched by the pad worker
+ * and cleared on read, so they are already one-shot — no arming needed.
+ *   ka left  (SL) -> up      ka right (SR) -> down
+ *   don right (CR) -> confirm don left  (CL) -> back
+ * Face-button delete etc. stay on TRIANGLE/START, unreachable from the drum. */
+static uint32_t menu_drum_edges(void) {
+    uint8_t d[4];
+    pad_input_consume_menu_drum(d);
+    uint32_t m = 0;
+    if (d[PAD_ACT_HIT_SL]) m |= MENU_BTN_UP;
+    if (d[PAD_ACT_HIT_SR]) m |= MENU_BTN_DOWN;
+    if (d[PAD_ACT_HIT_CR]) m |= MENU_BTN_CROSS;
+    if (d[PAD_ACT_HIT_CL]) m |= MENU_BTN_CIRCLE;
+    return m;
+}
+
 uint32_t menu_pad_pressed(void) {
     uint32_t cur = menu_pad_held();
     uint32_t edge = cur & ~g_prev_held & g_armed;
     g_armed |= ~cur;     /* re-arm released buttons */
     g_armed &= ~edge;    /* disarm the ones we just fired */
     g_prev_held = cur;
-    return edge;
+    return edge | menu_drum_edges();
 }
