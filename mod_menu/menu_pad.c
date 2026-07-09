@@ -168,9 +168,18 @@ static uint32_t map_kb_bridge(void) {
     return m;
 }
 
-uint32_t menu_pad_held(void) {
-    if (!g_inited) return 0;
+/* Pad direction/face bits that collide with the drum keymap (d-pad and face
+ * buttons double as drum sensors). Suppressed from nav in drum-nav mode. */
+#define MENU_DRUM_CONFLICT (MENU_BTN_UP | MENU_BTN_DOWN | MENU_BTN_LEFT | \
+                            MENU_BTN_RIGHT | MENU_BTN_CROSS | MENU_BTN_CIRCLE | \
+                            MENU_BTN_SQUARE | MENU_BTN_TRIANGLE)
 
+static int g_drum_nav;
+
+void menu_pad_set_drum_nav(int on) { g_drum_nav = on ? 1 : 0; }
+int  menu_pad_get_drum_nav(void)   { return g_drum_nav; }
+
+static uint32_t sample_pad_held(void) {
     /* Blind-poll all ports. cellPadGetInfo2 may report no connected
      * pads during the early-boot window even though cellPadGetData
      * still returns valid samples — skipping the connected check
@@ -190,16 +199,28 @@ uint32_t menu_pad_held(void) {
         scanned++;
         held |= map_raw(g_cache_d1[port], g_cache_d2[port]);
     }
-
-    if (kb_input_ready()) {
-        held |= map_kb_bridge();
-    } else {
-        uint32_t kb_bm[8];
-        kb_sample(kb_bm);
-        held |= map_kb(kb_bm);
-    }
-
     return held;
+}
+
+static uint32_t sample_kb_held(void) {
+    if (kb_input_ready())
+        return map_kb_bridge();
+    uint32_t kb_bm[8];
+    kb_sample(kb_bm);
+    return map_kb(kb_bm);
+}
+
+uint32_t menu_pad_held(void) {
+    if (!g_inited) return 0;
+    return sample_pad_held() | sample_kb_held();
+}
+
+uint32_t menu_pad_nav_held(void) {
+    if (!g_inited) return 0;
+    uint32_t pad = sample_pad_held();
+    uint32_t kb  = sample_kb_held();
+    if (g_drum_nav) pad &= ~MENU_DRUM_CONFLICT;
+    return pad | kb;
 }
 
 /* Bits currently armed for edge-firing. A bit must be observed released
@@ -225,7 +246,7 @@ static uint32_t menu_drum_edges(void) {
 }
 
 uint32_t menu_pad_pressed(void) {
-    uint32_t cur = menu_pad_held();
+    uint32_t cur = menu_pad_nav_held();
     uint32_t edge = cur & ~g_prev_held & g_armed;
     g_armed |= ~cur;     /* re-arm released buttons */
     g_armed &= ~edge;    /* disarm the ones we just fired */

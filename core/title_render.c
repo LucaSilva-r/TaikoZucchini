@@ -1732,6 +1732,32 @@ int taiko_text_render_argb(const char *utf8, void *out, unsigned int max_w,
 }
 
 #ifndef TITLE_RENDER_HOST_TEST
+/* FreeType custom stream: read glyph/table data straight off the open font fd
+ * on demand. Avoids holding the ~7MB TTF resident, which starved the lv2
+ * memory container by song-select on real HW. */
+static FT_StreamRec g_ftstream;
+
+static unsigned long ft_stream_read(FT_Stream stream, unsigned long offset,
+                                    unsigned char *buffer, unsigned long count) {
+    int fd = (int)(intptr_t)stream->descriptor.pointer;
+    uint64_t pos = 0;
+    uint64_t nread = 0;
+    if (cellFsLseek(fd, (int64_t)offset, CELL_FS_SEEK_SET, &pos) != CELL_FS_SUCCEEDED)
+        return 0;
+    if (count == 0)
+        return 0;                 /* seek-only probe */
+    if (cellFsRead(fd, buffer, count, &nread) != CELL_FS_SUCCEEDED)
+        return 0;
+    return (unsigned long)nread;
+}
+
+static void ft_stream_close(FT_Stream stream) {
+    int fd = (int)(intptr_t)stream->descriptor.pointer;
+    if (fd >= 0)
+        cellFsClose(fd);
+    stream->descriptor.pointer = (void *)(intptr_t)-1;
+}
+
 static int font_ready(void) {
     if (g_font_state) return g_font_state == 1;
     g_font_state = -1;
@@ -1747,42 +1773,34 @@ static int font_ready(void) {
         return 0;
     }
     uint64_t size = st.st_size;
-    uint64_t pages = (size + (1024 * 1024 - 1)) & ~(uint64_t)(1024 * 1024 - 1);
-    sys_addr_t addr = 0;
-    if (sys_memory_allocate(pages, SYS_MEMORY_PAGE_SIZE_1M, &addr) != 0) {
-        dbg_print("[title] font alloc failed\n");
-        cellFsClose(fd);
-        return 0;
-    }
-    unsigned char *buf = (unsigned char *)(uintptr_t)addr;
-    uint64_t off = 0;
-    while (off < size) {
-        uint64_t n = 0;
-        if (cellFsRead(fd, buf + off, size - off, &n) != CELL_FS_SUCCEEDED || n == 0)
-            break;
-        off += n;
-    }
-    cellFsClose(fd);
-    if (off != size) {
-        dbg_print("[title] font read short\n");
-        sys_memory_free(addr);
-        return 0;
-    }
+
+    /* Stream the TTF off disk instead of loading it resident (see g_ftstream).
+     * fd is now owned by FreeType and closed via ft_stream_close. */
+    memset(&g_ftstream, 0, sizeof(g_ftstream));
+    g_ftstream.size = (unsigned long)size;
+    g_ftstream.pos = 0;
+    g_ftstream.descriptor.pointer = (void *)(intptr_t)fd;
+    g_ftstream.read = ft_stream_read;
+    g_ftstream.close = ft_stream_close;
 
     if (FT_New_Library(&g_ftmem, &g_lib) != 0) {
         dbg_print("[title] FT_New_Library failed\n");
-        sys_memory_free(addr);
+        cellFsClose(fd);
         return 0;
     }
     FT_Add_Default_Modules(g_lib);
-    if (FT_New_Memory_Face(g_lib, buf, (FT_Long)size, 0, &g_face) != 0) {
-        dbg_print("[title] FT_New_Memory_Face failed\n");
-        sys_memory_free(addr);
-        return 0;
+    {
+        FT_Open_Args args;
+        memset(&args, 0, sizeof(args));
+        args.flags = FT_OPEN_STREAM;
+        args.stream = &g_ftstream;
+        if (FT_Open_Face(g_lib, &args, 0, &g_face) != 0) {
+            dbg_print("[title] FT_Open_Face failed\n");
+            return 0;             /* FT_Open_Face closed the stream (fd) */
+        }
     }
     if (FT_Set_Pixel_Sizes(g_face, 0, REF_PX) != 0) {
         dbg_print("[title] FT_Set_Pixel_Sizes failed\n");
-        sys_memory_free(addr);
         return 0;
     }
 

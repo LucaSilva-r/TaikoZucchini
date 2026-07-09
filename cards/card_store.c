@@ -141,6 +141,13 @@ int card_store_add(const char *label, const char *code) {
     return 1;
 }
 
+int card_store_rename(int i, const char *label) {
+    if (i < 0 || i >= g_count) return 0;
+    copy_label(g_cards[i].label, label, i);
+    card_store_save();
+    return 1;
+}
+
 int card_store_remove(int i) {
     if (i < 0 || i >= g_count) return 0;
     for (int j = i; j < g_count - 1; j++)

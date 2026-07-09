@@ -5217,8 +5217,11 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
  * the game allocator can tear it down safely; after each upload we copy the
  * produced texels into our RSX-mapped memory and redirect only the sampled IO
  * offset to our buffer. Slots are LRU-reused by re-uploading pixels. */
-#define SSN_RT_POOL_LONG  20u
-#define SSN_RT_POOL_SHORT 20u
+/* ponytail: 10+10 keeps the one-time 1MB-page alloc at ~3MB (was ~6MB and
+ * failed sys_memory_allocate on real HW once the container fragmented by
+ * song-select). Bump back toward 20 if scrolling re-uploads visibly stutter. */
+#define SSN_RT_POOL_LONG  10u
+#define SSN_RT_POOL_SHORT 10u
 #define SSN_RT_POOL_HUD   1u   /* gameplay/result horizontal texture on demand */
 #define SSN_RT_POOL_TRANS 1u   /* scene-change texture is rendered on demand */
 #define SSN_RT_POOL_TOTAL (SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT + \

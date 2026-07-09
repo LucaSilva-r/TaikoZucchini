@@ -668,7 +668,7 @@ typedef struct {
 
 static uint32_t scroll_repeat_tick(scroll_repeat_t *r, uint32_t edge) {
     uint32_t edge_dir = edge & (MENU_BTN_UP | MENU_BTN_DOWN);
-    uint32_t held_dir = menu_pad_held() & (MENU_BTN_UP | MENU_BTN_DOWN);
+    uint32_t held_dir = menu_pad_nav_held() & (MENU_BTN_UP | MENU_BTN_DOWN);
 
     if (edge_dir) {
         r->dir = (edge_dir & MENU_BTN_UP) ? MENU_BTN_UP : MENU_BTN_DOWN;
@@ -1544,6 +1544,10 @@ static void menu_main_run(void) {
 
     pad_input_cancel_pending();
     taiko_frame_set_gated(1);
+    /* In-game: the pad's d-pad/face buttons are wired to drum sensors, so the
+     * discrete pad nav would fight the drum. Navigate every in-game overlay by
+     * drum (ka=move, don-R=select, don-L=back); all submenus inherit this. */
+    menu_pad_set_drum_nav(1);
     (void)menu_pad_pressed();
 
     int rows[MAIN_ROWS_MAX];
@@ -1596,6 +1600,7 @@ static void menu_main_run(void) {
     }
 
     taiko_overlay_menu_active(0);
+    menu_pad_set_drum_nav(0);
     taiko_frame_set_gated(0);
     (void)menu_pad_pressed();
     g_main_menu_open = 0;

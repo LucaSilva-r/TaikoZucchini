@@ -25,4 +25,8 @@ int  card_store_add(const char *label, const char *code);
 /* Remove card i and persist. Returns 1 on success. */
 int  card_store_remove(int i);
 
+/* Relabel card i and persist. Empty label becomes an auto name.
+ * Returns 1 on success. */
+int  card_store_rename(int i, const char *label);
+
 #endif

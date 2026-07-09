@@ -242,6 +242,64 @@ static int confirm_delete(const char *label) {
     }
 }
 
+/* Per-card action menu, opened by confirming a card in the list. Drum-navigable
+ * like every in-game overlay. Returns 1 if the picker should close (card was
+ * used), 0 to return to the list (deleted, renamed, or backed out). */
+static int card_action_menu(int idx) {
+    const char *label = card_store_label(idx);
+    int sel = 0;
+    (void)menu_pad_pressed();
+    for (;;) {
+        const char *lines[5];
+        int n = 0;
+        int r_use = n;    lines[n++] = "Use this card";
+        int r_code = n;   lines[n++] = "Show access code / QR";
+        int r_rename = n; lines[n++] = "Rename";
+        int r_delete = n; lines[n++] = "Delete";
+        int r_back = n;   lines[n++] = "Back";
+
+        char title[CARD_LABEL_CAP + 8];
+        snprintf(title, sizeof title, "Card: %s", label ? label : "?");
+        taiko_overlay_menu_set(title, lines, NULL, NULL, n, sel, 0, NULL,
+                               "don-R/X:select  don-L/O:back");
+        taiko_overlay_menu_active(1);
+
+        uint32_t edge = menu_pad_pressed();
+        if (edge & MENU_BTN_UP)   { if (--sel < 0) sel = n - 1; }
+        if (edge & MENU_BTN_DOWN) { if (++sel >= n) sel = 0; }
+        if (edge & MENU_BTN_CIRCLE) return 0;
+        if (edge & MENU_BTN_CROSS) {
+            if (sel == r_use) {
+                const char *code = card_store_code(idx);
+                if (code) replay_card(code);
+                return 1;
+            } else if (sel == r_code) {
+                const char *code = card_store_code(idx);
+                if (code) show_card_screen(code, 0);
+                (void)menu_pad_pressed();
+            } else if (sel == r_rename) {
+                char buf[CARD_LABEL_CAP];
+                taiko_overlay_menu_active(0);
+                if (menu_osk_input("Card label", label ? label : "",
+                                   MENU_OSK_TEXT, buf, sizeof buf) == 0)
+                    card_store_rename(idx, buf);
+                taiko_overlay_menu_active(1);
+                label = card_store_label(idx);
+                (void)menu_pad_pressed();
+            } else if (sel == r_delete) {
+                if (confirm_delete(label)) {
+                    card_store_remove(idx);
+                    return 0;   /* card gone — back to list */
+                }
+                (void)menu_pad_pressed();
+            } else if (sel == r_back) {
+                return 0;
+            }
+        }
+        sys_timer_usleep(TICK_US);
+    }
+}
+
 int card_picker_available(void) {
     return g_cfg.saved_card_prompt &&
            bpreader_hook_reader_accepting_card() &&
@@ -290,42 +348,25 @@ void card_picker_run(void) {
 
         taiko_overlay_menu_set("Saved Cards", lines, NULL, NULL, total, sel, top,
                                NULL,
-                               "Up/Down  X:select  Right:show code  Triangle:delete  O:back");
+                               "ka:move  don-R/X:select  don-L/O:back");
         taiko_overlay_menu_active(1);
 
         uint32_t edge = menu_pad_pressed();
         if (edge & MENU_BTN_UP)   sel--;
         if (edge & MENU_BTN_DOWN) sel++;
 
-        /* Right (d-pad or keyboard arrow) shows the highlighted card's access
-         * code + registration QR. No-op on the trailing action rows. */
-        if ((edge & MENU_BTN_RIGHT) && sel < n) {
-            const char *code = card_store_code(sel);
-            if (code)
-                show_card_screen(code, 0);
-            (void)menu_pad_pressed();
-        }
-
         if (edge & MENU_BTN_CIRCLE) {
             break;
         }
 
-        /* Triangle deletes the highlighted card (with confirmation). On action
-         * rows it does nothing — Quit is an explicit menu item. */
-        if ((edge & MENU_BTN_TRIANGLE) && sel < n) {
-            if (confirm_delete(card_store_label(sel))) {
-                card_store_remove(sel);
-                if (sel > 0) sel--;
-            }
-            (void)menu_pad_pressed();
-        }
-
         if (edge & MENU_BTN_CROSS) {
             if (sel < n) {
-                const char *code = card_store_code(sel);
-                if (code)
-                    replay_card(code);
-                break;
+                /* Confirm a card -> per-card action menu (use/show/rename/
+                 * delete). Deletion lives here so it can't fire from a stray
+                 * drum hit on the list; it takes an explicit select + confirm. */
+                if (card_action_menu(sel))
+                    break;
+                (void)menu_pad_pressed();
             } else if (sel == create_row) {
                 if (action_create_online())
                     break;

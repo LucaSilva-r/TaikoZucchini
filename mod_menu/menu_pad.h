@@ -39,11 +39,25 @@ int  menu_pad_init(void);
 void menu_pad_shutdown(void);
 
 /* Snapshot current state across all connected pads (OR'd). Returns the
- * bitmask of MENU_BTN_* currently held. */
+ * bitmask of MENU_BTN_* currently held. Raw — ignores drum-nav mode. Used by
+ * the watcher for the L3+R3 open combo. */
 uint32_t menu_pad_held(void);
 
+/* Like menu_pad_held but honours drum-nav mode: in drum mode the pad's
+ * direction/face bits are dropped (they double as drum sensors and would
+ * fight the drum edges). Keyboard bits always survive. */
+uint32_t menu_pad_nav_held(void);
+
 /* Edge-triggered: returns mask of buttons newly pressed since the last
- * call. Internally tracks previous state. */
+ * call. Internally tracks previous state. In drum-nav mode, edges come from
+ * the drum (ka=up/down, don=confirm/back) plus the keyboard, not the pad
+ * d-pad/face. */
 uint32_t menu_pad_pressed(void);
+
+/* Drum-nav mode. On for the in-game overlay menus (the pad's face/dir
+ * buttons are wired to drum sensors there, so nav must come from the drum
+ * mapping); off for the boot menu (no drum yet — raw pad nav). */
+void menu_pad_set_drum_nav(int on);
+int  menu_pad_get_drum_nav(void);
 
 #endif
