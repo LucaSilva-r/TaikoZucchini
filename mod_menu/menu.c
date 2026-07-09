@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <cell/sysmodule.h>
@@ -22,8 +23,13 @@
 #include "menu_font_42.h"
 #include "menu_osk.h"
 #include "ftp_server.h"
+#include "card_picker.h"
+#include "card_store.h"
+#include "custom_song_launcher.h"
+#include "config/version.h"
 #include "storage/chassisinfo_schema.h"
 #include "game_version.h"
+#include "game_state.h"
 #include "overlay.h"
 #include "taiko_frame.h"
 #include "kb_input.h"
@@ -176,8 +182,8 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "QR card reader",
       "Uses the camera to scan Banapass QR cards. Requires USIO emulation and camera input hooks.",
       F_QR_CARD_READER, 0 },
-    { ITEM_TOGGLE,  "Saved-card prompt",
-      "Shows the saved-card overlay prompt while the game waits for a card. Stored cards still work without QR.",
+    { ITEM_TOGGLE,  "Saved-card menu",
+      "Shows the card-reader row in the main menu while the game waits for a card. Stored cards still work without QR.",
       F_SAVED_CARD_PROMPT, 0 },
 
     { ITEM_SECTION, "Network", "", 0, 0 },
@@ -426,10 +432,10 @@ static void toggle_field(field_id_t id) {
         else if (qr_was_enabled)
             g_status = "QR disabled because it requires USIO emulation";
         else if (prompt_was_enabled)
-            g_status = "Saved-card prompt disabled because it requires USIO emulation";
+            g_status = "Saved-card menu disabled because it requires USIO emulation";
     } else if (id == F_SAVED_CARD_PROMPT && new_value && !g_cfg.usio_emulation) {
         g_cfg.usio_emulation = 1;
-        g_status = "Saved-card prompt enabled: USIO emulation also enabled";
+        g_status = "Saved-card menu enabled: USIO emulation also enabled";
     } else if (id == F_CAMERA_DIAG_HOOKS && !new_value && g_cfg.qr_card_reader) {
         g_cfg.qr_card_reader = 0;
         g_status = "QR disabled because it requires camera input hooks";
@@ -947,12 +953,25 @@ void menu_maybe_open(void) {
 }
 
 /* ----------------------------------------------------------------------
- * In-game overlay menu (keyboard F5).
+ * In-game overlay menus.
  *
- * Unlike menu_maybe_open() — which seizes the RSX with its own
- * framebuffer and must relaunch the game on close — this variant draws
- * through the existing overlay flip hook (taiko_overlay_menu_*), so it
- * composits over the live game and resumes cleanly without a reboot.
+ * Unlike menu_maybe_open() — which seizes the RSX with its own framebuffer
+ * and must relaunch the game on close — these draw through the existing
+ * overlay flip hook (taiko_overlay_menu_*), so they composite over the live
+ * game and resume cleanly without a reboot.
+ *
+ * F4 / L3+R3 opens a small main menu. From there the operator can enter the
+ * settings overlay, saved-card picker when the card reader is waiting, or the
+ * custom song downloader.
+ *
+ * The settings overlay itself reuses the same g_items model, toggle_field()
+ * and run_action() as the boot menu; only the render backend and exit
+ * semantics differ.
+ * -------------------------------------------------------------------- */
+
+/* ----------------------------------------------------------------------
+ * Settings overlay.
+ *
  * It reuses the same g_items model, toggle_field() and run_action() as
  * the boot menu; only the render backend and exit semantics differ.
  *
@@ -971,11 +990,9 @@ void menu_maybe_open(void) {
 #define IG_ROWS_MAX    (ITEM_COUNT_MAX + 8)
 #define IG_TICK_US     (16 * 1000)
 
-/* In-game open triggers: keyboard F5 (tap), or pad L3+R3+CROSS held
- * briefly. CROSS is required on top of L3+R3 so the combo can't collide
- * with the card picker's plain L3+R3 saved-cards trigger. */
-#define IG_PAD_COMBO       (MENU_BTN_L3 | MENU_BTN_R3 | MENU_BTN_CROSS)
-#define IG_PAD_HOLD_TICKS  15   /* ~0.25 s @ IG_TICK_US */
+/* Main-menu open triggers: keyboard F4 (tap), or pad L3+R3 held briefly. */
+#define MAIN_PAD_COMBO       (MENU_BTN_L3 | MENU_BTN_R3)
+#define MAIN_PAD_HOLD_TICKS  15   /* ~0.25 s @ IG_TICK_US */
 
 /* Row codes stored in g_ig_rows[]. */
 #define IG_Q_RESUME    0
@@ -994,7 +1011,7 @@ static int g_ig_self_poll_kb;  /* drive kb_input_poll_tick ourselves (USIO off) 
 /* Keyboard freshness: when USIO emulation is on, the pad_input worker
  * thread drives kb_input_poll_tick every frame. When it is off that worker
  * doesn't run, so the menu watcher must pump the keyboard itself or
- * kb_input_keycode_held(F5) never updates. No-op when something else polls. */
+ * kb_input_keycode_held(F4) never updates. No-op when something else polls. */
 static void ig_kb_pump(void) {
     if (g_ig_self_poll_kb)
         kb_input_poll_tick();
@@ -1183,10 +1200,10 @@ static void ig_render(void) {
 
     const char *footer = g_status
         ? g_status
-        : "ARROWS move  X select  START/F10 save  O/F5 close  -  changes apply next boot";
+        : "ARROWS move  X select  START/F10 save  O close  -  changes apply next boot";
     const char *desc = ig_desc_for(g_ig_rows[g_ig_sel]);
 
-    taiko_overlay_menu_set("Taiko Zucchini (F5)", lptrs, vptrs, kinds,
+    taiko_overlay_menu_set("Mod Settings", lptrs, vptrs, kinds,
                            visible, g_ig_sel - g_ig_top, 0, desc, footer);
     taiko_overlay_menu_active(1);
 }
@@ -1296,7 +1313,7 @@ static void ig_activate(int code, uint32_t edge, int *close) {
 }
 
 /* Runs the interactive in-game menu. Called on the watcher thread when
- * F5 is tapped. Blocks (gating game input) until the menu is closed,
+ * the main menu selects settings. Blocks (gating game input) until closed,
  * then resumes the game in place. */
 static void menu_ingame_run(void) {
     if (g_ingame_open) return;
@@ -1315,17 +1332,10 @@ static void menu_ingame_run(void) {
     taiko_frame_set_gated(1);
     (void)menu_pad_pressed();   /* drain the opening edge */
 
-    /* F5 is held right now (it just fired the open edge). Treat it as
-     * already-high so the close detector waits for a release first. */
-    int f5_prev = 1;
     scroll_repeat_t repeat = { 0, 0 };
 
     for (;;) {
         ig_kb_pump();   /* keep keyboard fresh while the menu is open */
-        int f5 = kb_input_keycode_held(CELL_KEYC_F5);
-        int f5_edge = f5 && !f5_prev;
-        f5_prev = f5;
-
         uint32_t edge = menu_pad_pressed();
         uint32_t nav = (edge & (MENU_BTN_UP | MENU_BTN_DOWN)) |
                        scroll_repeat_tick(&repeat, edge);
@@ -1342,7 +1352,7 @@ static void menu_ingame_run(void) {
             g_status = "Settings saved to disk";
         }
 
-        if (f5_edge || (edge & MENU_BTN_CIRCLE))
+        if (edge & MENU_BTN_CIRCLE)
             close = 1;
 
         if (close)
@@ -1358,38 +1368,263 @@ static void menu_ingame_run(void) {
     g_ingame_open = 0;
 }
 
+/* ----------------------------------------------------------------------
+ * Main overlay menu.
+ * -------------------------------------------------------------------- */
+
+#define MAIN_QUICK_MAX     4
+#define MAIN_ROWS_MAX      (MAIN_QUICK_MAX + 6)
+#define MAIN_SEC_QUICK     0
+#define MAIN_SEC_SETTINGS  1
+#define MAIN_SETTINGS      2
+#define MAIN_CARDS         3
+#define MAIN_SONGS         4
+#define MAIN_CLOSE         5
+#define MAIN_CARD_BASE     1000
+
+static volatile int g_main_menu_open;
+
+static int main_saved_cards_enabled(void) {
+    if (!g_cfg.saved_card_prompt)
+        return 0;
+
+    card_store_load();
+    return card_store_count() > 0;
+}
+
+static int main_build_rows(int *rows, int cap) {
+    int n = 0;
+    if (main_saved_cards_enabled()) {
+        int cards = card_store_count();
+        if (cards > MAIN_QUICK_MAX)
+            cards = MAIN_QUICK_MAX;
+        if (cards > 0 && n < cap)
+            rows[n++] = MAIN_SEC_QUICK;
+        for (int i = 0; i < cards && n < cap; i++)
+            rows[n++] = MAIN_CARD_BASE + i;
+    }
+
+    if (n < cap) rows[n++] = MAIN_SEC_SETTINGS;
+    if (n < cap) rows[n++] = MAIN_SETTINGS;
+    if (card_picker_available() && n < cap) rows[n++] = MAIN_CARDS;
+    if (n < cap) rows[n++] = MAIN_SONGS;
+    if (n < cap) rows[n++] = MAIN_CLOSE;
+    return n;
+}
+
+static int main_row_selectable(int code) {
+    if (code == MAIN_SEC_QUICK || code == MAIN_SEC_SETTINGS)
+        return 0;
+    if (code >= MAIN_CARD_BASE && !card_picker_available())
+        return 0;
+    return 1;
+}
+
+static int main_first_selectable(const int *rows, int count) {
+    for (int i = 0; i < count; i++)
+        if (main_row_selectable(rows[i]))
+            return i;
+    return 0;
+}
+
+static int main_move(const int *rows, int count, int from, int dir) {
+    int r = from;
+    for (int n = 0; n < count; n++) {
+        r += dir;
+        if (r < 0) r = count - 1;
+        if (r >= count) r = 0;
+        if (main_row_selectable(rows[r]))
+            return r;
+    }
+    return from;
+}
+
+static const char *main_row_label(int code) {
+    if (code >= MAIN_CARD_BASE) {
+        const char *label = card_store_label(code - MAIN_CARD_BASE);
+        return label ? label : "(missing card)";
+    }
+
+    switch (code) {
+    case MAIN_SEC_QUICK:    return "Quick BanaPass";
+    case MAIN_SEC_SETTINGS: return "Settings";
+    case MAIN_SETTINGS: return "Mod settings";
+    case MAIN_CARDS:    return "Card reader";
+    case MAIN_SONGS:    return "Custom song loader";
+    case MAIN_CLOSE:    return "Close";
+    default:            return "";
+    }
+}
+
+static const char *main_row_desc(int code) {
+    if (code >= MAIN_CARD_BASE && card_picker_available())
+        return "Replay this saved BanaPass card now.";
+    if (code >= MAIN_CARD_BASE)
+        return "The game is not accepting BanaPass swipes right now.";
+
+    switch (code) {
+    case MAIN_SEC_QUICK:
+    case MAIN_SEC_SETTINGS:
+        return "";
+    case MAIN_SETTINGS:
+        return "Open the live settings overlay.";
+    case MAIN_CARDS:
+        return "Pick, create, or scan a saved card for the current card prompt.";
+    case MAIN_SONGS:
+        return "Browse and download custom songs from the configured TJARepo service.";
+    case MAIN_CLOSE:
+        return "Close this menu and return to the game.";
+    default:
+        return "";
+    }
+}
+
+static void main_render(const int *rows, int count, int sel) {
+    const char *lines[MAIN_ROWS_MAX];
+    const char *values[MAIN_ROWS_MAX];
+    unsigned char kinds[MAIN_ROWS_MAX];
+    for (int i = 0; i < count; i++) {
+        lines[i] = main_row_label(rows[i]);
+        values[i] = "";
+        if (rows[i] == MAIN_SEC_QUICK || rows[i] == MAIN_SEC_SETTINGS)
+            kinds[i] = TAIKO_OVL_ROW_SECTION;
+        else if (rows[i] >= MAIN_CARD_BASE && !card_picker_available()) {
+            values[i] = "can't swipe BanaPass now";
+            kinds[i] = TAIKO_OVL_ROW_DISABLED;
+        }
+        else if (rows[i] == MAIN_CLOSE)
+            kinds[i] = TAIKO_OVL_ROW_ACTION;
+        else
+            kinds[i] = TAIKO_OVL_ROW_NORMAL;
+    }
+
+    char title[64];
+    snprintf(title, sizeof title, "Taiko Zucchini %s", TAIKO_MOD_VERSION);
+
+    taiko_overlay_menu_set(title, lines, values, kinds,
+                           count, sel, 0, main_row_desc(rows[sel]),
+                           "Up/Down  X:select  O/F4:close");
+    taiko_overlay_menu_active(1);
+}
+
+static int main_run_submenu(int code) {
+    taiko_overlay_menu_active(0);
+    (void)menu_pad_pressed();
+
+    if (code >= MAIN_CARD_BASE) {
+        card_picker_use_saved(code - MAIN_CARD_BASE);
+        (void)menu_pad_pressed();
+        return 1;
+    } else if (code == MAIN_SETTINGS) {
+        menu_ingame_run();
+    } else if (code == MAIN_CARDS) {
+        card_picker_run();
+    } else if (code == MAIN_SONGS) {
+        custom_song_launcher_run();
+    }
+
+    (void)menu_pad_pressed();
+    return code == MAIN_CARDS && !card_picker_available();
+}
+
+static void menu_main_run(void) {
+    if (g_main_menu_open)
+        return;
+    g_main_menu_open = 1;
+
+    pad_input_cancel_pending();
+    taiko_frame_set_gated(1);
+    (void)menu_pad_pressed();
+
+    int rows[MAIN_ROWS_MAX];
+    int count = main_build_rows(rows, MAIN_ROWS_MAX);
+    int sel = main_first_selectable(rows, count);
+    int f4_prev = 1;
+    scroll_repeat_t repeat = { 0, 0 };
+
+    for (;;) {
+        ig_kb_pump();
+        int f4 = kb_input_keycode_held(CELL_KEYC_F4);
+        int f4_edge = f4 && !f4_prev;
+        f4_prev = f4;
+
+        count = main_build_rows(rows, MAIN_ROWS_MAX);
+        if (count <= 0)
+            break;
+        if (sel >= count)
+            sel = count - 1;
+        if (sel < 0)
+            sel = 0;
+        if (!main_row_selectable(rows[sel]))
+            sel = main_first_selectable(rows, count);
+
+        uint32_t edge = menu_pad_pressed();
+        uint32_t nav = (edge & (MENU_BTN_UP | MENU_BTN_DOWN)) |
+                       scroll_repeat_tick(&repeat, edge);
+
+        if (nav & MENU_BTN_UP) {
+            sel = main_move(rows, count, sel, -1);
+        }
+        if (nav & MENU_BTN_DOWN) {
+            sel = main_move(rows, count, sel, 1);
+        }
+
+        if (f4_edge || (edge & MENU_BTN_CIRCLE))
+            break;
+
+        if (edge & MENU_BTN_CROSS) {
+            if (rows[sel] == MAIN_CLOSE)
+                break;
+            if (main_run_submenu(rows[sel]))
+                break;
+            taiko_frame_set_gated(1);
+            f4_prev = kb_input_keycode_held(CELL_KEYC_F4);
+        }
+
+        main_render(rows, count, sel);
+        sys_timer_usleep(IG_TICK_US);
+    }
+
+    taiko_overlay_menu_active(0);
+    taiko_frame_set_gated(0);
+    (void)menu_pad_pressed();
+    g_main_menu_open = 0;
+}
+
 static void ingame_menu_thread(uint64_t arg) {
     (void)arg;
     sys_timer_sleep(8);         /* let the game + input subsystems settle */
     menu_pad_init();            /* refcounted; shared with card picker */
 
-    int f5_prev = 0;
+    int f4_prev = 0;
     int pad_hold = 0;
     for (;;) {
         int open = 0;
 
         ig_kb_pump();   /* keep keyboard fresh when USIO (pad worker) is off */
 
-        /* Keyboard F5: rising edge (tap). */
-        int f5 = kb_input_keycode_held(CELL_KEYC_F5);
-        if (f5 && !f5_prev)
+        /* Keyboard F4: rising edge (tap). */
+        int f4 = kb_input_keycode_held(CELL_KEYC_F4);
+        if (f4 && !f4_prev)
             open = 1;
-        f5_prev = f5;
+        f4_prev = f4;
 
-        /* Pad L3+R3+CROSS: held for a brief debounce window. */
+        /* Pad L3+R3: held for a brief debounce window. */
         uint32_t held = menu_pad_held();
-        if ((held & IG_PAD_COMBO) == IG_PAD_COMBO) {
-            if (++pad_hold >= IG_PAD_HOLD_TICKS)
+        if ((held & MAIN_PAD_COMBO) == MAIN_PAD_COMBO) {
+            if (++pad_hold >= MAIN_PAD_HOLD_TICKS)
                 open = 1;
         } else {
             pad_hold = 0;
         }
 
-        if (open && !g_ingame_open) {
-            menu_ingame_run();
+        if (open && !g_main_menu_open && taiko_game_state_allows_mod_menu()) {
+            menu_main_run();
             /* Resync: the trigger key/combo is likely still held from the
              * close action. Require a fresh release before the next open. */
-            f5_prev = 1;
+            f4_prev = 1;
+            pad_hold = 0;
+        } else if (open) {
             pad_hold = 0;
         }
         sys_timer_usleep(IG_TICK_US);

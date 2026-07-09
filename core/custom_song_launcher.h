@@ -1,7 +1,7 @@
 #ifndef CUSTOM_SONG_LAUNCHER_H
 #define CUSTOM_SONG_LAUNCHER_H
 
-void custom_song_launcher_start(void);
+void custom_song_launcher_run(void);
 
 /* Category -> title-outline ARGB (matches the picker/carousel palette). idx =
  * category index for the fallback hash. */

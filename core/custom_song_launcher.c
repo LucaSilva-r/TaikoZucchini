@@ -4,23 +4,16 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <cell/keyboard/kb_codes.h>
-#include <sys/ppu_thread.h>
 #include <sys/timer.h>
 
 #include "debug.h"
-#include "game_state.h"
-#include "kb_input.h"
 #include "menu_pad.h"
-#include "pad_input.h"
 #include "network/custom_song_client.h"
 #include "overlay.h"
 #include "taiko_frame.h"
 #include "title_render.h"
 
 #define TICK_US              (4 * 1000)
-#define OPEN_HOLD_TICKS      200
-#define PROMPT_REFRESH_TICKS 250
 
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */
 #define MENU_VISIBLE 16
@@ -274,7 +267,7 @@ static void show_cover(const char *status) {
     taiko_overlay_menu_active(1);
 }
 
-static void run_downloader(void) {
+void custom_song_launcher_run(void) {
     ese_category_entry_t cats[ESE_CATEGORY_LIST_MAX];
     int cat_sel = 0;
 
@@ -321,70 +314,4 @@ static void run_downloader(void) {
     taiko_overlay_menu_opaque(0);
     taiko_frame_set_gated(0);
     (void)menu_pad_pressed();
-}
-
-static void custom_song_launcher_thread(uint64_t arg) {
-    (void)arg;
-    sys_timer_sleep(10);
-    menu_pad_init();
-
-    int hold = 0;
-    int refresh = 0;
-    int f6_prev = 0;
-    int suppressing = 0;
-
-    for (;;) {
-        uint32_t held = menu_pad_held();
-
-        /* While a combo modifier (L3/R3) is held, gate USIO input to the game so
-         * the combo buttons (e.g. Square) don't leak through as a drum hit /
-         * scene advance during detection. menu_pad reads the pad directly, so we
-         * still see the combo. Released -> ungate. */
-        int mod = (held & (MENU_BTN_L3 | MENU_BTN_R3)) != 0;
-        if (mod && !suppressing) {
-            taiko_frame_set_gated(1);
-            suppressing = 1;
-        } else if (!mod && suppressing) {
-            taiko_frame_set_gated(0);
-            suppressing = 0;
-        }
-
-        /* Openable anywhere except mid-chart. run_downloader bounces into the
-         * paused test menu for the actual download, so it can't race the
-         * song-list build regardless of where it was opened. */
-        if ((refresh % PROMPT_REFRESH_TICKS) == 0 &&
-            taiko_game_state_current() != TAIKO_GAME_STATE_GAMEPLAY)
-            taiko_overlay_show_prompt("Hold L3+Square or F6 to download songs");
-        refresh++;
-
-        int combo_held = (held & MENU_BTN_L3) && (held & MENU_BTN_SQUARE);
-        int f6 = kb_input_keycode_held(CELL_KEYC_F6);
-        int f6_edge = f6 && !f6_prev;
-        f6_prev = f6;
-
-        if (f6_edge || (combo_held && ++hold >= OPEN_HOLD_TICKS)) {
-            run_downloader();       /* manages its own gate; leaves ungated */
-            suppressing = 0;        /* resync: run_downloader ungated on exit */
-            hold = 0;
-            refresh = 0;
-        } else if (!combo_held) {
-            hold = 0;
-        }
-
-        sys_timer_usleep(TICK_US);
-    }
-}
-
-void custom_song_launcher_start(void) {
-    static int started;
-    if (started)
-        return;
-    started = 1;
-
-    sys_ppu_thread_t tid = 0;
-    int rc = sys_ppu_thread_create(&tid, custom_song_launcher_thread, 0,
-                                   1001, 64 * 1024, 0,
-                                   "taiko_custom_song");
-    if (rc != 0)
-        dbg_print_hex32("[custom_song] thread create rc", (uint32_t)rc);
 }

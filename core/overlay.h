@@ -17,6 +17,7 @@ enum {
     TAIKO_OVL_ROW_TOGGLE_ON,   /* value drawn green  */
     TAIKO_OVL_ROW_TOGGLE_OFF,  /* value drawn red    */
     TAIKO_OVL_ROW_ACTION,      /* value drawn dimmed */
+    TAIKO_OVL_ROW_DISABLED,    /* label + value drawn dimmed */
 };
 
 /* Interactive menu surface, blitted centred over the game each flip while

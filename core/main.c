@@ -32,8 +32,6 @@
 #include "pad_input.h"
 #include "kb_input.h"
 #include "taiko_frame.h"
-#include "card_picker.h"
-#include "custom_song_launcher.h"
 #include "usrdir_path.h"
 #include "eboot_fpt.h"
 #include "param_sfo_fix.h"
@@ -928,16 +926,10 @@ int taiko_start(unsigned int args, void *argp) {
          * keyboard itself — see the self_poll flag on menu_ingame_start. */
         kb_input_init();
     }
-    /* Saved-card picker: needs the overlay flip hook and the virtual USIO
-     * input gate. QR scanning is optional; stored-card replay still works
-     * without a camera. */
-    if (g_cfg.usio_emulation)
-        card_picker_start();
-    /* In-game mod menu (keyboard F5 / pad L3+R3+X). Must open in BOTH USIO
+    /* In-game main menu (keyboard F4 / pad L3+R3). Must open in BOTH USIO
      * states, so it is started unconditionally. The pad path is independent
      * of USIO; when USIO is off the watcher also self-polls the keyboard. */
     menu_ingame_start(!g_cfg.usio_emulation);
-    custom_song_launcher_start();
     if (g_cfg.online_diag)
         online_diag_start();
 

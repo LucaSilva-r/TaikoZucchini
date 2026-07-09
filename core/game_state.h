@@ -23,6 +23,7 @@ typedef enum taiko_game_state {
 
 taiko_game_state_t taiko_game_state_current(void);
 const char *taiko_game_state_name(taiko_game_state_t state);
+int taiko_game_state_allows_mod_menu(void);
 const char *taiko_game_state_preview_song(void);
 const char *taiko_game_state_gameplay_song(void);
 const char *taiko_game_state_gameplay_course(void);

@@ -10,15 +10,15 @@
  * menu has been entered once (or skipped). */
 void menu_maybe_open(void);
 
-/* Spawn the in-game menu watcher thread. While the game runs, tapping
- * keyboard F5 (or holding pad L3+R3+X) opens an overlay-composited mod
- * menu (quick actions + full settings) without seizing the RSX or
+/* Spawn the in-game main-menu watcher thread. While the game runs, tapping
+ * keyboard F4 (or holding pad L3+R3) opens an overlay-composited chooser for
+ * mod settings, saved cards, and custom songs without seizing the RSX or
  * rebooting. Idempotent. Works with USIO emulation on or off.
  *
  * self_poll_keyboard: pass non-zero when nothing else is driving the
  * keyboard poll (i.e. USIO emulation is off, so the pad_input worker
  * isn't running). The watcher then calls kb_input_poll_tick itself so
- * keyboard F5 detection still works. */
+ * keyboard F4 detection still works. */
 void menu_ingame_start(int self_poll_keyboard);
 
 #endif

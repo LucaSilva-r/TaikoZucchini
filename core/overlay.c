@@ -933,7 +933,9 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
                          box_w - 2 * (pad - 6), row_h, 2))
             return;
 
-        text_color_t label_c = selected ? TEXT_DARK : TEXT_WHITE;
+        text_color_t label_c = selected ? TEXT_DARK :
+                               (kind == TAIKO_OVL_ROW_DISABLED ? TEXT_MUTED
+                                                                : TEXT_WHITE);
         if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
                                   x + pad, ry + 2, label_c, m.lines[idx]))
             return;
@@ -946,6 +948,7 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
                 case TAIKO_OVL_ROW_TOGGLE_ON:  val_c = TEXT_GREEN; break;
                 case TAIKO_OVL_ROW_TOGGLE_OFF: val_c = TEXT_RED;   break;
                 case TAIKO_OVL_ROW_ACTION:     val_c = TEXT_MUTED; break;
+                case TAIKO_OVL_ROW_DISABLED:   val_c = TEXT_MUTED; break;
                 default:                       val_c = TEXT_WHITE; break;
             }
             int vw = text_width(m.values[idx]);

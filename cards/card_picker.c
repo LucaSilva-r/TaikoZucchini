@@ -22,8 +22,6 @@
 #include "debug.h"
 
 #define TICK_US               (4 * 1000)    /* ~250 Hz; catches quick taps */
-#define OPEN_HOLD_TICKS       200           /* ~0.8s of L3+R3 to open */
-#define PROMPT_REFRESH_TICKS  250           /* re-show toast ~once a second */
 #define QR_WAIT_TICKS         150           /* ~15s @ 100ms to capture a scan */
 
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */
@@ -244,7 +242,19 @@ static int confirm_delete(const char *label) {
     }
 }
 
-static void run_chooser(void) {
+int card_picker_available(void) {
+    return g_cfg.saved_card_prompt &&
+           bpreader_hook_reader_accepting_card() &&
+           bpreader_serial_reader_enabled() &&
+           !bpreader_serial_card_present();
+}
+
+void card_picker_run(void) {
+    if (!card_picker_available()) {
+        taiko_overlay_show_prompt("Card reader is not waiting");
+        return;
+    }
+
     pad_input_cancel_pending();  /* discard the entry combo's held L3/R3 */
     taiko_frame_set_gated(1);
     camera_qr_set_suppress(1);  /* no auto-login while the overlay is open */
@@ -280,7 +290,7 @@ static void run_chooser(void) {
 
         taiko_overlay_menu_set("Saved Cards", lines, NULL, NULL, total, sel, top,
                                NULL,
-                               "Up/Down  X:select  Right:show code  O:delete");
+                               "Up/Down  X:select  Right:show code  Triangle:delete  O:back");
         taiko_overlay_menu_active(1);
 
         uint32_t edge = menu_pad_pressed();
@@ -296,9 +306,13 @@ static void run_chooser(void) {
             (void)menu_pad_pressed();
         }
 
-        /* O deletes the highlighted card (with confirmation). On action
+        if (edge & MENU_BTN_CIRCLE) {
+            break;
+        }
+
+        /* Triangle deletes the highlighted card (with confirmation). On action
          * rows it does nothing — Quit is an explicit menu item. */
-        if ((edge & MENU_BTN_CIRCLE) && sel < n) {
+        if ((edge & MENU_BTN_TRIANGLE) && sel < n) {
             if (confirm_delete(card_store_label(sel))) {
                 card_store_remove(sel);
                 if (sel > 0) sel--;
@@ -333,54 +347,24 @@ static void run_chooser(void) {
     (void)menu_pad_pressed();   /* drain the closing edge */
 }
 
-static void card_picker_thread(uint64_t arg) {
-    (void)arg;
-    sys_timer_sleep(10);        /* let the game + pad subsystem settle */
-    menu_pad_init();
-    card_store_load();
-
-    int hold = 0;
-    int refresh = 0;
-
-    for (;;) {
-        int want = bpreader_hook_reader_accepting_card() &&
-                   bpreader_serial_reader_enabled() &&
-                   !bpreader_serial_card_present();
-        if (want) {
-            if (g_cfg.saved_card_prompt &&
-                (refresh % PROMPT_REFRESH_TICKS) == 0)
-                taiko_overlay_show_prompt("Hold L3+R3 or F4 for saved cards");
-            refresh++;
-
-            uint32_t held = menu_pad_held();
-            int open_held = ((held & MENU_BTN_L3) && (held & MENU_BTN_R3)) ||
-                            kb_input_saved_cards_held();
-            if (open_held) {
-                if (++hold >= OPEN_HOLD_TICKS) {
-                    run_chooser();
-                    hold = 0;
-                    refresh = 0;
-                }
-            } else {
-                hold = 0;
-            }
-        } else {
-            hold = 0;
-            refresh = 0;
-        }
-        sys_timer_usleep(TICK_US);
-    }
-}
-
-void card_picker_start(void) {
-    static int started;
-    if (started)
+void card_picker_use_saved(int index) {
+    if (!card_picker_available()) {
+        taiko_overlay_show_prompt("Card reader is not waiting");
         return;
-    started = 1;
+    }
 
-    sys_ppu_thread_t tid = 0;
-    int rc = sys_ppu_thread_create(&tid, card_picker_thread, 0,
-                                   1001, 64 * 1024, 0, "taiko_card_picker");
-    if (rc != 0)
-        dbg_print_hex32("[cards] thread create rc", (uint32_t)rc);
+    card_store_load();
+    const char *code = card_store_code(index);
+    if (!code) {
+        taiko_overlay_show_prompt("Saved card not found");
+        return;
+    }
+
+    pad_input_cancel_pending();
+    taiko_frame_set_gated(1);
+    camera_qr_set_suppress(1);
+    replay_card(code);
+    camera_qr_set_suppress(0);
+    taiko_frame_set_gated(0);
+    (void)menu_pad_pressed();
 }

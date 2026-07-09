@@ -26,6 +26,7 @@ enum {
      * during the early-boot window. */
     MENU_BTN_KB_ENTRY = 1 << 10,
     MENU_BTN_SQUARE   = 1 << 11,
+    MENU_BTN_TRIANGLE = 1 << 12,
 };
 
 /* One-time init. Refcounted by libio; safe to call before/after the

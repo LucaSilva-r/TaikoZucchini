@@ -4,7 +4,7 @@
 #include "debug.h"
 #include "game_state.h"
 
-#define TAIKO_GAMESTATE_LOGGING 0
+#define TAIKO_GAMESTATE_LOGGING 1
 
 #define SONG_ID_MAX 32
 #define COURSE_MAX  8
@@ -114,6 +114,13 @@ const char *taiko_game_state_name(taiko_game_state_t state) {
 
 taiko_game_state_t taiko_game_state_current(void) {
     return g_game_state;
+}
+
+int taiko_game_state_allows_mod_menu(void) {
+    taiko_game_state_t state = g_game_state;
+    return state == TAIKO_GAME_STATE_ATTRACT ||
+           state == TAIKO_GAME_STATE_ENTRY ||
+           state == TAIKO_GAME_STATE_SHOP;
 }
 
 const char *taiko_game_state_preview_song(void) {
