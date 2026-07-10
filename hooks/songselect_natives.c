@@ -153,6 +153,9 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define LOG_EVERY_INTEREST 0
 #define LOG_HEAD_TEXTURE 24
 #define LOG_EVERY_TEXTURE 0
+#define SSN_CATEGORY_TRACE_MAX 64
+#define SSN_CUSTOM_CATEGORY_BUCKET 200u
+#define SSN_CATEGORY_RECORD_MAX 64u
 #define LOG_FILLRECT_HEAD 64
 #define LOG_FILLRECT_CUSTOM_MAX 160
 #define LOG_MAX_ARGS 6
@@ -3169,6 +3172,7 @@ static void ssn_log_board_record(uint32_t idx) {
     uint32_t vec = container + SSN_BOARD_VECTOR_OFF;
     uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
     uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
+    uint32_t cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x0cu);
     uint32_t count = 0;
 
     if (begin && end >= begin)
@@ -3178,6 +3182,7 @@ static void ssn_log_board_record(uint32_t idx) {
     dbg_print_hex32("  ss.container", container);
     dbg_print_hex32("  board.begin", begin);
     dbg_print_hex32("  board.end", end);
+    dbg_print_hex32("  board.cap", cap);
     dbg_print_hex32("  board.count", count);
 
     if (!begin || idx >= count)
@@ -3685,6 +3690,7 @@ static void hk_RequestFillrect(void *vm) {
 static void ssn_log_vec16(const char *prefix, uint32_t vec, unsigned limit) {
     uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
     uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
+    uint32_t cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x0cu);
     uint32_t count = 0;
 
     if (begin && end >= begin)
@@ -3698,6 +3704,10 @@ static void ssn_log_vec16(const char *prefix, uint32_t vec, unsigned limit) {
     dbg_print(prefix);
     dbg_print(".end");
     dbg_print_hex32("", end);
+    dbg_print("  ");
+    dbg_print(prefix);
+    dbg_print(".cap");
+    dbg_print_hex32("", cap);
     dbg_print("  ");
     dbg_print(prefix);
     dbg_print(".count");
@@ -3945,6 +3955,191 @@ static void ssn_log_notify_course_star(void *vm, unsigned seq,
     }
 }
 
+/* Category navigation is driven by the Lumen song-select movie.  Keep this
+ * trace independent from SSN_DETAIL_LOGGING_ENABLED: the broad native trace is
+ * intentionally too noisy for normal custom-song builds, while these four
+ * calls are the contract we need to extend beyond the stock eight genres. */
+static int ssn_is_category_native(const char *name) {
+    return ssn_streq(name, "GetPlayerData") ||
+           ssn_streq(name, "NotifyGenreFolder") ||
+           ssn_streq(name, "NotifyOpenFolder") ||
+           ssn_streq(name, "NotifyCloseFolder") ||
+           ssn_streq(name, "NotifyMusicBoard");
+}
+
+static void ssn_trace_category_native(const char *name, void *vm,
+                                      unsigned seq) {
+    static int dumped_ranges;
+
+    if (!ssn_is_category_native(name) || seq >= SSN_CATEGORY_TRACE_MAX)
+        return;
+    ssn_log_args(name, vm, seq, LOG_MAX_ARGS, 1);
+    if (!dumped_ranges) {
+        dumped_ranges = 1;
+        ssn_log_board_snapshot(16u);
+    }
+}
+
+typedef struct ssn_category_record {
+    uint32_t key;
+    uint32_t start;
+    uint32_t count;
+    uint32_t resource;
+} ssn_category_record_t;
+
+/* Identity of the source BasicSong array populated by the E46 injector. Besides
+ * preventing duplicate injection, it gives category growth a valid BasicSong
+ * value with which to drive the already-live-proven vector growth helper. */
+static uint32_t g_ssn_src_begin;
+
+/* Rebuild the Lumen-facing board ranges as:
+ *   stock genre, custom genre chunk 0, custom genre chunk 1, ...
+ * for every normal genre key 1..8. Each custom record reuses its stock genre's
+ * presentation key, so Lumen creates an ordinary folder. The array position is
+ * the runtime folder id; duplicate presentation keys are valid (live-proven).
+ *
+ * The old vector has capacity for only 13 records. Do not call the allocator
+ * thunk directly: its private ABI is not a normal one-argument operator new.
+ * Instead, grow an empty temporary BasicSong vector through FUN_00716850, whose
+ * allocation path is already live-proven by E46 injection. We take ownership of
+ * that outer allocation as raw category storage. The old 13-record allocation
+ * is deliberately leaked (about 208 bytes); scene teardown will free the new
+ * allocation through the correct game heap. */
+static void ssn_prepare_custom_categories(void) {
+    static uint32_t prepared_begin;
+    ssn_category_record_t records[SSN_CATEGORY_RECORD_MAX];
+    uint32_t proxy_owner[4] = { 0, 0, 0, 0 };
+    uint32_t container = ssn_songselect_container();
+    uint32_t vec;
+    uint32_t begin;
+    uint32_t end;
+    uint32_t cap;
+    uint32_t count;
+    uint32_t out_count = 0;
+    uint32_t new_cap_count;
+    uint32_t proxy_count;
+    uint32_t new_begin;
+    uint32_t proxy_end;
+    uint32_t proxy_cap;
+
+    if (!ssn_ptr_sane(container))
+        return;
+    vec = container + SSN_BOARD_VECTOR_OFF;
+    begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    end = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
+    cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x0cu);
+    if (!ssn_ptr_sane(begin) || end < begin || cap < end ||
+        ((end - begin) % SSN_BOARD_RECORD_SIZE) != 0)
+        return;
+    if (prepared_begin == begin)
+        return;
+    count = (end - begin) / SSN_BOARD_RECORD_SIZE;
+    if (count < 2u || count > SSN_CATEGORY_RECORD_MAX)
+        return;
+
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t rec = begin + i * SSN_BOARD_RECORD_SIZE;
+        ssn_category_record_t src;
+        uint32_t custom_first = 0xffffffffu;
+        uint32_t custom_last = 0;
+        uint32_t custom_count = 0;
+        uint32_t range_end;
+
+        memcpy(&src, (const void *)(uintptr_t)rec, sizeof src);
+        if (src.key < 1u || src.key > 8u) {
+            if (out_count >= SSN_CATEGORY_RECORD_MAX)
+                return;
+            records[out_count++] = src;
+            continue;
+        }
+        range_end = src.start + src.count;
+        if (range_end < src.start)
+            return;
+        for (uint32_t v = 0; v < g_ssn_virtual_song_count; v++) {
+            uint32_t absolute;
+            if (g_ssn_virtual_songs[v].genre_id != src.key)
+                continue;
+            absolute = g_ssn_inject_abs[v];
+            if (absolute < src.start || absolute >= range_end)
+                continue;
+            if (absolute < custom_first)
+                custom_first = absolute;
+            if (absolute > custom_last)
+                custom_last = absolute;
+            custom_count++;
+        }
+        if (!custom_count) {
+            if (out_count >= SSN_CATEGORY_RECORD_MAX)
+                return;
+            records[out_count++] = src;
+            continue;
+        }
+        if (custom_first <= src.start || custom_last >= range_end ||
+            custom_last - custom_first + 1u != custom_count ||
+            custom_last + 1u != range_end)
+            return;
+
+        if (out_count >= SSN_CATEGORY_RECORD_MAX)
+            return;
+        src.count = custom_first - src.start;
+        records[out_count++] = src;
+        for (uint32_t at = custom_first; at < range_end;) {
+            uint32_t left = range_end - at;
+            uint32_t chunk = left > SSN_CUSTOM_CATEGORY_BUCKET ?
+                SSN_CUSTOM_CATEGORY_BUCKET : left;
+            if (out_count >= SSN_CATEGORY_RECORD_MAX)
+                return;
+            records[out_count].key = src.key;
+            records[out_count].start = at;
+            records[out_count].count = chunk;
+            records[out_count].resource = src.resource;
+            out_count++;
+            at += chunk;
+        }
+    }
+    if (out_count <= count)
+        return;
+
+    new_cap_count = (out_count + 7u) & ~7u;
+    proxy_count = (new_cap_count * SSN_BOARD_RECORD_SIZE +
+                   SSN_SONG_RECORD_SIZE - 1u) / SSN_SONG_RECORD_SIZE;
+    if (!ssn_ptr_sane(g_ssn_src_begin) || !proxy_count) {
+        dbg_print("[ssn] custom category proxy unavailable\n");
+        return;
+    }
+    dbg_print("[ssn] custom category proxy grow begin\n");
+    ((record_insert_fn)(uintptr_t)g_record_insert_desc)(
+        (uint32_t)(uintptr_t)proxy_owner, 0u, (uint64_t)proxy_count,
+        g_ssn_src_begin);
+    new_begin = proxy_owner[1];
+    proxy_end = proxy_owner[2];
+    proxy_cap = proxy_owner[3];
+    dbg_print("[ssn] custom category proxy grow returned\n");
+    if (!ssn_ptr_sane(new_begin) || proxy_end < new_begin ||
+        proxy_cap < proxy_end ||
+        proxy_cap - new_begin < new_cap_count * SSN_BOARD_RECORD_SIZE) {
+        dbg_print("[ssn] custom category proxy allocation failed\n");
+        return;
+    }
+    memcpy((void *)(uintptr_t)new_begin, records,
+           out_count * sizeof records[0]);
+    *(volatile uint32_t *)(uintptr_t)(vec + 0x04u) = new_begin;
+    *(volatile uint32_t *)(uintptr_t)(vec + 0x08u) =
+        new_begin + out_count * SSN_BOARD_RECORD_SIZE;
+    *(volatile uint32_t *)(uintptr_t)(vec + 0x0cu) =
+        new_begin + new_cap_count * SSN_BOARD_RECORD_SIZE;
+    __asm__ volatile("sync" ::: "memory");
+    prepared_begin = new_begin;
+
+    dbg_print("[ssn] custom categories prepared\n");
+    dbg_print_hex32("  bucket", SSN_CUSTOM_CATEGORY_BUCKET);
+    dbg_print_hex32("  old.count", count);
+    dbg_print_hex32("  old.capacity", (cap - begin) / SSN_BOARD_RECORD_SIZE);
+    dbg_print_hex32("  new.count", out_count);
+    dbg_print_hex32("  new.capacity", new_cap_count);
+    dbg_print_hex32("  new.begin", new_begin);
+}
+
 #if SSN_ENABLE_NATIVE_TABLE_HOOKS
 #define DEF_HOOK(addr, name)                                                   \
     static unsigned g_cnt_##name;                                              \
@@ -3960,6 +4155,9 @@ static void ssn_log_notify_course_star(void *vm, unsigned seq,
         memset(&vm_probe, 0, sizeof vm_probe);                                 \
         memset(&replay_patch, 0, sizeof replay_patch);                         \
         memset(&score_patch, 0, sizeof score_patch);                           \
+        if (ssn_streq(#name, "GetPlayerData"))                                \
+            ssn_prepare_custom_categories();                                   \
+        ssn_trace_category_native(#name, vm, n);                               \
         if (SSN_ENABLE_TEST_APPEND_PATH)                                       \
             ssn_apply_test_append();                                           \
         if (notify_course_star && n < LOG_COURSESTAR_MAX)                      \
@@ -6250,8 +6448,6 @@ static uint32_t ssn_vec90_insert_many(uint32_t vec, uint32_t at,
  * When it changes the game rebuilt its list (fresh, no customs) so we reset and
  * start over; otherwise it's the same persistent array and we only APPEND the
  * customs not already in it. */
-static uint32_t g_ssn_src_begin;
-
 /* Rebuild g_ssn_inject_abs (virtual index -> absolute source position) by
  * scanning the source vector for our uniqueid-tagged records. Positions shift
  * as we append, so recompute after inserting. */
@@ -6624,6 +6820,10 @@ void songselect_natives_install(void) {
 
     dbg_print("[ssn] installing songselect detail/course probe\n");
 #if SSN_ENABLE_NATIVE_TABLE_HOOKS
+    install_one(0x00f94760u, (native_fn)&hk_GetPlayerData,
+                &g_orig_GetPlayerData);
+    log_install_one(0x00f94760u, "GetPlayerData",
+                    g_orig_GetPlayerData);
     install_one(0x00f94778u, (native_fn)&hk_GetMusicInfo_Basic,
                 &g_orig_GetMusicInfo_Basic);
     log_install_one(0x00f94778u, "GetMusicInfo_Basic",
@@ -6640,6 +6840,22 @@ void songselect_natives_install(void) {
                 &g_orig_GetRankingScore);
     log_install_one(0x00f94790u, "GetRankingScore",
                     g_orig_GetRankingScore);
+    install_one(0x00f94798u, (native_fn)&hk_NotifyOpenFolder,
+                &g_orig_NotifyOpenFolder);
+    log_install_one(0x00f94798u, "NotifyOpenFolder",
+                    g_orig_NotifyOpenFolder);
+    install_one(0x00f947a0u, (native_fn)&hk_NotifyCloseFolder,
+                &g_orig_NotifyCloseFolder);
+    log_install_one(0x00f947a0u, "NotifyCloseFolder",
+                    g_orig_NotifyCloseFolder);
+    install_one(0x00f947b0u, (native_fn)&hk_NotifyGenreFolder,
+                &g_orig_NotifyGenreFolder);
+    log_install_one(0x00f947b0u, "NotifyGenreFolder",
+                    g_orig_NotifyGenreFolder);
+    install_one(0x00f947b8u, (native_fn)&hk_NotifyMusicBoard,
+                &g_orig_NotifyMusicBoard);
+    log_install_one(0x00f947b8u, "NotifyMusicBoard",
+                    g_orig_NotifyMusicBoard);
     install_one(0x00f947f0u, (native_fn)&hk_RequestSongBoardTexture_Long,
                 &g_orig_RequestSongBoardTexture_Long);
     log_install_one(0x00f947f0u, "RequestSongBoardTexture_Long",
