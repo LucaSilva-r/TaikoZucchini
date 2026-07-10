@@ -149,6 +149,9 @@ static int extract_fumen_info(const char *path, char *song, unsigned int song_ca
                               char *duet_player, unsigned int duet_player_cap) {
     static const char prefix[] = "/data/fumen/";
     const char *p = path_find(path, prefix);
+    const char *filename;
+    const char *filename_end;
+    const char *suffix;
     if (!p)
         return 0;
 
@@ -170,23 +173,36 @@ static int extract_fumen_info(const char *path, char *song, unsigned int song_ca
         return 1;
     p++;
 
-    while (*p && *p != '_')
-        p++;
-    if (*p == '_' && p[1] && course && course_cap > 1) {
-        course[0] = ascii_lower(p[1]);
-        course[1] = '\0';
-    }
+    /* Parse from the filename suffix, not its first underscore: injected song
+     * ids are themselves named "ese_<hash>". Expected forms are
+     * <song>_<course>.bin and <song>_<course>_<player>.bin. */
+    filename = p;
+    filename_end = filename;
+    while (*filename_end && *filename_end != '.')
+        filename_end++;
+    suffix = filename_end;
+    while (suffix > filename && suffix[-1] != '_')
+        suffix--;
 
-    if (duet_player && duet_player_cap > 1) {
+    if (duet_player && duet_player_cap > 1)
         duet_player[0] = '\0';
-        while (*p && *p != '.')
-            p++;
-        while (p > path && *p != '_')
-            p--;
-        if (*p == '_' && p[1] >= '0' && p[1] <= '9') {
-            duet_player[0] = p[1];
+    if (suffix > filename && suffix < filename_end &&
+        suffix[0] >= '0' && suffix[0] <= '9' &&
+        suffix + 1 == filename_end) {
+        if (duet_player && duet_player_cap > 1) {
+            duet_player[0] = suffix[0];
             duet_player[1] = '\0';
         }
+        filename_end = suffix - 1;
+        suffix = filename_end;
+        while (suffix > filename && suffix[-1] != '_')
+            suffix--;
+    }
+
+    if (suffix > filename && suffix < filename_end &&
+        suffix + 1 == filename_end && course && course_cap > 1) {
+        course[0] = ascii_lower(suffix[0]);
+        course[1] = '\0';
     }
 
     return 1;
