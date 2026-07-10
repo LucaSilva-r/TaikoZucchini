@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <sys/timer.h>
@@ -18,8 +19,87 @@
 /* Must match OVERLAY_MENU_VISIBLE in core/overlay.c. */
 #define MENU_VISIBLE 16
 
-/* Song page (10) + trailing Prev/Next/Back action rows. */
-#define SONG_ROWS_MAX (ESE_SONG_PAGE_MAX + 3)
+/* Song page (10) + Prev/Next/queue-category/clear-category/Back actions. */
+#define SONG_ROWS_MAX (ESE_SONG_PAGE_MAX + 5)
+#define CATEGORY_ROWS_MAX (ESE_CATEGORY_LIST_MAX + 3)
+
+enum {
+    CATEGORY_CLOSE = -1,
+    CATEGORY_DOWNLOAD_QUEUE = -2,
+    CATEGORY_CLEAR_QUEUE = -3,
+    CATEGORY_QUEUE_ALL = -4,
+};
+
+typedef struct song_download_queue {
+    unsigned char *selected;  /* one byte per in-memory library entry */
+    int library_count;
+    int count;
+} song_download_queue_t;
+
+static int queue_init(song_download_queue_t *q) {
+    int count;
+
+    if (!q)
+        return 0;
+    memset(q, 0, sizeof *q);
+    count = ese_song_library_count();
+    if (count <= 0)
+        return 0;
+    q->selected = (unsigned char *)malloc((size_t)count);
+    if (!q->selected)
+        return 0;
+    memset(q->selected, 0, (size_t)count);
+    q->library_count = count;
+    return 1;
+}
+
+static void queue_destroy(song_download_queue_t *q) {
+    if (!q)
+        return;
+    free(q->selected);
+    memset(q, 0, sizeof *q);
+}
+
+static void queue_clear(song_download_queue_t *q) {
+    if (!q || !q->selected)
+        return;
+    memset(q->selected, 0, (size_t)q->library_count);
+    q->count = 0;
+}
+
+static int queue_contains(const song_download_queue_t *q, int index) {
+    return q && q->selected && index >= 0 && index < q->library_count &&
+           q->selected[index] != 0;
+}
+
+static void queue_set(song_download_queue_t *q, int index, int selected) {
+    int was_selected;
+
+    if (!q || !q->selected || index < 0 || index >= q->library_count)
+        return;
+    was_selected = q->selected[index] != 0;
+    if (was_selected == (selected != 0))
+        return;
+    q->selected[index] = selected ? 1 : 0;
+    q->count += selected ? 1 : -1;
+}
+
+static void queue_set_category(song_download_queue_t *q, int cat_idx,
+                               int selected) {
+    ese_song_entry_t song;
+    int song_cat;
+
+    if (!q || !q->selected || cat_idx < -1)
+        return;
+    for (int i = 0; i < q->library_count; i++) {
+        if (!ese_song_library_get2(i, &song, &song_cat) ||
+            (cat_idx >= 0 && song_cat != cat_idx))
+            continue;
+        if (selected && ese_song_library_is_cached_at(i))
+            continue;
+        queue_set(q, i, selected);
+    }
+}
 
 static int ascii_contains_ci(const char *s, const char *needle) {
     if (!s || !needle || !needle[0])
@@ -117,68 +197,213 @@ static int menu_clamp(int sel, int count) {
     return sel;
 }
 
-/* Download the whole song (all courses) and cache it. Difficulty choice +
- * playback are handled later by the official song-select menu, which picks up
- * the cached manifest.json. The menu stays up during the (blocking) download —
- * input isn't polled while it runs, so the user can't leave until it finishes. */
-static void download_song(const ese_song_entry_t *song) {
+/* Download one whole song (all courses). Returns 1 for a new download, 2 when
+ * already cached, and 0 on failure. The network client owns the detailed
+ * conversion/asset progress card while this blocking call is active. */
+static int download_song(const ese_song_entry_t *song) {
     ese_course_entry_t scratch[ESE_COURSE_LIST_MAX];
     int course_count = 0;
     int rc;
 
     if (!song || !song->id[0])
-        return;
-    if (ese_song_is_cached(song->id)) {
-        taiko_overlay_show_prompt("Already downloaded");
-        return;
-    }
+        return 0;
+    if (ese_song_is_cached(song->id))
+        return 2;
 
     /* ese_song_prepare_and_cache drives its own loading_screen for progress. */
     rc = ese_song_prepare_and_cache(song->id,
                                     song->title[0] ? song->title : song->id,
                                     scratch, ESE_COURSE_LIST_MAX, &course_count);
+    return rc > 0 && course_count > 0 ? 1 : 0;
+}
+
+static void queue_progress(const ese_song_entry_t *song, int current,
+                           int total) {
+    char progress[48];
+    const char *lines[2];
+
+    snprintf(progress, sizeof progress, "Song %d of %d", current, total);
+    lines[0] = progress;
+    lines[1] = song && song->title[0] ? song->title :
+               (song ? song->id : "");
+    taiko_overlay_card_set("Download Queue", lines, 2,
+                           "Hold O to stop after this song", NULL);
+    taiko_overlay_card_active(1);
+}
+
+static void download_queue(song_download_queue_t *q) {
+    ese_song_entry_t song;
+    char summary[96];
+    int *batch_indexes = NULL;
+    int planned;
+    int current = 0;
+    int downloaded = 0;
+    int skipped = 0;
+    int failed = 0;
+    int stopped = 0;
+
+    if (!q || !q->selected || q->count <= 0) {
+        taiko_overlay_show_prompt("Download queue is empty");
+        return;
+    }
+
+    planned = q->count;
+    batch_indexes = (int *)malloc(sizeof(*batch_indexes) * (size_t)planned);
+    if (batch_indexes) {
+        int batch_count = 0;
+        for (int i = 0; i < q->library_count; i++) {
+            if (q->selected[i])
+                batch_indexes[batch_count++] = i;
+        }
+        if (batch_count > 0)
+            (void)ese_song_prepare_batch(batch_indexes, batch_count);
+        free(batch_indexes);
+    }
+
+    (void)menu_pad_pressed();
+    for (int i = 0; i < q->library_count; i++) {
+        int rc;
+
+        if (!q->selected[i])
+            continue;
+        if (!ese_song_library_get(i, &song)) {
+            failed++;
+            continue;
+        }
+        current++;
+        queue_progress(&song, current, planned);
+        rc = download_song(&song);
+        if (rc > 0) {
+            queue_set(q, i, 0);
+            if (rc == 1)
+                downloaded++;
+            else
+                skipped++;
+        } else {
+            failed++;
+        }
+
+        if (menu_pad_pressed() & MENU_BTN_CIRCLE) {
+            stopped = 1;
+            break;
+        }
+    }
     taiko_overlay_card_active(0);
-    taiko_overlay_show_prompt(rc > 0 && course_count > 0 ? "Downloaded"
-                                                         : "Download failed");
+
+    if (stopped) {
+        snprintf(summary, sizeof summary, "Stopped: %d downloaded, %d queued",
+                 downloaded, q->count);
+    } else if (failed) {
+        snprintf(summary, sizeof summary,
+                 "%d downloaded, %d failed, %d queued",
+                 downloaded, failed, q->count);
+    } else {
+        snprintf(summary, sizeof summary, "%d downloaded, %d already present",
+                 downloaded, skipped);
+    }
+    taiko_overlay_show_prompt(summary);
+    (void)menu_pad_pressed();
 }
 
 /* --- categories screen ---------------------------------------------------- */
 static int categories_screen(const ese_category_entry_t *cats, int cat_count,
-                             int *io_sel) {
-    static char values[ESE_CATEGORY_LIST_MAX][16];
-    const char *lines[ESE_CATEGORY_LIST_MAX];
-    const char *vals[ESE_CATEGORY_LIST_MAX];
+                             song_download_queue_t *queue, int *io_sel) {
+    static char values[CATEGORY_ROWS_MAX][24];
+    const char *lines[CATEGORY_ROWS_MAX];
+    const char *vals[CATEGORY_ROWS_MAX];
+    unsigned char kinds[CATEGORY_ROWS_MAX];
     int sel = *io_sel;
     int top = 0;
 
     (void)menu_pad_pressed();
     for (;;) {
+        int n = 0;
+        int queue_all_row;
+        int download_row;
+        int clear_row;
+
         for (int i = 0; i < cat_count; i++) {
-            lines[i] = cats[i].title[0] ? cats[i].title : cats[i].id;
-            snprintf(values[i], sizeof values[i], "%d", cats[i].song_count);
-            vals[i] = values[i];
+            lines[n] = cats[i].title[0] ? cats[i].title : cats[i].id;
+            snprintf(values[n], sizeof values[n], "%d", cats[i].song_count);
+            vals[n] = values[n];
+            kinds[n] = TAIKO_OVL_ROW_NORMAL;
+            n++;
         }
-        sel = menu_clamp(sel, cat_count);
+        queue_all_row = n;
+        lines[n] = "Queue all undownloaded";
+        vals[n] = "";
+        kinds[n] = TAIKO_OVL_ROW_ACTION;
+        n++;
+        download_row = n;
+        lines[n] = "Download queue";
+        snprintf(values[n], sizeof values[n], "%d songs", queue->count);
+        vals[n] = values[n];
+        kinds[n] = queue->count ? TAIKO_OVL_ROW_ACTION : TAIKO_OVL_ROW_DISABLED;
+        n++;
+        clear_row = n;
+        lines[n] = "Clear queue";
+        vals[n] = "";
+        kinds[n] = queue->count ? TAIKO_OVL_ROW_ACTION : TAIKO_OVL_ROW_DISABLED;
+        n++;
+
+        sel = menu_clamp(sel, n);
         if (sel < top) top = sel;
         if (sel >= top + MENU_VISIBLE) top = sel - MENU_VISIBLE + 1;
 
-        taiko_overlay_menu_set("Download Custom Songs", lines, vals, NULL,
-                               cat_count, sel, top, NULL,
-                               "Up/Down  X:open  O:close");
+        taiko_overlay_menu_set("Download Custom Songs", lines, vals, kinds,
+                               n, sel, top, NULL,
+                               "Up/Down  X:open/run  O:close");
         taiko_overlay_menu_active(1);
 
         uint32_t edge = menu_pad_pressed();
         if (edge & MENU_BTN_UP)   sel--;
         if (edge & MENU_BTN_DOWN) sel++;
-        if (edge & MENU_BTN_CIRCLE) { *io_sel = sel; return -1; }   /* close */
-        if (edge & MENU_BTN_CROSS)  { *io_sel = sel; return sel; }  /* open cat */
+        if (edge & MENU_BTN_CIRCLE) {
+            *io_sel = sel;
+            return CATEGORY_CLOSE;
+        }
+        if (edge & MENU_BTN_CROSS) {
+            *io_sel = sel;
+            if (sel < cat_count)
+                return sel;
+            if (sel == queue_all_row)
+                return CATEGORY_QUEUE_ALL;
+            if (sel == download_row && queue->count)
+                return CATEGORY_DOWNLOAD_QUEUE;
+            if (sel == clear_row && queue->count)
+                return CATEGORY_CLEAR_QUEUE;
+        }
         sys_timer_usleep(TICK_US);
     }
 }
 
+static int load_song_page(const ese_category_entry_t *cat, int offset,
+                          ese_song_entry_t songs[ESE_SONG_PAGE_MAX],
+                          int indexes[ESE_SONG_PAGE_MAX],
+                          unsigned char cached[ESE_SONG_PAGE_MAX],
+                          int *out_total) {
+    int count = ese_song_fetch_page(cat->id, offset, ESE_SONG_PAGE_MAX,
+                                    songs, ESE_SONG_PAGE_MAX, out_total);
+
+    for (int i = 0; i < ESE_SONG_PAGE_MAX; i++) {
+        indexes[i] = -1;
+        cached[i] = 0;
+    }
+    for (int i = 0; i < count; i++) {
+        indexes[i] = ese_song_library_find_index(songs[i].id);
+        cached[i] = indexes[i] >= 0 ?
+            (unsigned char)ese_song_library_is_cached_at(indexes[i]) :
+            (unsigned char)ese_song_is_cached(songs[i].id);
+    }
+    return count;
+}
+
 /* --- songs screen (paged) ------------------------------------------------- */
-static void songs_screen(const ese_category_entry_t *cat) {
+static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
+                         song_download_queue_t *queue) {
     ese_song_entry_t songs[ESE_SONG_PAGE_MAX];
+    int indexes[ESE_SONG_PAGE_MAX];
+    unsigned char cached[ESE_SONG_PAGE_MAX];
     static char lbuf[SONG_ROWS_MAX][ESE_SONG_TITLE_MAX];
     const char *lines[SONG_ROWS_MAX];
     const char *vals[SONG_ROWS_MAX];
@@ -188,8 +413,7 @@ static void songs_screen(const ese_category_entry_t *cat) {
     int sel = 0;
     int top = 0;
 
-    int count = ese_song_fetch_page(cat->id, offset, ESE_SONG_PAGE_MAX,
-                                    songs, ESE_SONG_PAGE_MAX, &total);
+    int count = load_song_page(cat, offset, songs, indexes, cached, &total);
     if (count <= 0) {
         taiko_overlay_show_prompt("No songs in category");
         return;
@@ -200,15 +424,27 @@ static void songs_screen(const ese_category_entry_t *cat) {
         int has_prev = offset > 0;
         int has_next = offset + count < total;
         int n = 0;
-        int prev_row = -1, next_row = -1, back_row = -1;
+        int queue_cat_row;
+        int clear_cat_row;
+        int prev_row = -1, next_row = -1, back_row;
 
         for (int i = 0; i < count; i++, n++) {
             snprintf(lbuf[n], sizeof lbuf[n], "%s",
                      songs[i].title[0] ? songs[i].title : songs[i].id);
             lines[n] = lbuf[n];
-            vals[n]  = ese_song_is_cached(songs[i].id) ? "downloaded" : "";
-            kinds[n] = TAIKO_OVL_ROW_NORMAL;
+            if (cached[i]) {
+                vals[n] = "downloaded";
+                kinds[n] = TAIKO_OVL_ROW_DISABLED;
+            } else if (queue_contains(queue, indexes[i])) {
+                vals[n] = "queued";
+                kinds[n] = TAIKO_OVL_ROW_TOGGLE_ON;
+            } else {
+                vals[n] = "";
+                kinds[n] = TAIKO_OVL_ROW_NORMAL;
+            }
         }
+        queue_cat_row = n; lines[n] = "Queue entire category"; vals[n] = ""; kinds[n++] = TAIKO_OVL_ROW_ACTION;
+        clear_cat_row = n; lines[n] = "Clear category queue";  vals[n] = ""; kinds[n++] = TAIKO_OVL_ROW_ACTION;
         if (has_prev) { prev_row = n; lines[n] = "< Previous page"; vals[n] = ""; kinds[n++] = TAIKO_OVL_ROW_ACTION; }
         if (has_next) { next_row = n; lines[n] = "Next page >";     vals[n] = ""; kinds[n++] = TAIKO_OVL_ROW_ACTION; }
         back_row = n; lines[n] = "< Categories"; vals[n] = ""; kinds[n++] = TAIKO_OVL_ROW_ACTION;
@@ -217,11 +453,12 @@ static void songs_screen(const ese_category_entry_t *cat) {
         if (sel < top) top = sel;
         if (sel >= top + MENU_VISIBLE) top = sel - MENU_VISIBLE + 1;
 
-        char footer[64];
+        char footer[96];
         int page  = offset / ESE_SONG_PAGE_MAX + 1;
         int pages = (total + ESE_SONG_PAGE_MAX - 1) / ESE_SONG_PAGE_MAX;
-        snprintf(footer, sizeof footer, "Page %d/%d  X:download  O:back",
-                 page, pages);
+        snprintf(footer, sizeof footer,
+                 "Page %d/%d  Queue:%d  X:toggle/open  O:back",
+                 page, pages, queue->count);
         taiko_overlay_menu_set(cat->title[0] ? cat->title : cat->id,
                                lines, vals, kinds, n, sel, top, NULL, footer);
         taiko_overlay_menu_active(1);
@@ -234,18 +471,34 @@ static void songs_screen(const ese_category_entry_t *cat) {
 
         if (edge & MENU_BTN_CROSS) {
             if (sel < count) {
-                download_song(&songs[sel]);
-                (void)menu_pad_pressed();
+                if (cached[sel]) {
+                    taiko_overlay_show_prompt("Already downloaded");
+                } else if (indexes[sel] >= 0) {
+                    queue_set(queue, indexes[sel],
+                              !queue_contains(queue, indexes[sel]));
+                }
+            } else if (sel == queue_cat_row) {
+                int before = queue->count;
+                char msg[64];
+                queue_set_category(queue, cat_idx, 1);
+                snprintf(msg, sizeof msg, "Queued %d songs", queue->count - before);
+                taiko_overlay_show_prompt(msg);
+            } else if (sel == clear_cat_row) {
+                int before = queue->count;
+                char msg[64];
+                queue_set_category(queue, cat_idx, 0);
+                snprintf(msg, sizeof msg, "Removed %d songs", before - queue->count);
+                taiko_overlay_show_prompt(msg);
             } else if (sel == prev_row) {
                 offset -= ESE_SONG_PAGE_MAX;
                 if (offset < 0) offset = 0;
-                count = ese_song_fetch_page(cat->id, offset, ESE_SONG_PAGE_MAX,
-                                            songs, ESE_SONG_PAGE_MAX, &total);
+                count = load_song_page(cat, offset, songs, indexes, cached,
+                                       &total);
                 sel = 0; top = 0;
             } else if (sel == next_row) {
                 offset += ESE_SONG_PAGE_MAX;
-                count = ese_song_fetch_page(cat->id, offset, ESE_SONG_PAGE_MAX,
-                                            songs, ESE_SONG_PAGE_MAX, &total);
+                count = load_song_page(cat, offset, songs, indexes, cached,
+                                       &total);
                 sel = 0; top = 0;
             } else if (sel == back_row) {
                 return;
@@ -269,7 +522,10 @@ static void show_cover(const char *status) {
 
 void custom_song_launcher_run(void) {
     ese_category_entry_t cats[ESE_CATEGORY_LIST_MAX];
+    song_download_queue_t queue;
     int cat_sel = 0;
+
+    memset(&queue, 0, sizeof queue);
 
     if (!ese_song_service_ready()) {
         taiko_overlay_show_prompt("Set TJARepo host/token first");
@@ -293,16 +549,37 @@ void custom_song_launcher_run(void) {
 
     /* 3. Real menu. */
     int cat_count = ese_song_fetch_categories(cats, ESE_CATEGORY_LIST_MAX);
-    if (cat_count > 0) {
+    if (cat_count > 0 && queue_init(&queue)) {
         for (;;) {
-            int cat = categories_screen(cats, cat_count, &cat_sel);
-            if (cat < 0)
-                break;                 /* O on categories = close */
-            songs_screen(&cats[cat]);  /* returns here on O / Back */
+            int action = categories_screen(cats, cat_count, &queue, &cat_sel);
+            if (action == CATEGORY_CLOSE)
+                break;
+            if (action == CATEGORY_DOWNLOAD_QUEUE) {
+                download_queue(&queue);
+                continue;
+            }
+            if (action == CATEGORY_QUEUE_ALL) {
+                int before = queue.count;
+                char msg[64];
+                queue_set_category(&queue, -1, 1);
+                snprintf(msg, sizeof msg, "Queued %d songs", queue.count - before);
+                taiko_overlay_show_prompt(msg);
+                continue;
+            }
+            if (action == CATEGORY_CLEAR_QUEUE) {
+                queue_clear(&queue);
+                taiko_overlay_show_prompt("Download queue cleared");
+                continue;
+            }
+            if (action >= 0 && action < cat_count)
+                songs_screen(&cats[action], action, &queue);
         }
+    } else if (cat_count > 0) {
+        taiko_overlay_show_prompt("Download queue allocation failed");
     } else {
         taiko_overlay_show_prompt("Categories failed");
     }
+    queue_destroy(&queue);
 
     /* 4. Release the TEST switch behind the cover -> game exits to attract; let
      * it settle, THEN drop the cover so the transition is never seen. */

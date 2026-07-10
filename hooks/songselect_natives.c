@@ -13,7 +13,6 @@
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "icache.h"
-#include "title_nut.h"
 #include "title_render.h"
 #include "custom_song_launcher.h"
 #include "network/custom_song_client.h"
@@ -210,7 +209,15 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_TEST_APPEND_ORIG_COUNT  347u
 #define SSN_VISIBLE_APPEND_START    800u
 #define SSN_ENABLE_LEGACY_RANGE_INJECTION 0
-#define SSN_INJECT_MAX              32u
+#define SSN_INJECT_MAX              4096
+/* Open-addressed lookup uses a bit mask, so capacity must remain a power of
+ * two. 8,192 keeps load at or below 50% for the full injection cap. */
+#define SSN_SHORT_HASH_CAP          8192u
+#if (SSN_SHORT_HASH_CAP & (SSN_SHORT_HASH_CAP - 1u)) != 0
+#error SSN_SHORT_HASH_CAP_must_be_a_power_of_two
+#endif
+#define SSN_STRINGIFY_INNER(x)      #x
+#define SSN_STRINGIFY(x)            SSN_STRINGIFY_INNER(x)
 #define SSN_TEMPLATE_ABSOLUTE       799u
 #define SSN_CUSTOM_UID_BASE         6000u /* custom uid; textures hijacked at aux slot */
 #define SSN_PATCH_PLAYERINFO_STARS  0
@@ -256,8 +263,13 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define PI_HOOK_STAR_SLOT_68        13u
 #define PI_HOOK_STAR_SLOT_6C        14u
 
-static uint32_t g_record_copy_desc[2] = { 0x007150acu, 0x01027c58u };
-typedef void (*record_copy_fn)(void *dst, const void *src);
+/* std::vector<BasicSong>::insert(pos, count, value). This is the same grow
+ * path used by FUN_0011484c when its filtered temp vector fills. It allocates
+ * with the game allocator, copy-constructs 0x90-byte records, destroys the old
+ * records, and updates begin/end/capacity. The vector header starts at owner+4. */
+static uint32_t g_record_insert_desc[2] = { 0x00716850u, 0x01027c58u };
+typedef void (*record_insert_fn)(uint32_t owner, uint64_t pos,
+                                 uint64_t count, uint32_t value);
 
 typedef struct ssn_inject_song {
     ese_song_entry_t song;
@@ -265,6 +277,16 @@ typedef struct ssn_inject_song {
     unsigned int outline;   /* category title-outline ARGB (0 = use default) */
     unsigned int genre_id;  /* target in-game folder id (+0x78); 8 = Namco */
 } ssn_inject_song_t;
+
+/* Temporary injection candidates only need enough information to find the
+ * library entry and preserve the already-resolved presentation metadata. The
+ * full 256-byte song is materialized only while patching one record. */
+typedef struct ssn_inject_song_ref {
+    uint32_t library_index;
+    char short_id[ESE_SONG_SHORT_ID_MAX];
+    uint32_t outline;
+    uint32_t genre_id;
+} ssn_inject_song_ref_t;
 
 static uint32_t g_ssn_injected_start;
 static uint32_t g_ssn_injected_count;
@@ -335,6 +357,7 @@ static uint8_t g_rt_cache_payload[SSN_RT_MAX_PIXELS * 4u];
 static int ssn_get_board_range(uint32_t idx, uint32_t *start, uint32_t *count);
 static int ssn_is_test_virtual_song(uint32_t folder, uint32_t local);
 static int ssn_streq(const char *a, const char *b);
+static void ssn_rt_pool_mem_reserve(void);
 static int ssn_virtual_index_for_request(uint32_t folder, uint32_t local,
                                          uint32_t *out_index,
                                          uint32_t *out_absolute);
@@ -353,16 +376,46 @@ static uint32_t ssn_songselect_container(void) {
     return *(volatile uint32_t *)(uintptr_t)(state + 0x0cu);
 }
 
+static int ssn_ptr_sane(uint32_t p);
+
+/* GREEN song-select scene vtable (EBOOT .rodata). The scene object at
+ * scene+0x00 holds this when it's a live song-select scene; once the scene is
+ * torn down (shop/gameplay/etc.) the FPT cell keeps a dangling pointer whose
+ * +0x00 is freed heap junk. Comparing against the known vtable is a
+ * deterministic "is this really our scene" test -- far more reliable than
+ * range-checking the manager, which legitimately lives on the PPU stack. */
+#define SSN_SONGSELECT_SCENE_VTABLE 0x00f92fc0u
+
 static uint32_t ssn_music_mgr(void) {
     uint32_t scene = (uint32_t)taiko_fpt_song_select_scene();
-    if (!scene)
+    if (!ssn_ptr_sane(scene))
         return 0;
+    if (*(volatile uint32_t *)(uintptr_t)(scene + 0x00u) !=
+        SSN_SONGSELECT_SCENE_VTABLE)
+        return 0;   /* stale/freed scene: manager is not valid */
     return *(volatile uint32_t *)(uintptr_t)(scene + 0x0cu);
 }
 
 static int ssn_ptr_sane(uint32_t p) {
-    return p >= 0x00010000u && p < 0xe0000000u &&
-           p != 0xddddddddu && p != 0xcdcdcdcdu;
+    /* Two mapped EA windows, matching the PS3 process map:
+     *   [0x00010000,0x40000000) game data + main-memory sys allocs (heap song
+     *                           records/vectors, our allocs seen to 0x3a700000)
+     *   [0xc0000000,0xe0000000) RSX-local memory + PPU stacks
+     * The song-select MANAGER legitimately lives on the stack (~0xd003f9c8), so
+     * this MUST admit the stack window or every manager read fails (1-star
+     * difficulties, duplicate songs). The [0x40000000,0xc0000000) hole is
+     * unmapped and rejected. Teardown garbage no longer relies on this to be
+     * caught -- ssn_music_mgr's scene-vtable gate blocks stale scenes first. */
+    if (p == 0xddddddddu || p == 0xcdcdcdcdu)
+        return 0;
+    return (p >= 0x00010000u && p < 0x40000000u) ||
+           (p >= 0xc0000000u && p < 0xe0000000u);
+}
+
+/* PPU stack EA (thread stacks at 0xd0000000+). The e46 listbuild bridge hands
+ * the injector owner/temp as live stack pointers. */
+static int ssn_stack_ptr_sane(uint32_t p) {
+    return p >= 0xd0000000u && p < 0xe0000000u;
 }
 
 static int ssn_heap_ptr_sane(uint32_t p) {
@@ -881,64 +934,140 @@ static int ssn_patch_playerinfo_stars(uint32_t folder, uint32_t local) {
     return patched;
 }
 
-static int ssn_short_seen(const ssn_inject_song_t *songs, int count,
-                          const char *short_id) {
-    for (int i = 0; i < count; i++) {
-        if (strncmp(songs[i].short_id, short_id, sizeof songs[i].short_id) == 0)
+static uint32_t ssn_short_hash(const char *short_id) {
+    uint32_t h = 2166136261u;
+    const unsigned char *p = (const unsigned char *)short_id;
+
+    while (p && *p) {
+        h ^= *p++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* Slots contain song index + 1; zero is empty. Hash collisions are resolved by
+ * comparing the referenced short id, so a collision never drops a valid song. */
+static int ssn_short_hash_find(const ssn_inject_song_t *songs,
+                               const uint16_t slots[SSN_SHORT_HASH_CAP],
+                               const char *short_id) {
+    uint32_t at = ssn_short_hash(short_id) & (SSN_SHORT_HASH_CAP - 1u);
+
+    for (uint32_t probe = 0; probe < SSN_SHORT_HASH_CAP; probe++) {
+        uint16_t entry = slots[at];
+        if (!entry)
+            return -1;
+        if (strncmp(songs[entry - 1u].short_id, short_id,
+                    sizeof songs[0].short_id) == 0)
+            return (int)entry - 1;
+        at = (at + 1u) & (SSN_SHORT_HASH_CAP - 1u);
+    }
+    return -1;
+}
+
+static int ssn_short_hash_add(const ssn_inject_song_t *songs,
+                              uint16_t slots[SSN_SHORT_HASH_CAP],
+                              uint32_t index) {
+    uint32_t at;
+
+    if (index >= SSN_INJECT_MAX)
+        return 0;
+    at = ssn_short_hash(songs[index].short_id) & (SSN_SHORT_HASH_CAP - 1u);
+    for (uint32_t probe = 0; probe < SSN_SHORT_HASH_CAP; probe++) {
+        if (!slots[at]) {
+            slots[at] = (uint16_t)(index + 1u);
             return 1;
+        }
+        at = (at + 1u) & (SSN_SHORT_HASH_CAP - 1u);
     }
     return 0;
 }
 
-static int ssn_collect_cached_songs(ssn_inject_song_t *out, int cap) {
-    int total = ese_song_library_cached_count();
+static int ssn_ref_hash_find(const ssn_inject_song_ref_t *refs,
+                             const uint16_t slots[SSN_SHORT_HASH_CAP],
+                             const char *short_id) {
+    uint32_t at = ssn_short_hash(short_id) & (SSN_SHORT_HASH_CAP - 1u);
+
+    for (uint32_t probe = 0; probe < SSN_SHORT_HASH_CAP; probe++) {
+        uint16_t entry = slots[at];
+        if (!entry)
+            return -1;
+        if (strncmp(refs[entry - 1u].short_id, short_id,
+                    sizeof refs[0].short_id) == 0)
+            return (int)entry - 1;
+        at = (at + 1u) & (SSN_SHORT_HASH_CAP - 1u);
+    }
+    return -1;
+}
+
+static int ssn_ref_hash_add(const ssn_inject_song_ref_t *refs,
+                            uint16_t slots[SSN_SHORT_HASH_CAP],
+                            uint32_t index) {
+    uint32_t at;
+
+    if (index >= SSN_INJECT_MAX)
+        return 0;
+    at = ssn_short_hash(refs[index].short_id) & (SSN_SHORT_HASH_CAP - 1u);
+    for (uint32_t probe = 0; probe < SSN_SHORT_HASH_CAP; probe++) {
+        if (!slots[at]) {
+            slots[at] = (uint16_t)(index + 1u);
+            return 1;
+        }
+        at = (at + 1u) & (SSN_SHORT_HASH_CAP - 1u);
+    }
+    return 0;
+}
+
+static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
+    uint16_t seen[SSN_SHORT_HASH_CAP];
+    int total = ese_song_library_count();
     int count = 0;
 
     if (!out || cap <= 0 || total <= 0)
         return 0;
 
     memset(out, 0, sizeof(out[0]) * (size_t)cap);
+    memset(seen, 0, sizeof seen);
     for (int i = 0; i < total && count < cap; i++) {
-        ese_song_entry_t s;
+        ese_song_entry_t song;
         char short_id[ESE_SONG_SHORT_ID_MAX];
         int cat_idx = -1;
         ese_category_entry_t cat;
-        if (!ese_song_library_get_cached2(i, &s, &cat_idx))
+
+        if (!ese_song_library_get_cached_at(i, &song, &cat_idx))
             continue;
-        if (!ese_song_make_short_id(s.id, short_id, sizeof short_id))
+        if (!ese_song_make_short_id(song.id, short_id, sizeof short_id))
             continue;
-        if (ssn_short_seen(out, count, short_id))
+        if (ssn_ref_hash_find(out, seen, short_id) >= 0)
             continue;
-        out[count].song = s;
-        snprintf(out[count].short_id, sizeof out[count].short_id, "%s", short_id);
-        out[count].genre_id = 8u;   /* default Namco Original */
+
+        out[count].library_index = (uint32_t)i;
+        snprintf(out[count].short_id, sizeof out[count].short_id, "%s",
+                 short_id);
+        out[count].genre_id = 8u;
         if (ese_category_get(cat_idx, &cat)) {
             out[count].outline =
                 taiko_custom_category_outline_argb(cat.id, cat.title, cat_idx);
             out[count].genre_id =
                 taiko_custom_category_genre_id(cat.id, cat.title);
         }
+        if (!ssn_ref_hash_add(out, seen, (uint32_t)count))
+            break;
         count++;
     }
     return count;
 }
 
-int ssn_collect_custom_titles(char out[][ESE_SONG_TITLE_MAX], int cap) {
-    static ssn_inject_song_t songs[SSN_INJECT_MAX];
-    int n;
-    int i;
-
-    if (!out || cap <= 0)
+static int ssn_song_from_ref(const ssn_inject_song_ref_t *ref,
+                             ssn_inject_song_t *out) {
+    if (!ref || !out)
         return 0;
-    n = ssn_collect_cached_songs(songs, SSN_INJECT_MAX);
-    if (n > cap)
-        n = cap;
-    for (i = 0; i < n; i++) {
-        const char *t = songs[i].song.title[0] ? songs[i].song.title :
-            songs[i].short_id;
-        snprintf(out[i], ESE_SONG_TITLE_MAX, "%s", t);
-    }
-    return n;
+    memset(out, 0, sizeof *out);
+    if (!ese_song_library_get((int)ref->library_index, &out->song))
+        return 0;
+    snprintf(out->short_id, sizeof out->short_id, "%s", ref->short_id);
+    out->outline = ref->outline;
+    out->genre_id = ref->genre_id;
+    return 1;
 }
 
 static void ssn_patch_song_record_fields(uint32_t rec,
@@ -2694,95 +2823,6 @@ static void ssn_scan_detail_stars_once(void) {
         done = 1;
 }
 
-static int ssn_patch_existing_range(uint32_t vec, const char *label,
-                                    uint32_t start, uint32_t max_count,
-                                    const ssn_inject_song_t *songs,
-                                    int song_count, uint32_t *out_count) {
-    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
-    uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
-    uint32_t count = 0;
-    uint32_t patch_count;
-
-    if (!ssn_ptr_sane(begin) || end < begin ||
-        ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
-        return 0;
-
-    count = (end - begin) / SSN_SONG_RECORD_SIZE;
-    if (start >= count || song_count <= 0)
-        return 0;
-
-    patch_count = count - start;
-    if (patch_count > max_count)
-        patch_count = max_count;
-    if (patch_count > (uint32_t)song_count)
-        patch_count = (uint32_t)song_count;
-    if (!patch_count)
-        return 0;
-
-    for (uint32_t i = 0; i < patch_count; i++) {
-        uint32_t rec = begin + (start + i) * SSN_SONG_RECORD_SIZE;
-        ssn_patch_song_record_fields(rec, &songs[i]);
-    }
-
-    dbg_print("[ssn] patched custom song range\n");
-    dbg_print("  vec=");
-    dbg_print(label);
-    dbg_print("\n");
-    dbg_print_hex32("  start", start);
-    dbg_print_hex32("  count", patch_count);
-    ssn_log_song_record(begin + start * SSN_SONG_RECORD_SIZE,
-                        "first patched custom song");
-    ssn_log_song_record_tail(begin + start * SSN_SONG_RECORD_SIZE,
-                             "first patched custom tail", songs[0].song.stars);
-    if (start > 0)
-        ssn_log_song_record_tail(begin + (start - 1u) * SSN_SONG_RECORD_SIZE,
-                                 "previous stock tail", NULL);
-    if (start + patch_count < count)
-        ssn_log_song_record_tail(begin + (start + patch_count) * SSN_SONG_RECORD_SIZE,
-                                 "next stock tail", NULL);
-
-    if (out_count)
-        *out_count = patch_count;
-    return 1;
-}
-
-static void ssn_patch_song_record(void) __attribute__((unused));
-static void ssn_patch_song_record(void) {
-    static uint32_t patched_mgr;
-    static uint32_t injected_count;
-    uint32_t mgr = ssn_music_mgr();
-    ssn_inject_song_t songs[SSN_INJECT_MAX];
-    int song_count;
-
-    if (!ssn_ptr_sane(mgr))
-        return;
-    if (patched_mgr == mgr)
-        return;
-
-    song_count = ssn_collect_cached_songs(songs, SSN_INJECT_MAX);
-    if (song_count <= 0)
-        return;
-
-    ssn_patch_existing_range(mgr + SSN_SOURCE_VECTOR_OFF, "source+d04",
-                             SSN_TEST_APPEND_START,
-                             SSN_INJECT_MAX,
-                             songs, song_count, NULL);
-    if (ssn_patch_existing_range(mgr + SSN_DISPLAY_VECTOR_OFF, "display+434",
-                                 SSN_TEST_APPEND_START,
-                                 SSN_INJECT_MAX,
-                                 songs, song_count, &injected_count)) {
-        memcpy(g_ssn_virtual_songs, songs,
-               sizeof(g_ssn_virtual_songs[0]) * (size_t)injected_count);
-        g_ssn_virtual_song_count = injected_count;
-        g_ssn_injected_start = SSN_TEST_APPEND_START;
-        g_ssn_injected_count = injected_count;
-        patched_mgr = mgr;
-        dbg_print("[ssn] custom injection ready\n");
-        dbg_print_hex32("  injected.start", g_ssn_injected_start);
-        dbg_print_hex32("  injected.count", injected_count);
-    }
-}
-
 static uint32_t ssn_vec90_count(uint32_t begin, uint32_t end) {
     if (!ssn_ptr_sane(begin) || end < begin ||
         ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
@@ -3438,7 +3478,7 @@ static void ssn_hijack_custom_rec(void *vm, uint32_t type_base) {
         return;
     if (!ssn_virtual_index_for_request(folder, local, &virtual_index, NULL))
         return;
-    if (virtual_index >= 50u)
+    if (virtual_index >= SSN_INJECT_MAX)
         return;
     (void)owner; (void)aux; (void)p04;
     /* Force the bound slot handle to the virtual custom uid. The retrieval
@@ -3754,6 +3794,9 @@ static int ssn_is_texture(const char *name) {
 static int ssn_should_log(const char *name, unsigned n) {
     unsigned head = LOG_HEAD_DEFAULT;
     unsigned every = LOG_EVERY_DEFAULT;
+
+    if (!SSN_DETAIL_LOGGING_ENABLED)
+        return 0;   /* master switch: silence pre/post native spam on tty */
 
     if (ssn_streq(name, "GetMusicInfo_Basic") ||
         ssn_streq(name, "GetMusicInfo_Detail") ||
@@ -4837,7 +4880,7 @@ static void install_texload_log_hook(void) {
 /*
  * Texture-retrieval detour: FUN_0054a988(map r3, key r4) is the key->resource
  * hash lookup for the nu texture manager. For custom title handles
- * (base+6000..6049), try the real custom key first. If the game did not
+ * (base+6000..base+6000+SSN_INJECT_MAX), try the real custom key first. If the game did not
  * register that key, probe runtime title upload/lookup, then fall back to a
  * known donor resource until the actual texture-reference field is identified.
  * First instr `lis r9,0x446f` (0x3d20446f) is relocatable; re-run in the thunk.
@@ -5217,11 +5260,12 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
  * the game allocator can tear it down safely; after each upload we copy the
  * produced texels into our RSX-mapped memory and redirect only the sampled IO
  * offset to our buffer. Slots are LRU-reused by re-uploading pixels. */
-/* ponytail: 10+10 keeps the one-time 1MB-page alloc at ~3MB (was ~6MB and
- * failed sys_memory_allocate on real HW once the container fragmented by
- * song-select). Bump back toward 20 if scrolling re-uploads visibly stutter. */
-#define SSN_RT_POOL_LONG  10u
-#define SSN_RT_POOL_SHORT 10u
+/* The side-column list preloads at least 15 short titles outside the visible
+ * window. The selected long-title path only needs the current/next resources.
+ * This layout preserves that preload window while keeping the mapped block at
+ * 3 MB instead of the 5 MB required by 15+15. */
+#define SSN_RT_POOL_LONG  2u
+#define SSN_RT_POOL_SHORT 15u
 #define SSN_RT_POOL_HUD   1u   /* gameplay/result horizontal texture on demand */
 #define SSN_RT_POOL_TRANS 1u   /* scene-change texture is rendered on demand */
 #define SSN_RT_POOL_TOTAL (SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT + \
@@ -5240,7 +5284,12 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
      (SSN_RT_POOL_SHORT * SSN_RT_SLOT_SHORT_BYTES) + \
      (SSN_RT_POOL_HUD * SSN_RT_SLOT_HUD_BYTES) + \
      (SSN_RT_POOL_TRANS * SSN_RT_SLOT_TRANS_BYTES))
-#define SSN_RT_POOL_MEM_SIZE ((SSN_RT_POOL_MEM_USED + 0xfffffu) & ~0xfffffu)
+#define SSN_RT_POOL_SLAB_SIZE 0x100000u
+#define SSN_RT_POOL_MEM_SIZE \
+    ((SSN_RT_POOL_MEM_USED + SSN_RT_POOL_SLAB_SIZE - 1u) & \
+     ~(SSN_RT_POOL_SLAB_SIZE - 1u))
+#define SSN_RT_POOL_SLAB_COUNT \
+    (SSN_RT_POOL_MEM_SIZE / SSN_RT_POOL_SLAB_SIZE)
 
 typedef struct ssn_rt_pool_slot {
     uint32_t resource;   /* game-pool descriptor (0 = slot never allocated) */
@@ -5256,6 +5305,14 @@ static ssn_rt_pool_slot_t g_rt_pool_long[SSN_RT_POOL_LONG];
 static ssn_rt_pool_slot_t g_rt_pool_short[SSN_RT_POOL_SHORT];
 static ssn_rt_pool_slot_t g_rt_pool_hud[SSN_RT_POOL_HUD];
 static ssn_rt_pool_slot_t g_rt_pool_trans[SSN_RT_POOL_TRANS];
+
+typedef struct ssn_rt_pool_slab {
+    sys_addr_t addr;
+    uint32_t io;
+    uint32_t mapped;
+} ssn_rt_pool_slab_t;
+
+static ssn_rt_pool_slab_t g_rt_pool_slabs[SSN_RT_POOL_SLAB_COUNT];
 static uint32_t g_rt_pool_tick;
 static int g_rt_pool_mem_ready;
 
@@ -5279,51 +5336,119 @@ static void ssn_rt_reset_descriptors(void) {
     g_rt_pool_tick = 0;
 }
 
-/* One-time: allocate + RSX-map our texel memory, assign each slot a buffer. */
+/* Reserve before song-select builds its large vectors. Mapping is delayed until
+ * the first title request, after the game has initialized GCM. */
+static int ssn_rt_pool_mem_allocate(void) {
+    static unsigned fail_logs;
+    static int reserved_logged;
+    sys_memory_info_t info;
+    int all_ready = 1;
+
+    for (unsigned i = 0; i < SSN_RT_POOL_SLAB_COUNT; i++) {
+        sys_addr_t addr = 0;
+        int rc;
+
+        if (g_rt_pool_slabs[i].addr)
+            continue;
+        rc = sys_memory_allocate(SSN_RT_POOL_SLAB_SIZE,
+                                 SYS_MEMORY_PAGE_SIZE_1M, &addr);
+        if (rc != CELL_OK || !addr) {
+            all_ready = 0;
+            if (fail_logs < 8u) {
+                fail_logs++;
+                dbg_print("[ssn] owned pool slab allocation failed\n");
+                dbg_print_hex32("  slab", i);
+                dbg_print_hex32("  rc", (uint32_t)rc);
+                dbg_print_hex32("  size", SSN_RT_POOL_SLAB_SIZE);
+                if (sys_memory_get_user_memory_size(&info) == CELL_OK) {
+                    dbg_print_hex32("  mem.total", (uint32_t)info.total_user_memory);
+                    dbg_print_hex32("  mem.free", (uint32_t)info.available_user_memory);
+                }
+            }
+            continue;
+        }
+        g_rt_pool_slabs[i].addr = addr;
+        memset((void *)(uintptr_t)addr, 0, SSN_RT_POOL_SLAB_SIZE);
+    }
+    if (all_ready && !reserved_logged) {
+        reserved_logged = 1;
+        dbg_print("[ssn] owned pool slabs reserved\n");
+        dbg_print_hex32("  count", SSN_RT_POOL_SLAB_COUNT);
+        dbg_print_hex32("  total", SSN_RT_POOL_MEM_SIZE);
+        for (unsigned i = 0; i < SSN_RT_POOL_SLAB_COUNT; i++)
+            dbg_print_hex32("  base", (uint32_t)g_rt_pool_slabs[i].addr);
+    }
+    return all_ready;
+}
+
+static void ssn_rt_pool_mem_reserve(void) {
+    (void)ssn_rt_pool_mem_allocate();
+}
+
+static int ssn_rt_assign_pool_slots(ssn_rt_pool_slot_t *pool, unsigned count,
+                                    uint32_t bytes, unsigned *slab_index,
+                                    uint32_t *slab_offset) {
+    if (!pool || !slab_index || !slab_offset || !bytes ||
+        bytes > SSN_RT_POOL_SLAB_SIZE)
+        return 0;
+    for (unsigned i = 0; i < count; i++) {
+        if (*slab_offset + bytes > SSN_RT_POOL_SLAB_SIZE) {
+            (*slab_index)++;
+            *slab_offset = 0;
+        }
+        if (*slab_index >= SSN_RT_POOL_SLAB_COUNT)
+            return 0;
+        pool[i].buf = (uint32_t)g_rt_pool_slabs[*slab_index].addr +
+                      *slab_offset;
+        pool[i].io = g_rt_pool_slabs[*slab_index].io + *slab_offset;
+        *slab_offset += bytes;
+    }
+    return 1;
+}
+
+/* One-time: map each reserved slab and pack the texture slots into them. */
 static int ssn_rt_pool_mem_init(void) {
-    sys_addr_t addr = 0;
-    uint32_t io = 0;
+    unsigned slab = 0;
     uint32_t off = 0;
-    unsigned i;
 
     if (g_rt_pool_mem_ready)
         return 1;
-    if (sys_memory_allocate(SSN_RT_POOL_MEM_SIZE, SYS_MEMORY_PAGE_SIZE_1M,
-                            &addr) != CELL_OK || !addr) {
-        dbg_print("[ssn] owned pool sys_memory_allocate failed\n");
+    if (!ssn_rt_pool_mem_allocate())
         return 0;
+    for (unsigned i = 0; i < SSN_RT_POOL_SLAB_COUNT; i++) {
+        int rc;
+        if (g_rt_pool_slabs[i].mapped)
+            continue;
+        rc = cellGcmMapMainMemory(
+            (void *)(uintptr_t)g_rt_pool_slabs[i].addr,
+            SSN_RT_POOL_SLAB_SIZE, &g_rt_pool_slabs[i].io);
+        if (rc != CELL_OK) {
+            dbg_print("[ssn] owned pool slab GCM map failed\n");
+            dbg_print_hex32("  slab", i);
+            dbg_print_hex32("  rc", (uint32_t)rc);
+            return 0;
+        }
+        g_rt_pool_slabs[i].mapped = 1;
     }
-    memset((void *)(uintptr_t)addr, 0, SSN_RT_POOL_MEM_SIZE);
-    if (cellGcmMapMainMemory((void *)(uintptr_t)addr, SSN_RT_POOL_MEM_SIZE,
-                             &io) != CELL_OK) {
-        dbg_print("[ssn] owned pool cellGcmMapMainMemory failed\n");
+    if (!ssn_rt_assign_pool_slots(g_rt_pool_long, SSN_RT_POOL_LONG,
+                                  SSN_RT_SLOT_LONG_BYTES, &slab, &off) ||
+        !ssn_rt_assign_pool_slots(g_rt_pool_short, SSN_RT_POOL_SHORT,
+                                  SSN_RT_SLOT_SHORT_BYTES, &slab, &off) ||
+        !ssn_rt_assign_pool_slots(g_rt_pool_hud, SSN_RT_POOL_HUD,
+                                  SSN_RT_SLOT_HUD_BYTES, &slab, &off) ||
+        !ssn_rt_assign_pool_slots(g_rt_pool_trans, SSN_RT_POOL_TRANS,
+                                  SSN_RT_SLOT_TRANS_BYTES, &slab, &off)) {
+        dbg_print("[ssn] owned pool slab layout overflow\n");
         return 0;
-    }
-    for (i = 0; i < SSN_RT_POOL_LONG; i++) {
-        g_rt_pool_long[i].buf = (uint32_t)addr + off;
-        g_rt_pool_long[i].io = io + off;
-        off += SSN_RT_SLOT_LONG_BYTES;
-    }
-    for (i = 0; i < SSN_RT_POOL_SHORT; i++) {
-        g_rt_pool_short[i].buf = (uint32_t)addr + off;
-        g_rt_pool_short[i].io = io + off;
-        off += SSN_RT_SLOT_SHORT_BYTES;
-    }
-    for (i = 0; i < SSN_RT_POOL_HUD; i++) {
-        g_rt_pool_hud[i].buf = (uint32_t)addr + off;
-        g_rt_pool_hud[i].io = io + off;
-        off += SSN_RT_SLOT_HUD_BYTES;
-    }
-    for (i = 0; i < SSN_RT_POOL_TRANS; i++) {
-        g_rt_pool_trans[i].buf = (uint32_t)addr + off;
-        g_rt_pool_trans[i].io = io + off;
-        off += SSN_RT_SLOT_TRANS_BYTES;
     }
     g_rt_pool_mem_ready = 1;
-    dbg_print("[ssn] owned pool mem ready\n");
-    dbg_print_hex32("  base", (uint32_t)addr);
-    dbg_print_hex32("  io", io);
-    dbg_print_hex32("  size", SSN_RT_POOL_MEM_SIZE);
+    dbg_print("[ssn] owned pool slabs ready\n");
+    dbg_print_hex32("  count", SSN_RT_POOL_SLAB_COUNT);
+    dbg_print_hex32("  used", SSN_RT_POOL_MEM_USED);
+    for (unsigned i = 0; i < SSN_RT_POOL_SLAB_COUNT; i++) {
+        dbg_print_hex32("  base", (uint32_t)g_rt_pool_slabs[i].addr);
+        dbg_print_hex32("  io", g_rt_pool_slabs[i].io);
+    }
     return 1;
 }
 
@@ -5508,7 +5633,7 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
     uint32_t off;
 
     off = key - 0x00091770u;
-    if (off < 50u) {
+    if (off < SSN_INJECT_MAX) {
         if (index)
             *index = off;
         if (type)
@@ -5517,7 +5642,7 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
     }
 
     off = key - 0x000a1770u;
-    if (off < 50u) {
+    if (off < SSN_INJECT_MAX) {
         if (index)
             *index = off;
         if (type)
@@ -5526,7 +5651,7 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
     }
 
     off = key - 0x000b1770u;
-    if (off < 50u) {
+    if (off < SSN_INJECT_MAX) {
         if (index)
             *index = off;
         if (type)
@@ -5535,7 +5660,7 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
     }
 
     off = key - 0x000c1770u;
-    if (off < 50u) {
+    if (off < SSN_INJECT_MAX) {
         if (index)
             *index = off;
         if (type)
@@ -5557,16 +5682,83 @@ static int ssn_custom_texture_key(uint32_t key, uint32_t *index,
     return 0;
 }
 
+static uint32_t ssn_rt_stock_fallback(uint32_t map, uint32_t type,
+                                      uint32_t game_toc,
+                                      uint32_t *out_key) {
+    uint32_t key;
+    uint32_t resource;
+
+    /* HUD/transition paths have a stock dummy/base texture. */
+    if (type == 11u || type == 12u) {
+        key = type << 16;
+        resource = ssn_texretr_orig_lookup(map, key, game_toc);
+        if (ssn_heap_ptr_sane(resource)) {
+            if (out_key)
+                *out_key = key;
+            return resource;
+        }
+    }
+
+    /* UIDs 100..115 were the original runtime-title donor pool and have stock
+     * title resources. Match the requested renderer type first. */
+    if (type == TITLE_TEX_SONGLIST_LONG ||
+        type == TITLE_TEX_SONGLIST_SHORT) {
+        for (uint32_t uid = 100u; uid < 116u; uid++) {
+            key = (type << 16) + uid;
+            resource = ssn_texretr_orig_lookup(map, key, game_toc);
+            if (ssn_heap_ptr_sane(resource)) {
+                if (out_key)
+                    *out_key = key;
+                return resource;
+            }
+        }
+    }
+
+    /* Last resort for a HUD/transition failure: any valid stock texture-info
+     * object is safer than the null pointer GREEN dereferences unconditionally. */
+    for (uint32_t stock_type = TITLE_TEX_SONGLIST_LONG;
+         stock_type <= TITLE_TEX_SONGLIST_SHORT; stock_type++) {
+        for (uint32_t uid = 100u; uid < 116u; uid++) {
+            key = (stock_type << 16) + uid;
+            resource = ssn_texretr_orig_lookup(map, key, game_toc);
+            if (ssn_heap_ptr_sane(resource)) {
+                if (out_key)
+                    *out_key = key;
+                return resource;
+            }
+        }
+    }
+    if (out_key)
+        *out_key = 0;
+    return 0;
+}
+
 uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc);
 uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc) {
+    static unsigned fallback_logs;
     uint32_t index;
     uint32_t type;
+    uint32_t resource;
+    uint32_t fallback_key;
 
-    (void)map;
-    (void)game_toc;
     if (!ssn_custom_texture_key(key, &index, &type))
         return 0;             /* not a custom handle: game handles it */
-    return ssn_rt_owned_resource(key, type, index);
+    resource = ssn_rt_owned_resource(key, type, index);
+    if (resource)
+        return resource;
+
+    /* A missing custom resource is fatal: GREEN dereferences the lookup result
+     * without checking it (0x005130dc). Fall back to a known stock title so a
+     * memory/render/upload failure degrades visually instead of crashing. */
+    resource = ssn_rt_stock_fallback(map, type, game_toc, &fallback_key);
+    if (fallback_logs < 8u) {
+        fallback_logs++;
+        dbg_print("[ssn] custom title fallback\n");
+        dbg_print_hex32("  custom.key", key);
+        dbg_print_hex32("  fallback.key", fallback_key);
+        dbg_print_hex32("  resource", resource);
+    }
+    return ssn_heap_ptr_sane(resource) ? resource : 0;
 }
 
 extern char ssn_texretr_detour_code[];
@@ -5576,18 +5768,18 @@ __asm__(
 "lis 12,0x0009\n"
 "ori 12,12,0x1770\n"          /* r12 = 0x00091770 (outside/short base) */
 "subf 0,12,4\n"               /* r0 = key - 0x91770 */
-"cmplwi 0,0,0x32\n"           /* < 50 ? */
+"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
 "blt 2f\n"
 "1:\n"
 "lis 12,0x000a\n"
 "ori 12,12,0x1770\n"          /* r12 = 0x000a1770 (inside/long base) */
 "subf 0,12,4\n"
-"cmplwi 0,0,0x32\n"
+"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
 "blt 2f\n"
 "lis 12,0x000b\n"
 "ori 12,12,0x1770\n"          /* r12 = 0x000b1770 (song_name custom base) */
 "subf 0,12,4\n"
-"cmplwi 0,0,0x32\n"
+"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
 "blt 2f\n"
 "lis 12,0x000b\n"             /* r12 = 0x000b0000 (song_name dummy/base key) */
 "subf 0,12,4\n"
@@ -5596,7 +5788,7 @@ __asm__(
 "lis 12,0x000c\n"
 "ori 12,12,0x1770\n"          /* r12 = 0x000c1770 (transition song_name base) */
 "subf 0,12,4\n"
-"cmplwi 0,0,0x32\n"
+"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
 "blt 2f\n"
 "lis 12,0x000c\n"            /* r12 = 0x000c0000 (transition dummy/base key) */
 "subf 0,12,4\n"
@@ -6015,36 +6207,42 @@ static uint32_t ssn_vec90_genre_block_end(uint32_t vec, uint32_t id) {
     return found ? last + 1u : 0u;
 }
 
-/* Insert one 0x90 record at index `at`, shifting the tail down. Copies
- * template_rec (pick a same-genre record so +0x78 and genre fields are right).
- * Returns the inserted record address, 0 on failure. */
-static uint32_t ssn_vec90_insert(uint32_t vec, uint32_t at,
-                                 uint32_t template_rec) {
+/* Insert `add` copies of the preceding same-genre record in one operation.
+ * FUN_00716850 owns growth and C++ object lifetime; raw memmove is unsafe once
+ * a record contains a non-SSO std::string or the allocation must move. */
+static uint32_t ssn_vec90_insert_many(uint32_t vec, uint32_t at,
+                                      uint32_t add) {
     uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
     uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
     uint32_t cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
-    record_copy_fn copy_record = (record_copy_fn)(uintptr_t)g_record_copy_desc;
-    uint32_t count, cap_count, at_addr, new_end;
+    record_insert_fn insert_records =
+        (record_insert_fn)(uintptr_t)g_record_insert_desc;
+    uint32_t count;
+    uint32_t template_rec;
+    uint32_t new_begin;
+    uint32_t new_end;
+    uint32_t new_cap;
 
     if (!ssn_ptr_sane(begin) || end < begin || cap < end ||
         ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
         return 0;
     count = (end - begin) / SSN_SONG_RECORD_SIZE;
-    cap_count = (cap - begin) / SSN_SONG_RECORD_SIZE;
-    if (count + 1u > cap_count || at > count)
+    if (!add || at == 0u || at > count || add > SSN_INJECT_MAX ||
+        count > 0xffffffffu - add)
         return 0;
 
-    at_addr = begin + at * SSN_SONG_RECORD_SIZE;
-    memmove((void *)(uintptr_t)(at_addr + SSN_SONG_RECORD_SIZE),
-            (const void *)(uintptr_t)at_addr,
-            (size_t)(count - at) * SSN_SONG_RECORD_SIZE);
-    copy_record((void *)(uintptr_t)at_addr,
-                (const void *)(uintptr_t)template_rec);
-    new_end = end + SSN_SONG_RECORD_SIZE;
-    mem_write_and_flush((void *)(uintptr_t)(vec + 0x04u), &new_end, 4u);
-    icache_flush((void *)(uintptr_t)at_addr,
-                 (size_t)(count + 1u - at) * SSN_SONG_RECORD_SIZE);
-    return at_addr;
+    template_rec = begin + (at - 1u) * SSN_SONG_RECORD_SIZE;
+    insert_records(vec - 4u, (uint64_t)(begin + at * SSN_SONG_RECORD_SIZE),
+                   (uint64_t)add, template_rec);
+
+    new_begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
+    new_end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    new_cap = *(volatile uint32_t *)(uintptr_t)(vec + 0x08u);
+    if (!ssn_ptr_sane(new_begin) || new_end < new_begin || new_cap < new_end ||
+        ((new_end - new_begin) % SSN_SONG_RECORD_SIZE) != 0 ||
+        (new_end - new_begin) / SSN_SONG_RECORD_SIZE != count + add)
+        return 0;
+    return new_begin + at * SSN_SONG_RECORD_SIZE;
 }
 
 /* Identity of the source array we last touched. `owner` is a stack address that
@@ -6053,17 +6251,6 @@ static uint32_t ssn_vec90_insert(uint32_t vec, uint32_t at,
  * start over; otherwise it's the same persistent array and we only APPEND the
  * customs not already in it. */
 static uint32_t g_ssn_src_begin;
-
-/* One custom that still needs inserting into `vec` at its genre-block end.
- * Positions are computed per-vector because temp and source diverge once source
- * holds customs. Returns the inserted record address (patched by caller). */
-static uint32_t ssn_insert_custom_at_genre(uint32_t vec, uint32_t gid) {
-    uint32_t at = ssn_vec90_genre_block_end(vec, gid);
-    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
-    if (!at || !ssn_ptr_sane(begin))
-        return 0;   /* genre folder absent this build */
-    return ssn_vec90_insert(vec, at, begin + (at - 1u) * SSN_SONG_RECORD_SIZE);
-}
 
 /* Rebuild g_ssn_inject_abs (virtual index -> absolute source position) by
  * scanning the source vector for our uniqueid-tagged records. Positions shift
@@ -6088,14 +6275,19 @@ static void ssn_recompute_inject_abs(uint32_t svec) {
 static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp)
     __attribute__((unused));
 static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
-    ssn_inject_song_t songs[SSN_INJECT_MAX];
-    int song_count;
+    static ssn_inject_song_ref_t refs[SSN_INJECT_MAX];
+    uint16_t existing[SSN_SHORT_HASH_CAP];
+    int ref_count;
     uint32_t tvec = temp + 0x04u;
     uint32_t svec = owner + SSN_SOURCE_VECTOR_OFF;
     uint32_t src_begin;
     uint32_t added = 0;
+    uint32_t dropped = 0;
 
-    if (!ssn_ptr_sane(owner) || !ssn_ptr_sane(temp))
+    /* owner AND temp are stack addresses (see g_ssn_src_begin note); the real
+     * heap handles are the vector begin/end pointers read out of them, which
+     * get the strict main-memory ssn_ptr_sane check downstream. */
+    if (!ssn_stack_ptr_sane(owner) || !ssn_stack_ptr_sane(temp))
         return;
 
     src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
@@ -6110,43 +6302,101 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
         g_ssn_src_begin = src_begin;
     }
 
-    song_count = ssn_collect_cached_songs(songs, SSN_INJECT_MAX);
-    if (song_count <= 0)
+    ref_count = ssn_collect_cached_refs(refs, SSN_INJECT_MAX);
+    if (ref_count <= 0)
         return;
 
-    /* Append each cached song not already injected (dedup by short id). Existing
-     * customs keep their virtual index, so their textures/meta stay valid; only
-     * genuinely new songs get a new index. Process gid ascending. */
+    memset(existing, 0, sizeof existing);
+    for (uint32_t v = 0; v < g_ssn_virtual_song_count; v++)
+        (void)ssn_short_hash_add(g_ssn_virtual_songs, existing, v);
+
+    /* Insert one batch per genre into both vectors. This limits tail movement to
+     * eight passes even at the full cap and lets the game's vector helper grow
+     * storage geometrically. Existing customs retain their virtual indices. */
     for (uint32_t gid = 1u; gid <= 8u; gid++) {
-        for (int s = 0; s < song_count &&
-                        g_ssn_virtual_song_count < SSN_INJECT_MAX; s++) {
-            uint32_t v, tdst, sdst;
-            if (songs[s].genre_id != gid)
+        uint32_t remaining = SSN_INJECT_MAX - g_ssn_virtual_song_count;
+        uint32_t group_count = 0;
+        uint32_t tat;
+        uint32_t sat;
+        uint32_t tdst;
+        uint32_t sdst;
+        uint32_t group_pos = 0;
+
+        for (int s = 0; s < ref_count && group_count < remaining; s++) {
+            if (refs[s].genre_id != gid)
                 continue;
-            if (ssn_short_seen(g_ssn_virtual_songs,
-                               (int)g_ssn_virtual_song_count, songs[s].short_id))
-                continue;   /* already present in the list */
-            tdst = ssn_insert_custom_at_genre(tvec, gid);
-            sdst = ssn_insert_custom_at_genre(svec, gid);
-            if (!tdst || !sdst)
+            if (ssn_short_hash_find(g_ssn_virtual_songs, existing,
+                                    refs[s].short_id) < 0)
+                group_count++;
+        }
+        if (!group_count)
+            continue;
+
+        tat = ssn_vec90_genre_block_end(tvec, gid);
+        sat = ssn_vec90_genre_block_end(svec, gid);
+        if (!tat || !sat) {
+            dropped += group_count;
+            continue;
+        }
+        tdst = ssn_vec90_insert_many(tvec, tat, group_count);
+        sdst = ssn_vec90_insert_many(svec, sat, group_count);
+        if (!tdst || !sdst) {
+            dropped += group_count;
+            break;
+        }
+
+        for (int s = 0; s < ref_count; s++) {
+            ssn_inject_song_t song;
+            uint32_t v;
+            uint32_t trec;
+            uint32_t srec;
+
+            if (refs[s].genre_id != gid ||
+                ssn_short_hash_find(g_ssn_virtual_songs, existing,
+                                    refs[s].short_id) >= 0)
                 continue;
+            if (group_pos >= group_count)
+                break;
+            if (!ssn_song_from_ref(&refs[s], &song)) {
+                dropped++;
+                continue;
+            }
             v = g_ssn_virtual_song_count;
-            ssn_patch_song_record_fields(tdst, &songs[s]);
-            ssn_patch_song_record_fields(sdst, &songs[s]);
-            *(volatile uint32_t *)(uintptr_t)(tdst + SSN_SONG_UNIQUEID_OFF) =
+            if (v >= SSN_INJECT_MAX)
+                break;
+            trec = tdst + group_pos * SSN_SONG_RECORD_SIZE;
+            srec = sdst + group_pos * SSN_SONG_RECORD_SIZE;
+            ssn_patch_song_record_fields(trec, &song);
+            ssn_patch_song_record_fields(srec, &song);
+            *(volatile uint32_t *)(uintptr_t)(trec + SSN_SONG_UNIQUEID_OFF) =
                 SSN_CUSTOM_UID_BASE + v;
-            *(volatile uint32_t *)(uintptr_t)(sdst + SSN_SONG_UNIQUEID_OFF) =
+            *(volatile uint32_t *)(uintptr_t)(srec + SSN_SONG_UNIQUEID_OFF) =
                 SSN_CUSTOM_UID_BASE + v;
-            memcpy(&g_ssn_virtual_songs[v], &songs[s],
+            memcpy(&g_ssn_virtual_songs[v], &song,
                    sizeof g_ssn_virtual_songs[0]);
             g_ssn_virtual_song_count = v + 1;
+            (void)ssn_short_hash_add(g_ssn_virtual_songs, existing, v);
+            group_pos++;
             added++;
         }
     }
 
     if (added)
         ssn_recompute_inject_abs(svec);
+    /* Growth changes the allocation identity. Track the new pointer so a later
+     * call on this same source vector does not reset caches and inject again. */
+    g_ssn_src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
     g_ssn_injected_count = g_ssn_virtual_song_count;
+
+    if (added || dropped) {   /* one line per fresh build with new customs */
+        dbg_print("[ssn] inject summary\n");
+        dbg_print_hex32("  cached", (uint32_t)ese_song_library_cached_count());
+        dbg_print_hex32("  collected", (uint32_t)ref_count);
+        dbg_print_hex32("  added_now", added);
+        dbg_print_hex32("  dropped", dropped);
+        dbg_print_hex32("  virtual_total", g_ssn_virtual_song_count);
+        dbg_print_hex32("  cap", SSN_INJECT_MAX);
+    }
 }
 
 static void install_e46_listbuild_probe(void) {
@@ -6369,6 +6619,7 @@ static void install_playerinfo_hooks(void) {
 void songselect_natives_install(void) {
     if (g_installed)
         return;
+    ssn_rt_pool_mem_reserve();
     g_installed = 1;
 
     dbg_print("[ssn] installing songselect detail/course probe\n");

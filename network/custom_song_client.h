@@ -46,14 +46,26 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
 int ese_song_prepare_and_cache(const char *song_id, const char *title,
                                ese_course_entry_t *courses, int course_cap,
                                int *out_course_count);
+/* Ask a batch-capable server to start converting these library entries. Asset
+ * downloads remain sequential. Returns 1 when accepted, otherwise 0; callers
+ * can safely fall back to prepare_and_cache one song at a time. */
+int ese_song_prepare_batch(const int *library_indexes, int count);
 /* 1 if the song is already converted+downloaded locally (manifest present). */
 int ese_song_is_cached(const char *song_id);
 int ese_song_library_count(void);
 int ese_song_library_get(int index, ese_song_entry_t *out);
+int ese_song_library_get2(int index, ese_song_entry_t *out,
+                          int *out_cat_idx);
+int ese_song_library_find_index(const char *song_id);
+int ese_song_library_is_cached_at(int library_index);
 int ese_song_library_cached_count(void);
 int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out);
 int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
                                  int *out_cat_idx);
+/* Direct library-index lookup used by bulk song-select injection. Unlike the
+ * cached-index accessors, this does not rescan all preceding cached entries. */
+int ese_song_library_get_cached_at(int library_index, ese_song_entry_t *out,
+                                   int *out_cat_idx);
 int ese_category_get(int idx, ese_category_entry_t *out);
 int ese_song_make_short_id(const char *song_id, char *out, int cap);
 int ese_song_resolve_short_id(const char *short_id, char *out, int cap);

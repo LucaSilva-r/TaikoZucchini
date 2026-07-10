@@ -121,6 +121,29 @@ static int api_request(const char *method, const char *path,
                                headers, (size_t)hn, NULL, 0, resp);
 }
 
+static int api_request_json(const char *method, const char *path,
+                            const void *body, size_t body_len,
+                            http_response_t *resp) {
+    char headers[320];
+    int hn;
+    int extra;
+
+    if (!ese_song_service_ready())
+        return -1;
+    hn = api_headers(headers, sizeof headers);
+    if (hn < 0)
+        return -1;
+    extra = snprintf(headers + hn, sizeof headers - (size_t)hn,
+                     "Content-Type: application/json\r\n");
+    if (extra <= 0 || (size_t)extra >= sizeof headers - (size_t)hn)
+        return -1;
+
+    int port = g_cfg.tjarepo_port ? (int)g_cfg.tjarepo_port : 443;
+    return http_request_direct(method, g_cfg.tjarepo_host, port, path,
+                               headers, (size_t)(hn + extra),
+                               body, body_len, resp);
+}
+
 static const unsigned char *find_bytes(const unsigned char *buf, size_t len,
                                        const char *needle) {
     size_t nlen = strlen(needle);
@@ -588,10 +611,32 @@ int ese_song_library_count(void) {
 }
 
 int ese_song_library_get(int index, ese_song_entry_t *out) {
+    return ese_song_library_get2(index, out, NULL);
+}
+
+int ese_song_library_get2(int index, ese_song_entry_t *out,
+                          int *out_cat_idx) {
+    if (out_cat_idx)
+        *out_cat_idx = -1;
     if (!out || !g_lib_loaded || index < 0 || index >= g_lib_song_count)
         return 0;
     *out = g_lib_songs[index];
+    if (out_cat_idx && g_lib_song_cat)
+        *out_cat_idx = g_lib_song_cat[index];
     return 1;
+}
+
+int ese_song_library_find_index(const char *song_id) {
+    return lib_find_song_index(song_id);
+}
+
+int ese_song_library_is_cached_at(int library_index) {
+    if (!g_lib_loaded || library_index < 0 ||
+        library_index >= g_lib_song_count)
+        return 0;
+    if (!g_lib_cache_scanned)
+        lib_refresh_cached_flags();
+    return g_lib_cached ? g_lib_cached[library_index] != 0 : 0;
 }
 
 int ese_song_library_cached_count(void) {
@@ -642,6 +687,24 @@ int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
         seen++;
     }
     return 0;
+}
+
+int ese_song_library_get_cached_at(int library_index, ese_song_entry_t *out,
+                                   int *out_cat_idx) {
+    if (out_cat_idx)
+        *out_cat_idx = -1;
+    if (!out || library_index < 0 || !g_lib_loaded ||
+        library_index >= g_lib_song_count)
+        return 0;
+    if (!g_lib_cache_scanned)
+        lib_refresh_cached_flags();
+    if (!g_lib_cached || !g_lib_cached[library_index])
+        return 0;
+
+    *out = g_lib_songs[library_index];
+    if (out_cat_idx && g_lib_song_cat)
+        *out_cat_idx = g_lib_song_cat[library_index];
+    return 1;
 }
 
 int ese_category_get(int idx, ese_category_entry_t *out) {
@@ -1035,8 +1098,13 @@ static int write_local_manifest(const char *song_id,
         !append_path(path, sizeof path, root, "manifest.json"))
         return 0;
     ok = write_file(path, body, len);
-    if (ok)
-        g_lib_cache_scanned = 0;
+    if (ok) {
+        int idx = lib_find_song_index(song_id);
+        if (g_lib_cache_scanned && g_lib_cached && idx >= 0)
+            g_lib_cached[idx] = 1;
+        else
+            g_lib_cache_scanned = 0;
+    }
     return ok;
 }
 
@@ -1052,6 +1120,71 @@ int ese_song_is_cached(const char *song_id) {
         return 0;
     cellFsClose(fd);
     return 1;
+}
+
+static int batch_song_id_safe(const char *song_id) {
+    const unsigned char *p = (const unsigned char *)song_id;
+
+    if (!p || !*p)
+        return 0;
+    for (; *p; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+            (*p >= '0' && *p <= '9') || *p == '_' || *p == '-')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
+int ese_song_prepare_batch(const int *library_indexes, int count) {
+    ese_song_entry_t song;
+    http_response_t resp;
+    char *body;
+    size_t cap;
+    size_t len;
+    int included = 0;
+    int ok;
+
+    if (!library_indexes || count <= 0 || count > 4096)
+        return 0;
+    cap = 32u + (size_t)count * (ESE_SONG_ID_MAX + 3u);
+    body = (char *)malloc(cap);
+    if (!body)
+        return 0;
+
+    len = (size_t)snprintf(body, cap, "{\"song_ids\":[");
+    for (int i = 0; i < count; i++) {
+        int n;
+        if (!ese_song_library_get(library_indexes[i], &song) ||
+            !batch_song_id_safe(song.id))
+            continue;
+        n = snprintf(body + len, cap - len, "%s\"%s\"",
+                     included ? "," : "", song.id);
+        if (n <= 0 || (size_t)n >= cap - len) {
+            free(body);
+            return 0;
+        }
+        len += (size_t)n;
+        included++;
+    }
+    if (included <= 0 || len + 3u > cap) {
+        free(body);
+        return 0;
+    }
+    body[len++] = ']';
+    body[len++] = '}';
+    body[len] = '\0';
+
+    loading_screen("Starting server conversions...", -1, -1);
+    memset(&resp, 0, sizeof resp);
+    ok = api_request_json("POST", "/api/tjarepo/songs/prepare-batch",
+                          body, len, &resp) == 0 &&
+         (resp.status == 200 || resp.status == 202);
+    if (!ok)
+        dbg_print("[ese] batch prepare unavailable; using serial prepare\n");
+    http_response_free(&resp);
+    free(body);
+    return ok;
 }
 
 int ese_song_prepare_and_cache(const char *song_id, const char *title,

@@ -12,9 +12,4 @@
  * its name via dbg_print then chains to the original native. */
 void songselect_natives_install(void);
 
-/* Collect injected custom-song titles in the SAME order the injection assigns
- * uids (uid = SSN_CUSTOM_UID_BASE + i), so title_nut can render GIDX i for song
- * i. Writes up to `cap` NUL-terminated titles into out[]; returns the count. */
-int ssn_collect_custom_titles(char out[][96], int cap);
-
 #endif /* TAIKO_SONGSELECT_NATIVES_H */
