@@ -13,6 +13,7 @@
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "icache.h"
+#include "overlay.h"
 #include "title_render.h"
 #include "custom_song_launcher.h"
 #include "network/custom_song_client.h"
@@ -287,6 +288,7 @@ typedef struct ssn_inject_song {
 typedef struct ssn_inject_song_ref {
     uint32_t library_index;
     char short_id[ESE_SONG_SHORT_ID_MAX];
+    char sort_title[ESE_SONG_TITLE_MAX];
     uint32_t outline;
     uint32_t genre_id;
 } ssn_inject_song_ref_t;
@@ -1020,6 +1022,67 @@ static int ssn_ref_hash_add(const ssn_inject_song_ref_t *refs,
     return 0;
 }
 
+static unsigned char ssn_sort_fold(unsigned char c) {
+    if (c >= 'A' && c <= 'Z')
+        return (unsigned char)(c + ('a' - 'A'));
+    return c;
+}
+
+static int ssn_ascii_sort_char(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9');
+}
+
+/* Ignore decorative prefixes such as stars, brackets, musical notes, and
+ * Japanese text when choosing an alphabet bucket. UTF-8 continuation bytes
+ * are all >=0x80, so scanning bytes cannot manufacture a false ASCII match. */
+static const char *ssn_sort_anchor(const char *text) {
+    const unsigned char *p = (const unsigned char *)text;
+    while (p && *p) {
+        if (ssn_ascii_sort_char(*p))
+            return (const char *)p;
+        p++;
+    }
+    return NULL;
+}
+
+static int ssn_sort_text_compare(const char *a, const char *b) {
+    while (*a && *b) {
+        unsigned char ca = ssn_sort_fold((unsigned char)*a++);
+        unsigned char cb = ssn_sort_fold((unsigned char)*b++);
+        if (ca != cb)
+            return ca < cb ? -1 : 1;
+    }
+    if (*a)
+        return 1;
+    if (*b)
+        return -1;
+    return 0;
+}
+
+static int ssn_ref_title_compare(const void *ap, const void *bp) {
+    const ssn_inject_song_ref_t *a = (const ssn_inject_song_ref_t *)ap;
+    const ssn_inject_song_ref_t *b = (const ssn_inject_song_ref_t *)bp;
+    const char *a_anchor;
+    const char *b_anchor;
+    int title_cmp;
+
+    if (a->genre_id != b->genre_id)
+        return a->genre_id < b->genre_id ? -1 : 1;
+    a_anchor = ssn_sort_anchor(a->sort_title);
+    b_anchor = ssn_sort_anchor(b->sort_title);
+    if (!!a_anchor != !!b_anchor)
+        return a_anchor ? -1 : 1;
+    title_cmp = ssn_sort_text_compare(a_anchor ? a_anchor : a->sort_title,
+                                      b_anchor ? b_anchor : b->sort_title);
+    if (title_cmp)
+        return title_cmp;
+    title_cmp = ssn_sort_text_compare(a->sort_title, b->sort_title);
+    if (title_cmp)
+        return title_cmp;
+    return ssn_sort_text_compare(a->short_id, b->short_id);
+}
+
 static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
     uint16_t seen[SSN_SHORT_HASH_CAP];
     int total = ese_song_library_count();
@@ -1046,6 +1109,8 @@ static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
         out[count].library_index = (uint32_t)i;
         snprintf(out[count].short_id, sizeof out[count].short_id, "%s",
                  short_id);
+        snprintf(out[count].sort_title, sizeof out[count].sort_title, "%s",
+                 song.title[0] ? song.title : song.id);
         out[count].genre_id = 8u;
         if (ese_category_get(cat_idx, &cat)) {
             out[count].outline =
@@ -1057,6 +1122,8 @@ static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
             break;
         count++;
     }
+    if (count > 1)
+        qsort(out, (size_t)count, sizeof out[0], ssn_ref_title_compare);
     return count;
 }
 
@@ -3987,6 +4054,89 @@ typedef struct ssn_category_record {
     uint32_t resource;
 } ssn_category_record_t;
 
+typedef struct ssn_category_toast {
+    uint8_t custom;
+    uint8_t genre;
+    char first_initial;
+    char last_initial;
+    uint16_t first_number;
+    uint16_t last_number;
+} ssn_category_toast_t;
+
+static ssn_category_toast_t
+    g_ssn_category_toasts[SSN_CATEGORY_RECORD_MAX];
+static uint32_t g_ssn_category_toast_count;
+
+static const char *ssn_genre_name(uint32_t genre) {
+    static const char *const names[] = {
+        "", "J-POP", "Anime", "Vocaloid", "Kids", "Variety",
+        "Classic", "Game Music", "Namco Original"
+    };
+    return genre < sizeof names / sizeof names[0] ? names[genre] : "Custom";
+}
+
+static const char *ssn_custom_title_at_absolute(uint32_t absolute) {
+    for (uint32_t v = 0; v < g_ssn_virtual_song_count; v++) {
+        if (g_ssn_inject_abs[v] != absolute)
+            continue;
+        if (g_ssn_virtual_songs[v].song.title[0])
+            return g_ssn_virtual_songs[v].song.title;
+        return g_ssn_virtual_songs[v].short_id;
+    }
+    return NULL;
+}
+
+/* The toast font is ASCII. Use the first ASCII letter/digit when available;
+ * non-Latin ranges fall back to their 1-based positions inside the genre. */
+static char ssn_title_initial(const char *title) {
+    const char *anchor = ssn_sort_anchor(title);
+    unsigned char c;
+    if (!anchor)
+        return '#';
+    c = (unsigned char)*anchor;
+    if (c >= 'a' && c <= 'z')
+        return (char)(c - ('a' - 'A'));
+    if (ssn_ascii_sort_char(c))
+        return (char)c;
+    return '#';
+}
+
+static void ssn_show_category_toast(void *vm) {
+    static uint32_t last_position = 0xffffffffu;
+    ssn_arg_raw arg = ssn_arg(vm, 1u);
+    uint32_t position;
+    const ssn_category_toast_t *meta;
+    char message[96];
+
+    if (!ssn_arg_u32(arg, &position) || position == last_position)
+        return;
+    last_position = position;
+    if (position >= g_ssn_category_toast_count)
+        return;
+    meta = &g_ssn_category_toasts[position];
+    if (!meta->custom)
+        return;
+
+    if (meta->custom == 2u) {
+        snprintf(message, sizeof message, "%s Stock",
+                 ssn_genre_name(meta->genre));
+    } else if (meta->first_initial != '#' && meta->last_initial != '#') {
+        if (meta->first_initial == meta->last_initial)
+            snprintf(message, sizeof message, "%s %c",
+                     ssn_genre_name(meta->genre), meta->first_initial);
+        else
+            snprintf(message, sizeof message, "%s %c -> %c",
+                     ssn_genre_name(meta->genre), meta->first_initial,
+                     meta->last_initial);
+    } else {
+        snprintf(message, sizeof message, "%s %u-%u",
+                 ssn_genre_name(meta->genre),
+                 (unsigned)meta->first_number,
+                 (unsigned)meta->last_number);
+    }
+    taiko_overlay_show_prompt(message);
+}
+
 /* Identity of the source BasicSong array populated by the E46 injector. Besides
  * preventing duplicate injection, it gives category growth a valid BasicSong
  * value with which to drive the already-live-proven vector growth helper. */
@@ -4008,6 +4158,7 @@ static uint32_t g_ssn_src_begin;
 static void ssn_prepare_custom_categories(void) {
     static uint32_t prepared_begin;
     ssn_category_record_t records[SSN_CATEGORY_RECORD_MAX];
+    ssn_category_toast_t toast_records[SSN_CATEGORY_RECORD_MAX];
     uint32_t proxy_owner[4] = { 0, 0, 0, 0 };
     uint32_t container = ssn_songselect_container();
     uint32_t vec;
@@ -4036,6 +4187,7 @@ static void ssn_prepare_custom_categories(void) {
     count = (end - begin) / SSN_BOARD_RECORD_SIZE;
     if (count < 2u || count > SSN_CATEGORY_RECORD_MAX)
         return;
+    memset(toast_records, 0, sizeof toast_records);
 
     for (uint32_t i = 0; i < count; i++) {
         uint32_t rec = begin + i * SSN_BOARD_RECORD_SIZE;
@@ -4071,7 +4223,10 @@ static void ssn_prepare_custom_categories(void) {
         if (!custom_count) {
             if (out_count >= SSN_CATEGORY_RECORD_MAX)
                 return;
-            records[out_count++] = src;
+            records[out_count] = src;
+            toast_records[out_count].custom = 2u;
+            toast_records[out_count].genre = (uint8_t)src.key;
+            out_count++;
             continue;
         }
         if (custom_first <= src.start || custom_last >= range_end ||
@@ -4082,17 +4237,34 @@ static void ssn_prepare_custom_categories(void) {
         if (out_count >= SSN_CATEGORY_RECORD_MAX)
             return;
         src.count = custom_first - src.start;
-        records[out_count++] = src;
+        records[out_count] = src;
+        toast_records[out_count].custom = 2u;
+        toast_records[out_count].genre = (uint8_t)src.key;
+        out_count++;
         for (uint32_t at = custom_first; at < range_end;) {
             uint32_t left = range_end - at;
             uint32_t chunk = left > SSN_CUSTOM_CATEGORY_BUCKET ?
                 SSN_CUSTOM_CATEGORY_BUCKET : left;
+            const char *first_title;
+            const char *last_title;
             if (out_count >= SSN_CATEGORY_RECORD_MAX)
                 return;
             records[out_count].key = src.key;
             records[out_count].start = at;
             records[out_count].count = chunk;
             records[out_count].resource = src.resource;
+            first_title = ssn_custom_title_at_absolute(at);
+            last_title = ssn_custom_title_at_absolute(at + chunk - 1u);
+            toast_records[out_count].custom = 1u;
+            toast_records[out_count].genre = (uint8_t)src.key;
+            toast_records[out_count].first_initial =
+                ssn_title_initial(first_title);
+            toast_records[out_count].last_initial =
+                ssn_title_initial(last_title);
+            toast_records[out_count].first_number =
+                (uint16_t)(at - custom_first + 1u);
+            toast_records[out_count].last_number =
+                (uint16_t)(at - custom_first + chunk);
             out_count++;
             at += chunk;
         }
@@ -4130,6 +4302,9 @@ static void ssn_prepare_custom_categories(void) {
         new_begin + new_cap_count * SSN_BOARD_RECORD_SIZE;
     __asm__ volatile("sync" ::: "memory");
     prepared_begin = new_begin;
+    memcpy(g_ssn_category_toasts, toast_records,
+           out_count * sizeof toast_records[0]);
+    g_ssn_category_toast_count = out_count;
 
     dbg_print("[ssn] custom categories prepared\n");
     dbg_print_hex32("  bucket", SSN_CUSTOM_CATEGORY_BUCKET);
@@ -4157,6 +4332,8 @@ static void ssn_prepare_custom_categories(void) {
         memset(&score_patch, 0, sizeof score_patch);                           \
         if (ssn_streq(#name, "GetPlayerData"))                                \
             ssn_prepare_custom_categories();                                   \
+        if (ssn_streq(#name, "NotifyMusicBoard"))                             \
+            ssn_show_category_toast(vm);                                       \
         ssn_trace_category_native(#name, vm, n);                               \
         if (SSN_ENABLE_TEST_APPEND_PATH)                                       \
             ssn_apply_test_append();                                           \
