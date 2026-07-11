@@ -1,6 +1,8 @@
 #ifndef TAIKO_SONGSELECT_NATIVES_H
 #define TAIKO_SONGSELECT_NATIVES_H
 
+#include <stdint.h>
+
 /* Investigation harness: hook the plain game::songselect AS->native dispatch
  * table so we can log the call order the Lumen movie uses to build/scroll the
  * song carousel. Goal is to locate the folder-enumeration + folder-item-count
@@ -11,5 +13,7 @@
  * Install once at boot (before the song-select VM registers). Each hook logs
  * its name via dbg_print then chains to the original native. */
 void songselect_natives_install(void);
+int taiko_songselect_custom_info(const char *short_id, uint32_t *uid,
+                                 char *title, unsigned title_cap);
 
 #endif /* TAIKO_SONGSELECT_NATIVES_H */

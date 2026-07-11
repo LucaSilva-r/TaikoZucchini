@@ -8,6 +8,8 @@
 #include "enso_override.h"
 #include "game_state.h"
 #include "network/custom_song_client.h"
+#include "network/extra_scores.h"
+#include "hooks/songselect_natives.h"
 
 #define SONG_ID_MAX 32
 #define COURSE_MAX  8
@@ -526,6 +528,15 @@ static int try_open_ese_short_alias(const char *path, int flags, int *fd,
         dbg_print_hex32("[enso_override] ese alias fd", (uint32_t)*fd);
         if (rc == CELL_FS_SUCCEEDED && extract_song_audio_id(path, song, sizeof song))
             track_audio_fd(*fd);
+    }
+    if (rc == CELL_FS_SUCCEEDED && course[0] &&
+        taiko_game_state_current() == TAIKO_GAME_STATE_GAMEPLAY) {
+        uint32_t uid = 0;
+        char title[ESE_SONG_TITLE_MAX];
+        title[0] = '\0';
+        if (taiko_songselect_custom_info(song, &uid, title, sizeof title))
+            (void)extra_scores_track_chart(uid, mapped_course[0], target_path,
+                                           title, long_id);
     }
     if (out_rc)
         *out_rc = rc;

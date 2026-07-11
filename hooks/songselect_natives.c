@@ -17,6 +17,7 @@
 #include "title_render.h"
 #include "custom_song_launcher.h"
 #include "network/custom_song_client.h"
+#include "network/extra_scores.h"
 
 /*
  * PLAIN game::songselect AS->native table (GREEN eboot, fixed load @0x10000).
@@ -318,6 +319,23 @@ typedef uint32_t *(*basic_musicid_lookup_fn)(uint32_t *out,
 static uint32_t g_basic_lookup_hook_installed;
 static uint32_t g_custom_basic_meta[SSN_INJECT_MAX][0x44u];
 static uint32_t g_custom_basic_meta_ready[SSN_INJECT_MAX];
+
+int taiko_songselect_custom_info(const char *short_id, uint32_t *uid,
+                                 char *title, unsigned title_cap) {
+    if (!short_id)
+        return 0;
+    for (uint32_t v = 0; v < g_ssn_virtual_song_count && v < SSN_INJECT_MAX; v++) {
+        if (strncmp(g_ssn_virtual_songs[v].short_id, short_id,
+                    sizeof g_ssn_virtual_songs[v].short_id) != 0)
+            continue;
+        if (uid)
+            *uid = SSN_CUSTOM_UID_BASE + v;
+        if (title && title_cap)
+            snprintf(title, title_cap, "%s", g_ssn_virtual_songs[v].song.title);
+        return 1;
+    }
+    return 0;
+}
 static uint32_t g_current_custom_song_index;
 static uint32_t g_current_custom_song_valid;
 static uint32_t g_orig_RequestFillrect_desc[2];
@@ -3062,7 +3080,10 @@ typedef struct ssn_detail_replay_patch {
     uint32_t board_rec;
     uint32_t old_start;
     uint32_t old_count;
+    uint32_t detail_entry[2];
+    unsigned char old_detail[2][SSN_DETAIL_RECORD_SIZE];
     int active;
+    unsigned detail_active_mask;
 } ssn_detail_replay_patch_t;
 
 static void ssn_log_byte_line(const char *prefix, uint32_t off,
@@ -3135,23 +3156,85 @@ static int ssn_detail_replay_begin(void *vm,
                                    ssn_detail_replay_patch_t *patch) {
     ssn_arg_raw folder = ssn_arg(vm, 1);
     ssn_arg_raw local = ssn_arg(vm, 2);
+    ssn_arg_raw player_arg = ssn_arg(vm, 3);
+    unsigned player = 0;
     uint32_t rec;
     uint32_t new_start;
     uint32_t new_count;
+    uint32_t virtual_index;
+    uint32_t donor_rec;
+    uint32_t donor_uid;
+    unsigned patched_players = 0;
 
     memset(patch, 0, sizeof *patch);
-    if (!SSN_TEST_REPLAY_OFFICIAL_DETAIL)
-        return 0;
+    if ((player_arg.type == 2 || player_arg.type == 3) &&
+        player_arg.value < 2u)
+        player = player_arg.value;
     if (!(folder.type == 2 || folder.type == 3) ||
         !(local.type == 2 || local.type == 3))
         return 0;
-    if (!ssn_is_test_virtual_song(folder.value, local.value))
+    if (!ssn_virtual_index_for_request(folder.value, local.value,
+                                       &virtual_index, NULL))
         return 0;
     if (local.value > SSN_REPLAY_OFFICIAL_ABSOLUTE)
         return 0;
 
     rec = ssn_board_record_addr(folder.value);
     if (!rec)
+        return 0;
+
+    donor_rec = ssn_display_record_by_absolute(SSN_REPLAY_OFFICIAL_ABSOLUTE);
+    if (!donor_rec)
+        return 0;
+    donor_uid = *(volatile uint32_t *)(uintptr_t)
+        (donor_rec + SSN_SONG_UNIQUEID_OFF);
+    /* GetMusicInfo_Detail publishes both players' masks during one native
+     * call. Keep both donor rows populated for the complete replay window;
+     * GetRankingScore then consumes the row selected by its player argument. */
+    for (unsigned detail_player = 0; detail_player < 2u; detail_player++) {
+        uint32_t scores[5];
+        unsigned char crowns[5];
+        unsigned char detail[SSN_DETAIL_RECORD_SIZE];
+        unsigned char clear_mask = 0;
+        unsigned char gold_mask = 0;
+        unsigned char score_mask = 0;
+
+        patch->detail_entry[detail_player] =
+            ssn_detail_entry_for_uniqueid(detail_player, donor_uid);
+        if (!patch->detail_entry[detail_player])
+            continue;
+        memset(scores, 0, sizeof scores);
+        memset(crowns, 0, sizeof crowns);
+        (void)extra_scores_song_bests(
+            detail_player, g_ssn_virtual_songs[virtual_index].song.id,
+            scores, crowns);
+        memcpy(patch->old_detail[detail_player],
+               (const void *)(uintptr_t)patch->detail_entry[detail_player],
+               sizeof patch->old_detail[detail_player]);
+        memcpy(detail, patch->old_detail[detail_player], sizeof detail);
+        for (unsigned course = 0; course < 5u; course++) {
+            unsigned char bit = (unsigned char)(1u << course);
+            int star = g_ssn_virtual_songs[virtual_index].song.stars[course];
+            if (crowns[course] >= 1u)
+                clear_mask |= bit;
+            if (crowns[course] >= 2u)
+                gold_mask |= bit;
+            if (scores[course])
+                score_mask |= bit;
+            memcpy(detail + 0x24u + course * 4u, &scores[course], 4u);
+            memcpy(detail + 0x38u + course * 4u, &scores[course], 4u);
+            detail[0x50u + course] = star > 0 ? (unsigned char)star : 0u;
+        }
+        detail[0x4du] = clear_mask;
+        detail[0x4eu] = gold_mask;
+        detail[0x4fu] = score_mask;
+        mem_write_and_flush(
+            (void *)(uintptr_t)patch->detail_entry[detail_player],
+            detail, sizeof detail);
+        patch->detail_active_mask |= 1u << detail_player;
+        patched_players++;
+    }
+    if (!patched_players)
         return 0;
 
     patch->board_rec = rec;
@@ -3168,6 +3251,7 @@ static int ssn_detail_replay_begin(void *vm,
     dbg_print("[ssn] replaying official GetMusicInfo_Detail for custom row\n");
     dbg_print_hex32("  folder", folder.value);
     dbg_print_hex32("  local", local.value);
+    dbg_print_hex32("  player", player);
     dbg_print_hex32("  official.absolute", SSN_REPLAY_OFFICIAL_ABSOLUTE);
     dbg_print_hex32("  temp.start", new_start);
     return 1;
@@ -3180,6 +3264,12 @@ static void ssn_detail_replay_end(const ssn_detail_replay_patch_t *patch) {
                         &patch->old_start, sizeof patch->old_start);
     mem_write_and_flush((void *)(uintptr_t)(patch->board_rec + 0x08u),
                         &patch->old_count, sizeof patch->old_count);
+    for (unsigned player = 0; player < 2u; player++)
+        if ((patch->detail_active_mask & (1u << player)) &&
+            patch->detail_entry[player])
+            mem_write_and_flush(
+                (void *)(uintptr_t)patch->detail_entry[player],
+                patch->old_detail[player], sizeof patch->old_detail[player]);
     dbg_print("[ssn] restored custom board range after detail replay\n");
 }
 
@@ -4351,7 +4441,8 @@ static void ssn_prepare_custom_categories(void) {
             ssn_scan_detail_stars_once();                                      \
         if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
             ssn_detail_vm_probe_begin(vm, &vm_probe);                          \
-        if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
+        if (ssn_streq(#name, "GetMusicInfo_Detail") ||                        \
+            ssn_streq(#name, "GetRankingScore"))                              \
             replaying_detail = ssn_detail_replay_begin(vm, &replay_patch);     \
         if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
             if (!replaying_detail)                                             \
@@ -4390,7 +4481,8 @@ static void ssn_prepare_custom_categories(void) {
                     "GetMusicInfo_Detail");                                    \
         if (notify_course_star && n < LOG_COURSESTAR_MAX)                      \
             ssn_log_notify_course_star(vm, n, 0);                              \
-        if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
+        if (ssn_streq(#name, "GetMusicInfo_Detail") ||                        \
+            ssn_streq(#name, "GetRankingScore"))                              \
             ssn_detail_replay_end(&replay_patch);                              \
         if (ssn_streq(#name, "GetMusicInfo_Detail"))                          \
             ssn_detail_vm_probe_end(&vm_probe);                                \

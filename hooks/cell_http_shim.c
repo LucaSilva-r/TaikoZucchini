@@ -32,6 +32,7 @@
 #include "debug.h"
 #include "bpreader_serial.h"
 #include "runtime.h"
+#include "network/extra_scores.h"
 
 #define HTTP_MAX_CLIENTS       16
 #define HTTP_MAX_TRANSACTIONS  16
@@ -108,7 +109,6 @@ static Transaction *txn_lookup(uintptr_t h) {
     return &g_txns[idx];
 }
 
-#if BPREADER_PATCH_BAIDCHECK_ACCESS_CODE
 static int pb_read_varint(const uint8_t *buf, size_t len, size_t *pos,
                           uint64_t *value) {
     uint64_t out = 0;
@@ -126,6 +126,7 @@ static int pb_read_varint(const uint8_t *buf, size_t len, size_t *pos,
     return 0;
 }
 
+#if BPREADER_PATCH_BAIDCHECK_ACCESS_CODE
 static int baidcheck_should_patch(const Transaction *t, const void *buf,
                                   uint64_t size) {
     return t && buf && size > 0 && strcmp(t->method, "POST") == 0 &&
@@ -190,6 +191,44 @@ static int patch_baidcheck_access_code(uint8_t *body, size_t len) {
     return 0;
 }
 #endif
+
+static int baidcheck_access_code(const uint8_t *body, size_t len,
+                                 char access_code[21]) {
+    size_t pos = 0;
+    while (pos < len) {
+        uint64_t key = 0;
+        uint64_t value_len = 0;
+        if (!pb_read_varint(body, len, &pos, &key))
+            return 0;
+        switch ((unsigned)(key & 7u)) {
+        case 0:
+            if (!pb_read_varint(body, len, &pos, &value_len)) return 0;
+            break;
+        case 1:
+            if (pos + 8u > len) return 0;
+            pos += 8u;
+            break;
+        case 2:
+            if (!pb_read_varint(body, len, &pos, &value_len) ||
+                value_len > len - pos)
+                return 0;
+            if ((key >> 3) == 2u && value_len == 20u) {
+                memcpy(access_code, body + pos, 20u);
+                access_code[20] = '\0';
+                return 1;
+            }
+            pos += (size_t)value_len;
+            break;
+        case 5:
+            if (pos + 4u > len) return 0;
+            pos += 4u;
+            break;
+        default:
+            return 0;
+        }
+    }
+    return 0;
+}
 
 /* ------------------------------------------------------------------ */
 /* Module init / teardown                                              */
@@ -431,6 +470,25 @@ int sh_cellHttpSendRequest(uintptr_t transId, const void *buf,
 
     const void *send_buf = buf;
     size_t send_size = (size_t)size;
+    const char *send_headers = t->req_headers;
+    size_t send_headers_len = t->req_headers_len;
+    char extra_headers[REQ_HEADERS_MAX];
+    int is_playresult = strcmp(t->method, "POST") == 0 &&
+                        strstr(t->path, "/chassis/playresult.php") != NULL;
+    int is_baidcheck = strcmp(t->method, "POST") == 0 &&
+                       strstr(t->path, "/chassis/baidcheck.php") != NULL;
+
+    if (is_playresult && t->req_headers_len < sizeof extra_headers) {
+        memcpy(extra_headers, t->req_headers, t->req_headers_len);
+        extra_headers[t->req_headers_len] = '\0';
+        size_t extra_len = t->req_headers_len;
+        if (extra_scores_append_playresult_headers(extra_headers,
+                                                   sizeof extra_headers,
+                                                   &extra_len)) {
+            send_headers = extra_headers;
+            send_headers_len = extra_len;
+        }
+    }
 #if BPREADER_PATCH_BAIDCHECK_ACCESS_CODE
     uint8_t *patched_body = NULL;
     if (baidcheck_should_patch(t, buf, size)) {
@@ -444,9 +502,16 @@ int sh_cellHttpSendRequest(uintptr_t transId, const void *buf,
     }
 #endif
 
+    if (is_baidcheck) {
+        char access_code[21];
+        if (baidcheck_access_code((const uint8_t *)send_buf, send_size,
+                                  access_code))
+            extra_scores_card_seen(access_code);
+    }
+
     net_log("[shim] http_request enter\n");
     int rc = http_request(t->method, t->host, t->port, t->path,
-                          t->req_headers, t->req_headers_len,
+                          send_headers, send_headers_len,
                           send_buf, send_size,
                           &t->response);
     net_log_hex32("[shim] http_request rc", (uint32_t)rc);
@@ -464,6 +529,12 @@ int sh_cellHttpSendRequest(uintptr_t transId, const void *buf,
     if (sent) *sent = size;
     net_log_hex32("[shim] response status", (uint32_t)t->response.status);
     net_log_hex32("[shim] response body_len", (uint32_t)t->response.body_len);
+    if (is_playresult)
+        extra_scores_playresult_complete(t->response.status >= 200 &&
+                                         t->response.status < 300);
+    else if (is_baidcheck && t->response.status >= 200 &&
+             t->response.status < 300)
+        extra_scores_refresh_async();
 
     /* Pass-through SSL callback: tell the game cert verification
      * succeeded. certNum=0 keeps the game out of CellSslCert getters
