@@ -3212,9 +3212,19 @@ static int ssn_detail_replay_begin(void *vm,
                (const void *)(uintptr_t)patch->detail_entry[detail_player],
                sizeof patch->old_detail[detail_player]);
         memcpy(detail, patch->old_detail[detail_player], sizeof detail);
+        /* +0x21 feeds Lumen's SetPlayerBits action. The donor row can carry
+         * stock event/payment flags, rendered as flashing Banacoin or VS
+         * badges over every custom difficulty. They are unrelated to the
+         * custom chart and must not be replayed. Score/crown visibility has
+         * its own masks at +0x4d..+0x4f. */
+        detail[0x21u] = 0;
+        /* +0x50..+0x54 are SetCourseBits flags, not difficulty stars. Writing
+         * star counts here made values 2/3/4 render as flashing Banacoin,
+         * player, or VS badges. Custom stars are supplied by BasicSong/player
+         * metadata, so neutralize these unrelated donor flags. */
+        memset(detail + 0x50u, 0, 5u);
         for (unsigned course = 0; course < 5u; course++) {
             unsigned char bit = (unsigned char)(1u << course);
-            int star = g_ssn_virtual_songs[virtual_index].song.stars[course];
             if (crowns[course] >= 1u)
                 clear_mask |= bit;
             if (crowns[course] >= 2u)
@@ -3223,7 +3233,6 @@ static int ssn_detail_replay_begin(void *vm,
                 score_mask |= bit;
             memcpy(detail + 0x24u + course * 4u, &scores[course], 4u);
             memcpy(detail + 0x38u + course * 4u, &scores[course], 4u);
-            detail[0x50u + course] = star > 0 ? (unsigned char)star : 0u;
         }
         detail[0x4du] = clear_mask;
         detail[0x4eu] = gold_mask;
