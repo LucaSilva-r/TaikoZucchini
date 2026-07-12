@@ -97,7 +97,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            mod_menu/menu_osk.c \
            ftp/ftp_server.c \
            config/runtime.c config/cfg_file.c \
-           patches/patches.c patches/patch_target.c \
+           patches/patches.c patches/patch_target.c patches/patch_resolver.c \
+           patches/song_loader_patch.c \
            eboot_patcher/self_parse.c eboot_patcher/self_decrypt.c \
            eboot_patcher/self_encrypt.c eboot_patcher/self_npdrm.c \
            eboot_patcher/elf_extract.c eboot_patcher/key_load.c \
@@ -275,7 +276,9 @@ hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h stor
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h
 storage/chassisinfo_synth.o: storage/chassisinfo_synth.c storage/chassisinfo_synth.h storage/chassisinfo_schema.h config.h config/runtime.h core/debug.h
 storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_schema.h
-patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h core/icache.h core/debug.h
+patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h patches/song_loader_patch.h core/icache.h core/debug.h
+patches/patch_resolver.o: patches/patch_resolver.c patches/patch_resolver.h patches/patch_target.h
+patches/song_loader_patch.o: patches/song_loader_patch.c patches/song_loader_patch.h patches/patch_resolver.h song_loader_manifest.h core/debug.h
 core/debug.o:     core/debug.c     core/debug.h core/diag_log.h config.h config/runtime.h
 core/diag_log.o:  core/diag_log.c  core/diag_log.h
 core/qr_encode.o: core/qr_encode.c core/qr_encode.h

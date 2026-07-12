@@ -51,6 +51,8 @@ static uintptr_t fpt_total_size(uint32_t version, uint32_t slots) {
         size += sizeof(uint32_t);
     if (version >= 6u)
         size += sizeof(uint32_t);
+    if (version >= 7u)
+        size += sizeof(taiko_song_loader_manifest_t);
     return size;
 }
 
@@ -172,20 +174,17 @@ uint32_t taiko_fpt_version_seen(void) {
     return t ? t->version : 0;
 }
 
-int taiko_fpt_request_song_select_launch(void) {
+const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void) {
     taiko_fpt_t *t = get_fpt();
-    if (!t || t->version < 6u)
-        return 0;
-    t->song_select_launch_request = 1;
-    __asm__ volatile("sync" ::: "memory");
-    return 1;
-}
-
-int taiko_fpt_clear_song_select_launch(void) {
-    taiko_fpt_t *t = get_fpt();
-    if (!t || t->version < 6u)
-        return 0;
-    t->song_select_launch_request = 0;
-    __asm__ volatile("sync" ::: "memory");
-    return 1;
+    const taiko_song_loader_manifest_t *m;
+    if (!t || t->version < 7u)
+        return NULL;
+    m = &t->song_loader;
+    if (m->magic != TAIKO_SONG_LOADER_MAGIC ||
+        m->version != TAIKO_SONG_LOADER_VERSION ||
+        m->size != sizeof(*m) || m->layout_id != TAIKO_SONG_LAYOUT_V1 ||
+        m->song_record_size != 0x90u || m->detail_record_size != 0x58u ||
+        m->board_record_size != 0x10u)
+        return NULL;
+    return m;
 }

@@ -22,7 +22,9 @@
 #include "debug.h"
 #include "icache.h"
 #include "patch_target.h"
+#include "patch_resolver.h"
 #include "patches.h"
+#include "song_loader_patch.h"
 
 #define T  g_patch_target
 
@@ -99,73 +101,25 @@ void patches_set_data00000_metadata(uint32_t series_version,
 }
 
 static int words_match(uintptr_t addr, const uint32_t *words, size_t n) {
-    for (size_t i = 0; i < n; i++)
-        if (pt_read32(T, addr + i * 4) != words[i])
-            return 0;
-    return 1;
+    return patch_words_match(T, addr, words, n);
 }
 
 static int masked_words_match(uintptr_t addr, const uint32_t *words,
                               const uint32_t *masks, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        uint32_t v = pt_read32(T, addr + i * 4);
-        if ((v & masks[i]) != (words[i] & masks[i]))
-            return 0;
-    }
-    return 1;
+    return patch_masked_words_match(T, addr, words, masks, n);
 }
 
 static int find_unique_words(uintptr_t start, uintptr_t end,
                              const uint32_t *words, size_t n,
                              uintptr_t *out) {
-    uintptr_t found = 0;
-    uint32_t count = 0;
-    size_t len = n * 4;
-
-    if (end <= start || end - start < len)
-        return 0;
-
-    for (uintptr_t p = start; p <= end - len; p += 4) {
-        if (!words_match(p, words, n))
-            continue;
-        found = p;
-        count++;
-        if (count > 1)
-            break;
-    }
-
-    if (count == 1) {
-        *out = found;
-        return 1;
-    }
-    return 0;
+    return patch_find_unique_words(T, start, end, words, n, out);
 }
 
 static int find_unique_masked_words(uintptr_t start, uintptr_t end,
                                     const uint32_t *words,
                                     const uint32_t *masks, size_t n,
                                     uintptr_t *out) {
-    uintptr_t found = 0;
-    uint32_t count = 0;
-    size_t len = n * 4;
-
-    if (end <= start || end - start < len)
-        return 0;
-
-    for (uintptr_t p = start; p <= end - len; p += 4) {
-        if (!masked_words_match(p, words, masks, n))
-            continue;
-        found = p;
-        count++;
-        if (count > 1)
-            break;
-    }
-
-    if (count == 1) {
-        *out = found;
-        return 1;
-    }
-    return 0;
+    return patch_find_unique_masked_words(T, start, end, words, masks, n, out);
 }
 
 enum {
@@ -274,55 +228,6 @@ static int find_import_stub_by_fnid(uint32_t fnid, uintptr_t *out_stub) {
 
     if (count == 1) {
         *out_stub = found;
-        return 1;
-    }
-    return 0;
-}
-
-static int find_http_stub_anchor(uintptr_t *out) {
-    static const uint16_t http_stub_delta[] = {
-        0x0000u, 0x0020u, 0x0040u, 0x0060u, 0x0080u, 0x00A0u,
-        0x00C0u, 0x00E0u, 0x0100u, 0x0120u, 0x0140u, 0x0160u,
-        0x0180u, 0x01A0u, 0x01C0u, 0x01E0u, 0x0200u, 0x0220u,
-        0x0240u, 0x02C0u, 0x0260u, 0x0280u, 0x02A0u,
-    };
-    static const uint16_t http_got_delta[] = {
-        0x0000u, 0x0004u, 0x0008u, 0x000Cu, 0x0010u, 0x0014u,
-        0x0018u, 0x001Cu, 0x0020u, 0x0024u, 0x0028u, 0x002Cu,
-        0x0030u, 0x0034u, 0x0038u, 0x003Cu, 0x0040u, 0x0044u,
-        0x0048u, 0x004Cu, 0x01C8u, 0x01CCu, 0x01D0u,
-    };
-    uintptr_t found = 0;
-    uint32_t count = 0;
-
-    for (uintptr_t p = CFG_SCAN_TEXT_START; p + 0x300u <= CFG_SCAN_TEXT_END; p += 4) {
-        uintptr_t got_anchor = 0;
-        int ok = 1;
-
-        for (size_t i = 0; i < sizeof(http_stub_delta) / sizeof(http_stub_delta[0]); i++) {
-            uintptr_t got_slot = 0;
-            if (!import_stub_matches(p + http_stub_delta[i], &got_slot)) {
-                ok = 0;
-                break;
-            }
-            if (i == 0)
-                got_anchor = got_slot;
-            if (got_slot != got_anchor + http_got_delta[i]) {
-                ok = 0;
-                break;
-            }
-        }
-
-        if (!ok)
-            continue;
-        found = p;
-        count++;
-        if (count > 1)
-            break;
-    }
-
-    if (count == 1) {
-        *out = found;
         return 1;
     }
     return 0;
@@ -1929,6 +1834,12 @@ static void patches_apply_all_impl(void) {
     apply_katsudon_gold_crown_fix();
     if (g_have_data00000_metadata)
         apply_data00000_embed_patch();
+
+    /* Resolve the custom-song interface while the original EBOOT image is
+     * still available through the buffer-backed patch target. The loader pass
+     * copies this manifest into the appended FPT. */
+    if (T->kind == PT_BUFFER)
+        song_loader_patch_resolve();
 
     (void)write32; /* reserved for future single-word edits */
 }

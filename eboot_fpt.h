@@ -3,8 +3,10 @@
 
 #include <stdint.h>
 
+#include "song_loader_manifest.h"
+
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 6u           /* v6: song-select launch request */
+#define TAIKO_FPT_VERSION 7u           /* v7: patch-resolved song manifest */
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
 
 /* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the
@@ -89,11 +91,12 @@ typedef struct {
      * Only present when version >= 3 (offset must stay AFTER slots so the
      * got_slots/slots offsets the patcher bakes never move). */
     uint8_t  serial_utf16[TAIKO_FPT_SERIAL_BYTES];
-    /* Written by the GameSongSelect::Proc_Main trampoline.
-     * The SPRX reads this to request the game's normal song-select ->
-     * gameplay transition without cross-TOC internal C hooks. */
+    /* Written by the GameSongSelect::Proc_Main trampoline so runtime hooks can
+     * identify the live song-select scene without embedding a game address. */
     uint32_t song_select_scene;
-    uint32_t song_select_launch_request;
+    /* Kept as reserved storage so every pre-v7 field retains its offset. */
+    uint32_t song_select_reserved;
+    taiko_song_loader_manifest_t song_loader;
 } taiko_fpt_t;
 
 /* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
@@ -109,8 +112,7 @@ uintptr_t taiko_fpt_slot_value(uint32_t slot);
 uintptr_t taiko_fpt_song_select_scene(void);
 uintptr_t taiko_fpt_table_address(void);
 uint32_t taiko_fpt_version_seen(void);
-int taiko_fpt_request_song_select_launch(void);
-int taiko_fpt_clear_song_select_launch(void);
 int taiko_fpt_available(void);
+const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void);
 
 #endif
