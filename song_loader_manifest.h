@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define TAIKO_SONG_LOADER_MAGIC   0x54534C4Du /* TSLM */
-#define TAIKO_SONG_LOADER_VERSION 1u
+#define TAIKO_SONG_LOADER_VERSION 2u
 #define TAIKO_SONG_LAYOUT_V1      1u
 
 enum taiko_song_native_slot {
@@ -52,9 +52,11 @@ typedef struct taiko_song_loader_manifest {
     uint32_t record_insert_code;
     uint32_t notify_course_star_code;
     uint32_t basic_lookup_entry;
+    uint32_t basic_lookup_toc;
     uint32_t basic_lookup_resume;
     uint32_t basic_lookup_original;
     uint32_t texture_alloc_code;
+    uint32_t texture_alloc_toc;
     uint32_t texture_alloc_manager_cell;
     uint32_t texture_lookup_entry;
     uint32_t texture_lookup_resume;
@@ -62,16 +64,20 @@ typedef struct taiko_song_loader_manifest {
     uint32_t inject_callsite;
     uint32_t inject_return;
     uint32_t inject_island;
+    uint32_t inject_owner_reg;
+    uint32_t inject_temp_sp_off;
     uint32_t songselect_scene_vtable;
     uint32_t songselect_proc_main;
     uint32_t result_table_guard;
     uint32_t result_table_original;
+    uint32_t result_table_ptr_reg;
 
     uint32_t select_state_off;
     uint32_t board_vector_off;
     uint32_t board_record_size;
     uint32_t display_vector_off;
     uint32_t source_vector_off;
+    uint32_t basic_map_off;
     uint32_t detail_vec_array_off;
     uint32_t song_record_size;
     uint32_t detail_record_size;

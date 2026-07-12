@@ -135,6 +135,7 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_BOARD_RECORD_SIZE       (g_song_manifest->board_record_size)
 #define SSN_DISPLAY_VECTOR_OFF      (g_song_manifest->display_vector_off)
 #define SSN_SOURCE_VECTOR_OFF       (g_song_manifest->source_vector_off)
+#define SSN_BASIC_MAP_OFF           (g_song_manifest->basic_map_off)
 #define SSN_DETAIL_VEC_ARRAY_OFF    (g_song_manifest->detail_vec_array_off)
 #define SSN_SONG_RECORD_SIZE        (g_song_manifest->song_record_size)
 #define SSN_DETAIL_RECORD_SIZE      (g_song_manifest->detail_record_size)
@@ -876,7 +877,7 @@ static uint32_t ssn_basic_metadata_for_record(uint32_t rec) {
     if (!ssn_ptr_sane(mgr) || !ssn_ptr_sane(rec))
         return 0;
     ((basic_musicid_lookup_fn)(uintptr_t)g_basic_musicid_lookup_desc)(
-        &out, mgr + 0x464u, rec);
+        &out, mgr + SSN_BASIC_MAP_OFF, rec);
     return out;
 }
 
@@ -2811,8 +2812,7 @@ static int ssn_inject_island_matches(void) {
     static const uint32_t expect[] = {
         0xf821ff91u, 0x7c0802a6u, 0xf8010080u, 0x48000019u,
         0xe8410028u, 0xe8010080u, 0x7c0803a6u, 0x38210070u,
-        0x4e800020u, 0xf8410028u, 0x3c42fffeu, 0x38420220u,
-        0x4b5f356cu
+        0x4e800020u, 0xf8410028u
     };
     for (unsigned i = 0; i < sizeof expect / sizeof expect[0]; i++)
         if (*(volatile uint32_t *)(uintptr_t)(SSN_SCENE_TEMPVEC_ISLAND + i * 4u)
@@ -3068,9 +3068,10 @@ static void install_e46_listbuild_bridge(void) {
         return;
     }
 
-    bridge[0] = ssn_ppc_mr(3u, 24u);
-    bridge[1] = ssn_ppc_addi(4u, 1u, 0x008c);
-    bridge[2] = ssn_ppc_mr(5u, 20u);
+    bridge[0] = ssn_ppc_mr(3u, g_song_manifest->inject_owner_reg);
+    bridge[1] = ssn_ppc_addi(4u, 1u,
+                             (int16_t)g_song_manifest->inject_temp_sp_off);
+    bridge[2] = ssn_ppc_mr(5u, g_song_manifest->inject_owner_reg);
     bridge[3] = ssn_ppc_lis(11u, hook_opd >> 16);
     bridge[4] = ssn_ppc_ori(11u, 11u, hook_opd);
     bridge[5] = ssn_ppc_lwz(12u, 0, 11u);
@@ -3142,9 +3143,9 @@ void songselect_natives_install(void) {
     g_notify_course_star_desc[0] = g_song_manifest->notify_course_star_code;
     g_notify_course_star_desc[1] = g_song_manifest->main_toc;
     g_basic_musicid_lookup_desc[0] = g_song_manifest->basic_lookup_entry;
-    g_basic_musicid_lookup_desc[1] = g_song_manifest->main_toc;
+    g_basic_musicid_lookup_desc[1] = g_song_manifest->basic_lookup_toc;
     g_nu_tex_alloc_desc[0] = g_song_manifest->texture_alloc_code;
-    g_nu_tex_alloc_desc[1] = g_song_manifest->main_toc;
+    g_nu_tex_alloc_desc[1] = g_song_manifest->texture_alloc_toc;
 
     if (g_song_capabilities & TAIKO_SONG_CAP_TEXTURES)
         ssn_rt_pool_mem_reserve();

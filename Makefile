@@ -262,7 +262,7 @@ core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h c
 mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h mod_menu/menu_font_30.h mod_menu/menu_font_42.h
 mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
 mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
-eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h core/debug.h
+eboot_fpt.o:      eboot_fpt.c      eboot_fpt.h song_loader_manifest.h core/debug.h
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h
@@ -279,6 +279,7 @@ storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_s
 patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h patches/song_loader_patch.h core/icache.h core/debug.h
 patches/patch_resolver.o: patches/patch_resolver.c patches/patch_resolver.h patches/patch_target.h
 patches/song_loader_patch.o: patches/song_loader_patch.c patches/song_loader_patch.h patches/patch_resolver.h song_loader_manifest.h core/debug.h
+eboot_patcher/sprx_loader_patch.o: eboot_patcher/sprx_loader_patch.c eboot_fpt.h song_loader_manifest.h patches/song_loader_patch.h
 core/debug.o:     core/debug.c     core/debug.h core/diag_log.h config.h config/runtime.h
 core/diag_log.o:  core/diag_log.c  core/diag_log.h
 core/qr_encode.o: core/qr_encode.c core/qr_encode.h
@@ -291,7 +292,7 @@ hooks/http_hook.o:      hooks/http_hook.c      hooks/http_hook.h core/icache.h c
 hooks/dns_hook.o:       hooks/dns_hook.c       hooks/dns_hook.h core/icache.h core/debug.h eboot_fpt.h config/runtime.h config.h
 hooks/socket_hook.o:    hooks/socket_hook.c    hooks/socket_hook.h core/icache.h core/debug.h eboot_fpt.h network/http_client.h config/runtime.h config.h
 hooks/video_out_hook.o: hooks/video_out_hook.c hooks/video_out_hook.h eboot_fpt.h config/runtime.h config.h core/debug.h
-hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h core/debug.h core/icache.h
+hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h song_loader_manifest.h core/debug.h core/icache.h
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
 network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h config/version.h core/debug.h core/overlay.h

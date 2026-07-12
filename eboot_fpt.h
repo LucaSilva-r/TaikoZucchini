@@ -6,7 +6,7 @@
 #include "song_loader_manifest.h"
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 7u           /* v7: patch-resolved song manifest */
+#define TAIKO_FPT_VERSION 8u           /* v8: multi-generation song manifest */
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
 
 /* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the

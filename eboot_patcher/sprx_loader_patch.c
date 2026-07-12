@@ -690,14 +690,22 @@ static int update_embedded_phdr(self_ctx_t *ctx, uint16_t ph_index,
 /* GameSongSelect::Proc_Main fingerprint used by the patch-time resolver and
  * rechecked here immediately before the trampoline is emitted. */
 static int song_select_proc_prologue_matches(const uint8_t *b) {
-    return load_be32(b + 0x00) == 0xF821FDF1u &&  /* stdu r1,-0x210(r1) */
-           load_be32(b + 0x04) == 0x7C0802A6u &&  /* mfspr r0,LR        */
-           load_be32(b + 0x08) == 0xFB4101E0u &&  /* std r26,0x1e0(r1)  */
-           load_be32(b + 0x0C) == 0xF8010220u &&  /* std r0,0x220(r1)   */
-           load_be32(b + 0x10) == 0x80030010u &&  /* lwz r0,0x10(r3)    */
-           load_be32(b + 0x14) == 0x7C7A1B78u &&  /* or r26,r3,r3       */
-           load_be32(b + 0x18) == 0xFB6101E8u &&  /* std r27,0x1e8(r1)  */
-           load_be32(b + 0x1C) == 0x2B80000Du;    /* cmplwi cr7,r0,13   */
+    static const uint32_t green[] = {
+        0xF821FDF1u, 0x7C0802A6u, 0xFB4101E0u, 0xF8010220u,
+        0x80030010u, 0x7C7A1B78u, 0xFB6101E8u, 0x2B80000Du,
+    };
+    static const uint32_t blue[] = {
+        0xF821FDE1u, 0x7C0802A6u, 0xFB4101F0u, 0xF8010230u,
+        0x80030010u, 0x7C7A1B78u, 0xFB6101F8u, 0x2B80000Du,
+    };
+    unsigned green_ok = 1u;
+    unsigned blue_ok = 1u;
+    for (unsigned i = 0; i < 8u; i++) {
+        uint32_t word = load_be32(b + i * 4u);
+        green_ok &= word == green[i];
+        blue_ok &= word == blue[i];
+    }
+    return green_ok || blue_ok;
 }
 
 /* Minimal Proc_Main trampoline. Its only job is to publish the live scene for
@@ -763,7 +771,7 @@ static int patch_song_select_scene_capture(
     return 0;
 }
 
-/* Green-only. The result builder reads a per-song result table through a
+/* The result builder reads a per-song result table through a
  * pointer at selected_song+0x1b0. Custom carriers can leave that pointer null,
  * or with a stale/invalid low address on later-stage result teardown. Preserve
  * the surrounding session bookkeeping by redirecting missing/low table
@@ -784,8 +792,10 @@ static int patch_result_table_null_guard(self_ctx_t *ctx, elf64_phdr_t *phdrs,
 
     uint32_t guard_va = m ? m->result_table_guard : 0;
     uint32_t guard_orig = m ? m->result_table_original : 0;
+    uint32_t ptr_reg = m ? m->result_table_ptr_reg : 0;
 
-    if (!m || !(m->capabilities & TAIKO_SONG_CAP_RESULT_GUARD))
+    if (!m || !(m->capabilities & TAIKO_SONG_CAP_RESULT_GUARD) ||
+        ptr_reg > 31u)
         return -8;
     if (tramp_end > ctx->buf_len)
         return -1;
@@ -808,10 +818,12 @@ static int patch_result_table_null_guard(self_ctx_t *ctx, elf64_phdr_t *phdrs,
         return -7;
 
     uint8_t *t = ctx->buf + tramp_off;
-    store_be32(t + 0x00, 0x2F871000u);                               /* cmpwi cr7,r7,0x1000 */
+    store_be32(t + 0x00, 0x2F801000u | (ptr_reg << 16));             /* cmpwi cr7,rN,0x1000 */
     store_be32(t + 0x04, 0x409C000Cu);                               /* bge cr7,use_table   */
-    store_be32(t + 0x08, 0x3CE00000u | ((zero_va >> 16) & 0xffffu)); /* lis r7,hi(zero)     */
-    store_be32(t + 0x0C, 0x60E70000u | (zero_va & 0xffffu));         /* ori r7,r7,lo        */
+    store_be32(t + 0x08, 0x3C000000u | (ptr_reg << 21) |
+                               ((zero_va >> 16) & 0xffffu));          /* lis rN,hi(zero)     */
+    store_be32(t + 0x0C, 0x60000000u | (ptr_reg << 21) |
+                               (ptr_reg << 16) | (zero_va & 0xffffu));/* ori rN,rN,lo        */
     store_be32(t + 0x10, guard_orig);                               /* use_table: lwz r11  */
     store_be32(t + 0x14, resume);                                   /* b after stolen insn */
     store_be32(ctx->buf + guard_off, branch);
