@@ -55,6 +55,8 @@
 #define UI_COLOR_GREEN    0xFF60E080u   /* toggle ON  */
 #define UI_COLOR_RED      0xFFE06060u   /* toggle OFF */
 #define UI_COLOR_SECTION  0xFF80C0FFu   /* category header */
+#define UI_COLOR_TJA      0xFFFFB870u   /* soft orange source tint */
+#define UI_COLOR_OSU      0xFFFF9BC8u   /* soft pink source tint   */
 
 enum {
     SWATCH_BG = 0,
@@ -96,6 +98,8 @@ typedef enum {
     TEXT_GREEN,
     TEXT_RED,
     TEXT_SECTION,
+    TEXT_TJA,
+    TEXT_OSU,
     TEXT_COLOR_COUNT
 } text_color_t;
 
@@ -378,7 +382,8 @@ static int append_text_vertices(overlay_vertex_t *v, int *count, int max_vtx,
                                 const char *s) {
     static const uint32_t colors[TEXT_COLOR_COUNT] = {
         UI_COLOR_TEXT, UI_COLOR_ACCENT, UI_COLOR_MUTED, UI_COLOR_DARK,
-        UI_COLOR_GREEN, UI_COLOR_RED, UI_COLOR_SECTION
+        UI_COLOR_GREEN, UI_COLOR_RED, UI_COLOR_SECTION,
+        UI_COLOR_TJA, UI_COLOR_OSU
     };
     const menu_font_t *font = &menu_font_20_font;
     uint32_t color = colors[color_id];
@@ -913,8 +918,9 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
             break;
         int ry = row_y0 + i * row_h;
         int kind = m.kinds[idx];
+        int base_kind = kind & TAIKO_OVL_ROW_KIND_MASK;
 
-        if (kind == TAIKO_OVL_ROW_SECTION) {
+        if (base_kind == TAIKO_OVL_ROW_SECTION) {
             if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
                                       x + pad, ry + 2, TEXT_SECTION, m.lines[idx]))
                 return;
@@ -933,9 +939,17 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
                          box_w - 2 * (pad - 6), row_h, 2))
             return;
 
-        text_color_t label_c = selected ? TEXT_DARK :
-                               (kind == TAIKO_OVL_ROW_DISABLED ? TEXT_MUTED
-                                                                : TEXT_WHITE);
+        text_color_t label_c;
+        if (selected)
+            label_c = TEXT_DARK;
+        else if (kind & TAIKO_OVL_ROW_SOURCE_TJA)
+            label_c = TEXT_TJA;
+        else if (kind & TAIKO_OVL_ROW_SOURCE_OSU)
+            label_c = TEXT_OSU;
+        else if (base_kind == TAIKO_OVL_ROW_DISABLED)
+            label_c = TEXT_MUTED;
+        else
+            label_c = TEXT_WHITE;
         if (!append_text_vertices(vtx, &vtx_count, max_vtx, b.width, b.height,
                                   x + pad, ry + 2, label_c, m.lines[idx]))
             return;
@@ -944,7 +958,7 @@ static void maybe_draw_menu(void *ctx, uint8_t id) {
             text_color_t val_c;
             if (selected) {
                 val_c = TEXT_DARK;
-            } else switch (kind) {
+            } else switch (base_kind) {
                 case TAIKO_OVL_ROW_TOGGLE_ON:  val_c = TEXT_GREEN; break;
                 case TAIKO_OVL_ROW_TOGGLE_OFF: val_c = TEXT_RED;   break;
                 case TAIKO_OVL_ROW_ACTION:     val_c = TEXT_MUTED; break;

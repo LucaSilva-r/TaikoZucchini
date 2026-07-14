@@ -384,8 +384,6 @@ static void lib_refresh_cached_flags(void) {
         int idx;
         if (de.d_type != CELL_FS_TYPE_DIRECTORY)
             continue;
-        if (strncmp(de.d_name, "ese_", 4) != 0)
-            continue;
         idx = lib_find_song_index(de.d_name);
         if (idx < 0)
             continue;
@@ -424,6 +422,28 @@ static void parse_diffs_str(const char *s, signed char stars[ESE_DIFF_SLOTS]) {
         }
         while (*s == ',') s++;                          /* to next token */
     }
+}
+
+static int ascii_contains_ci(const char *text, const char *query) {
+    if (!text || !query || !query[0])
+        return 0;
+    for (; *text; text++) {
+        const char *a = text;
+        const char *b = query;
+        while (*a && *b) {
+            unsigned char ca = (unsigned char)*a;
+            unsigned char cb = (unsigned char)*b;
+            if (ca >= 'A' && ca <= 'Z') ca = (unsigned char)(ca + ('a' - 'A'));
+            if (cb >= 'A' && cb <= 'Z') cb = (unsigned char)(cb + ('a' - 'A'));
+            if (ca != cb)
+                break;
+            a++;
+            b++;
+        }
+        if (!*b)
+            return 1;
+    }
+    return 0;
 }
 
 /* Parse the /library payload into the in-memory arrays. Returns 1 on success. */
@@ -473,24 +493,47 @@ static int parse_library(const unsigned char *body, size_t len) {
         const unsigned char *idp = find_bytes(p, (size_t)(end - p), "\"id\"");
         if (!idp) break;
         p = idp + 4;
+        /* Bound optional fields to this flat song object. This matters for
+         * old cached indexes without `source`: a forward scan to `end` would
+         * otherwise steal the following song's value. */
+        const unsigned char *next_id = find_bytes(p, (size_t)(end - p), "\"id\"");
+        const unsigned char *item_end = next_id ? next_id : end;
         ese_song_entry_t *s = &g_lib_songs[g_lib_song_count];
         memset(s, 0, sizeof *s);
-        if (!json_get_string_after(idp, end, "\"id\"", s->id, sizeof s->id))
+        if (!json_get_string_after(idp, item_end, "\"id\"", s->id, sizeof s->id))
             break;
-        if (strncmp(s->id, "ese_", 4) != 0)
+        if (strncmp(s->id, "ese_", 4) != 0 &&
+            strncmp(s->id, "osu_", 4) != 0)
             continue;
-        if (!json_get_string_after(idp, end, "\"title\"", s->title, sizeof s->title))
+        if (!json_get_string_after(idp, item_end, "\"title\"", s->title, sizeof s->title))
             snprintf(s->title, sizeof s->title, "%s", s->id);
-        json_get_string_after(idp, end, "\"subtitle\"", s->subtitle, sizeof s->subtitle);
+        if (!json_get_string_after(idp, item_end, "\"display_title\"",
+                                   s->display_title,
+                                   sizeof s->display_title))
+            snprintf(s->display_title, sizeof s->display_title, "%s", s->title);
+        json_get_string_after(idp, item_end, "\"subtitle\"", s->subtitle, sizeof s->subtitle);
         char catid[ESE_CATEGORY_ID_MAX];
         catid[0] = 0;
-        json_get_string_after(idp, end, "\"category\"", catid, sizeof catid);
+        json_get_string_after(idp, item_end, "\"category\"", catid, sizeof catid);
         g_lib_song_cat[g_lib_song_count] = (short)lib_cat_index(catid);
         char diffs[64];
         diffs[0] = 0;
         for (int d = 0; d < ESE_DIFF_SLOTS; d++) s->stars[d] = -1;
-        if (json_get_string_after(idp, end, "\"diffs\"", diffs, sizeof diffs))
+        if (json_get_string_after(idp, item_end, "\"diffs\"", diffs, sizeof diffs))
             parse_diffs_str(diffs, s->stars);
+        char source[8];
+        source[0] = 0;
+        if (json_get_string_after(idp, item_end, "\"source\"",
+                                  source, sizeof source)) {
+            if (streq_c(source, "osu"))
+                s->source = ESE_SONG_SOURCE_OSU;
+            else if (streq_c(source, "tja"))
+                s->source = ESE_SONG_SOURCE_TJA;
+        }
+        if (s->source == ESE_SONG_SOURCE_UNKNOWN) {
+            s->source = strncmp(s->id, "osu_", 4) == 0 ?
+                ESE_SONG_SOURCE_OSU : ESE_SONG_SOURCE_TJA;
+        }
         g_lib_song_count++;
     }
 
@@ -599,6 +642,37 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
             continue;
         if (total >= offset && count < limit)
             out[count++] = g_lib_songs[i];
+        total++;
+    }
+    if (out_total)
+        *out_total = total;
+    return count;
+}
+
+int ese_song_search_page(const char *query, int offset, int limit,
+                         ese_song_entry_t *out, int cap, int *out_total) {
+    if (!out || cap <= 0 || !query || !query[0])
+        return -1;
+    if (limit <= 0 || limit > cap)
+        limit = cap;
+    if (offset < 0)
+        offset = 0;
+    memset(out, 0, sizeof(out[0]) * (size_t)cap);
+    if (out_total)
+        *out_total = 0;
+    if (!g_lib_loaded && !ese_library_sync())
+        return -1;
+
+    int total = 0, count = 0;
+    for (int i = 0; i < g_lib_song_count; i++) {
+        ese_song_entry_t *song = &g_lib_songs[i];
+        if (!ascii_contains_ci(song->title, query) &&
+            !ascii_contains_ci(song->display_title, query) &&
+            !ascii_contains_ci(song->subtitle, query) &&
+            !ascii_contains_ci(song->id, query))
+            continue;
+        if (total >= offset && count < limit)
+            out[count++] = *song;
         total++;
     }
     if (out_total)
@@ -752,7 +826,7 @@ int ese_song_resolve_short_id(const char *short_id, char *out, int cap) {
         for (int i = 0; i < g_lib_song_count; i++) {
             if (!ese_song_make_short_id(g_lib_songs[i].id, tmp, sizeof tmp))
                 continue;
-        if (strncmp(tmp, short_id, sizeof tmp) == 0) {
+            if (strncmp(tmp, short_id, sizeof tmp) == 0) {
                 int n = snprintf(out, (size_t)cap, "%s", g_lib_songs[i].id);
                 return n > 0 && n < cap;
             }
@@ -771,8 +845,6 @@ int ese_song_resolve_short_id(const char *short_id, char *out, int cap) {
 
     while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
         if (de.d_type != CELL_FS_TYPE_DIRECTORY)
-            continue;
-        if (strncmp(de.d_name, "ese_", 4) != 0)
             continue;
         if (!ese_song_make_short_id(de.d_name, tmp, sizeof tmp))
             continue;

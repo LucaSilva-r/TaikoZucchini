@@ -786,8 +786,7 @@ static int ssn_apply_detail_star_patch(void *vm,
                                        ssn_detail_star_patch_t *patch) {
     ssn_arg_raw folder = ssn_arg(vm, 1);
     ssn_arg_raw local = ssn_arg(vm, 2);
-    uint32_t start = 0;
-    uint32_t count = 0;
+    uint32_t virtual_index;
     uint32_t absolute;
     uint32_t rec;
     uint32_t uniqueid;
@@ -795,22 +794,17 @@ static int ssn_apply_detail_star_patch(void *vm,
     if (!(folder.type == 2 || folder.type == 3) ||
         !(local.type == 2 || local.type == 3))
         return 0;
-    if (!ssn_is_virtual_song(folder.value, local.value))
-        return 0;
-    if (local.value >= g_ssn_virtual_song_count)
-        return 0;
-    if (!ssn_get_board_range(folder.value, &start, &count) ||
-        local.value >= count)
+    if (!ssn_virtual_index_for_request(folder.value, local.value,
+                                       &virtual_index, &absolute))
         return 0;
 
-    absolute = start + local.value;
     rec = ssn_display_record_by_absolute(absolute);
     if (!rec)
         return 0;
 
     uniqueid = *(volatile uint32_t *)(uintptr_t)(rec + SSN_SONG_UNIQUEID_OFF);
     patch->count = ssn_patch_detail_stars_for_uniqueid(
-        uniqueid, g_ssn_virtual_songs[local.value].song.stars);
+        uniqueid, g_ssn_virtual_songs[virtual_index].song.stars);
 
     if (patch->count) {
         dbg_print("[ssn] patched persistent detail stars for custom song\n");
@@ -1840,6 +1834,10 @@ static const char *ssn_rt_title_text(uint32_t index) {
 #define SSN_RT_CACHE_MAGIC 0x545a5443u /* TZTC */
 #define SSN_RT_CACHE_VERSION 1u
 #define SSN_RT_CACHE_RENDERER_VERSION 7u
+/* osu! converts keep their normal genre outline, but the short carousel title
+ * fill is tinted a restrained pink so their origin remains visible in the
+ * game's real song-select screen. */
+#define SSN_OSU_SHORT_FILL_RGB 0xFFD1E6u
 
 typedef struct ssn_rt_cache_header {
     uint32_t magic;
@@ -2028,26 +2026,41 @@ static void ssn_rt_cache_split_planes(const uint32_t *argb, uint32_t pixels,
     }
 }
 
-static void ssn_rt_cache_compose_argb(uint32_t *argb, uint32_t pixels,
-                                      uint32_t outline_rgb) {
+static void ssn_rt_cache_compose_colored_argb(uint32_t *argb, uint32_t pixels,
+                                              uint32_t outline_rgb,
+                                              uint32_t fill_rgb) {
     uint32_t or_ = (outline_rgb >> 16) & 0xffu;
     uint32_t og_ = (outline_rgb >> 8) & 0xffu;
     uint32_t ob_ = outline_rgb & 0xffu;
+    uint32_t fr_ = (fill_rgb >> 16) & 0xffu;
+    uint32_t fg_ = (fill_rgb >> 8) & 0xffu;
+    uint32_t fb_ = fill_rgb & 0xffu;
 
     for (uint32_t i = 0; i < pixels; i++) {
         uint32_t f = g_rt_cache_fill[i];
         uint32_t o = g_rt_cache_outline[i];
         uint32_t obg = (o * (255u - f) + 127u) / 255u;
         uint32_t a = f + obg;
-        uint32_t r = f + (or_ * obg + 127u) / 255u;
-        uint32_t g = f + (og_ * obg + 127u) / 255u;
-        uint32_t b = f + (ob_ * obg + 127u) / 255u;
+        uint32_t r = (fr_ * f + or_ * obg + 127u) / 255u;
+        uint32_t g = (fg_ * f + og_ * obg + 127u) / 255u;
+        uint32_t b = (fb_ * f + ob_ * obg + 127u) / 255u;
         if (a > 255u) a = 255u;
         if (r > 255u) r = 255u;
         if (g > 255u) g = 255u;
         if (b > 255u) b = 255u;
         argb[i] = (a << 24) | (r << 16) | (g << 8) | b;
     }
+}
+
+static void ssn_rt_cache_compose_argb(uint32_t *argb, uint32_t pixels,
+                                      uint32_t outline_rgb) {
+    ssn_rt_cache_compose_colored_argb(argb, pixels, outline_rgb, 0xffffffu);
+}
+
+static void ssn_rt_tint_fill_argb(uint32_t *argb, uint32_t pixels,
+                                  uint32_t outline_rgb, uint32_t fill_rgb) {
+    ssn_rt_cache_split_planes(argb, pixels, outline_rgb);
+    ssn_rt_cache_compose_colored_argb(argb, pixels, outline_rgb, fill_rgb);
 }
 
 static int ssn_rt_cache_load(uint32_t type, const char *title,
@@ -2424,13 +2437,17 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
         static unsigned cache_miss_logs;
         uint32_t genre_outline = 0;
         uint32_t actual_outline = 0;
+        int tint_osu_short = 0;
         uint64_t t0;
         uint64_t dt;
         uint64_t render_key;
         if (index < g_ssn_virtual_song_count)
             genre_outline = g_ssn_virtual_songs[index].outline;
-        if (type == TITLE_TEX_SONGLIST_SHORT)
+        if (type == TITLE_TEX_SONGLIST_SHORT) {
             actual_outline = genre_outline ? genre_outline : SSN_RT_TITLE_OUTLINE;
+            tint_osu_short = index < g_ssn_virtual_song_count &&
+                g_ssn_virtual_songs[index].song.source == ESE_SONG_SOURCE_OSU;
+        }
         render_key = ssn_rt_cache_key(type, title, actual_outline, w, h);
         t0 = (uint64_t)sys_time_get_system_time();
         if (!ssn_rt_cache_load(type, title, actual_outline, w, h,
@@ -2463,6 +2480,9 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
                 dbg_print_hex32("  us", (uint32_t)dt);
             }
         }
+        if (tint_osu_short)
+            ssn_rt_tint_fill_argb(g_rt_title_pixels, w * h, actual_outline,
+                                  SSN_OSU_SHORT_FILL_RGB);
     }
 
     vtbl = *(volatile uint32_t *)(uintptr_t)res;

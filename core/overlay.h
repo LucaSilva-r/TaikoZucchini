@@ -18,6 +18,11 @@ enum {
     TAIKO_OVL_ROW_TOGGLE_OFF,  /* value drawn red    */
     TAIKO_OVL_ROW_ACTION,      /* value drawn dimmed */
     TAIKO_OVL_ROW_DISABLED,    /* label + value drawn dimmed */
+    TAIKO_OVL_ROW_KIND_MASK = 0x0f,
+    /* Optional label tint flags. They compose with the base row kind so a
+     * downloaded/queued song can retain both its status and source colour. */
+    TAIKO_OVL_ROW_SOURCE_TJA = 0x10,
+    TAIKO_OVL_ROW_SOURCE_OSU = 0x20,
 };
 
 /* Interactive menu surface, blitted centred over the game each flip while

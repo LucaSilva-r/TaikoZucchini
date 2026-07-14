@@ -14,14 +14,26 @@
 
 /* Canonical difficulty slots in the index: Easy,Normal,Hard,Oni,Ura. */
 #define ESE_DIFF_SLOTS 5
+enum {
+    ESE_SONG_SOURCE_UNKNOWN = 0,
+    ESE_SONG_SOURCE_TJA,
+    ESE_SONG_SOURCE_OSU,
+};
+
 typedef struct {
     char id[ESE_SONG_ID_MAX];
     char title[ESE_SONG_TITLE_MAX];
+    /* ASCII/romanized label for compact overlay fonts. tjarepo currently uses
+     * the same romanized title for osu! songs in both title fields. */
+    char display_title[ESE_SONG_TITLE_MAX];
     /* TJA SUBTITLE (source/origin line, e.g. "「…」より"); empty if none. */
     char subtitle[ESE_SONG_TITLE_MAX];
     /* Star count per canonical difficulty, -1 = difficulty absent. Comes
      * straight from the /library index (no conversion needed to see them). */
     signed char stars[ESE_DIFF_SLOTS];
+    /* Origin supplied by tjarepo's downloaded /library index. Older cached
+     * indexes are inferred from the stable ese_/osu_ id prefix. */
+    unsigned char source;
 } ese_song_entry_t;
 
 typedef struct {
@@ -43,6 +55,8 @@ int ese_library_sync(void);
 int ese_song_fetch_categories(ese_category_entry_t *out, int cap);
 int ese_song_fetch_page(const char *category_id, int offset, int limit,
                         ese_song_entry_t *out, int cap, int *out_total);
+int ese_song_search_page(const char *query, int offset, int limit,
+                         ese_song_entry_t *out, int cap, int *out_total);
 int ese_song_prepare_and_cache(const char *song_id, const char *title,
                                ese_course_entry_t *courses, int course_cap,
                                int *out_course_count);

@@ -24,4 +24,11 @@ int menu_osk_input(const char *prompt, const char *initial,
                    menu_osk_mode_t mode,
                    char *out, size_t out_cap);
 
+/* Runtime-overlay variant. The game keeps presenting on its own render
+ * thread, so this only pumps sysutil callbacks and never touches the legacy
+ * standalone RSX context. */
+int menu_osk_input_ingame(const char *prompt, const char *initial,
+                          menu_osk_mode_t mode,
+                          char *out, size_t out_cap);
+
 #endif

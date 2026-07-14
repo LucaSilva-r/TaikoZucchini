@@ -52,17 +52,18 @@ static void utf16_to_ascii(const uint16_t *src, int nchars,
     dst[o] = 0;
 }
 
-static void pump_until(volatile int *flag) {
+static void pump_until(volatile int *flag, int present) {
     while (!*flag) {
         cellSysutilCheckCallback();
-        rsx_present();
+        if (present)
+            rsx_present();
         sys_timer_usleep(16 * 1000);
     }
 }
 
-int menu_osk_input(const char *prompt, const char *initial,
-                   menu_osk_mode_t mode,
-                   char *out, size_t out_cap) {
+static int menu_osk_input_impl(const char *prompt, const char *initial,
+                               menu_osk_mode_t mode,
+                               char *out, size_t out_cap, int present) {
     if (!out || out_cap == 0) return -1;
     out[0] = 0;
 
@@ -128,7 +129,7 @@ int menu_osk_input(const char *prompt, const char *initial,
         return -1;
     }
 
-    pump_until(&g_osk_finished);
+    pump_until(&g_osk_finished, present);
 
     CellOskDialogCallbackReturnParam ret;
     memset(&ret, 0, sizeof ret);
@@ -136,7 +137,7 @@ int menu_osk_input(const char *prompt, const char *initial,
     ret.pResultString        = result_w;
     rc = cellOskDialogUnloadAsync(&ret);
 
-    pump_until(&g_osk_unloaded);
+    pump_until(&g_osk_unloaded, present);
 
     cellSysutilUnregisterCallback(0);
 
@@ -150,4 +151,16 @@ int menu_osk_input(const char *prompt, const char *initial,
 
     utf16_to_ascii(result_w, ret.numCharsResultString, out, out_cap);
     return 0;
+}
+
+int menu_osk_input(const char *prompt, const char *initial,
+                   menu_osk_mode_t mode,
+                   char *out, size_t out_cap) {
+    return menu_osk_input_impl(prompt, initial, mode, out, out_cap, 1);
+}
+
+int menu_osk_input_ingame(const char *prompt, const char *initial,
+                          menu_osk_mode_t mode,
+                          char *out, size_t out_cap) {
+    return menu_osk_input_impl(prompt, initial, mode, out, out_cap, 0);
 }

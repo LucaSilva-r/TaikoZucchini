@@ -63,6 +63,7 @@ endif
 
 CFLAGS  := -O2 -Wall -Wextra -std=gnu99 -mcpu=cell \
            -mprx -fno-builtin -ffunction-sections -fdata-sections \
+           -MMD -MP \
            -DHEN_BUILD=$(HEN_BUILD) \
            -DTAIKO_ZUCCHINI_API_TOKEN='"$(TAIKO_ZUCCHINI_API_TOKEN)"' \
            -DTAIKO_PATCH_UI_FORCE_FAIL=$(FORCE_PATCH_FAIL) \
@@ -184,6 +185,12 @@ FREETYPE_SRCS := $(FREETYPE_DIR)/src/base/ftbase.c \
                  $(FREETYPE_DIR)/src/smooth/smooth.c
 FREETYPE_OBJS := $(FREETYPE_SRCS:.c=.o)
 OBJS          += $(FREETYPE_OBJS)
+DEPS          := $(OBJS:.o=.d)
+
+# Compiler-generated header dependencies are essential here: several shared
+# structs cross translation-unit boundaries, and mixing objects built against
+# different header revisions produces valid-looking but corrupt runtime data.
+-include $(DEPS)
 
 all: $(SPRX) $(BOOTSTRAP_EBOOT) $(FTP_EBOOT)
 
@@ -307,11 +314,11 @@ install: $(SPRX)
 	@echo "installed -> $(RPCS3_PLUGIN_DIR)/zucchini.sprx"
 
 clean:
-	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(DEPS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 	$(MAKE) -C bootstrap_eboot clean
 	$(MAKE) -C ftp_eboot clean
 
 clean-prx:
-	rm -f $(OBJS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(DEPS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 
 .PHONY: all bootstrap ftp-eboot clean clean-prx install
