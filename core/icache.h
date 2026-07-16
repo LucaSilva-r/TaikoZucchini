@@ -35,4 +35,16 @@ static inline void mem_write_and_flush(void *dst, const void *src, size_t len) {
     icache_flush(dst, len);
 }
 
+/* Plain same-process store for RW targets (game heap/data records). No lv2
+ * syscall: syscall 905 is unavailable on HEN / lv2-locked consoles, where it
+ * silently no-ops — data writes routed through it never landed there. Only
+ * for writable pages; .text still needs mem_write_and_flush. */
+static inline void mem_write_data(void *dst, const void *src, size_t len) {
+    const unsigned char *s = (const unsigned char *)src;
+    unsigned char *d = (unsigned char *)dst;
+    for (size_t i = 0; i < len; i++)
+        d[i] = s[i];
+    __asm__ volatile("sync" ::: "memory");
+}
+
 #endif

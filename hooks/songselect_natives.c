@@ -371,11 +371,11 @@ static void ssn_write_inline_string(uint32_t str, const char *s) {
     if (s && len)
         memcpy(buf, s, len);
 
-    mem_write_and_flush((void *)(uintptr_t)(str + SSN_INLINE_STRING_BUF_OFF),
+    mem_write_data((void *)(uintptr_t)(str + SSN_INLINE_STRING_BUF_OFF),
                         buf, sizeof buf);
-    mem_write_and_flush((void *)(uintptr_t)(str + SSN_INLINE_STRING_LEN_OFF),
+    mem_write_data((void *)(uintptr_t)(str + SSN_INLINE_STRING_LEN_OFF),
                         &len, sizeof len);
-    mem_write_and_flush((void *)(uintptr_t)(str + SSN_INLINE_STRING_CAP_OFF),
+    mem_write_data((void *)(uintptr_t)(str + SSN_INLINE_STRING_CAP_OFF),
                         &cap, sizeof cap);
 }
 
@@ -706,9 +706,9 @@ static int ssn_texture_slot_write_handle(uint32_t slot, uint32_t handle) {
     if (slot >= count)
         return 0;
     rec = begin + slot * 8u;
-    mem_write_and_flush((void *)(uintptr_t)(rec + 0x04u),
+    mem_write_data((void *)(uintptr_t)(rec + 0x04u),
                         &handle, sizeof handle);
-    mem_write_and_flush((void *)(uintptr_t)(owner + 0x04u),
+    mem_write_data((void *)(uintptr_t)(owner + 0x04u),
                         &dirty, sizeof dirty);
     return 1;
 }
@@ -775,7 +775,7 @@ static int ssn_patch_detail_stars_for_uniqueid(uint32_t uniqueid,
         uint32_t entry = ssn_detail_entry_for_uniqueid(player, uniqueid);
         if (!entry)
             continue;
-        mem_write_and_flush((void *)(uintptr_t)(entry + 0x50u),
+        mem_write_data((void *)(uintptr_t)(entry + 0x50u),
                             star_bytes, ESE_DIFF_SLOTS);
         patched++;
     }
@@ -934,9 +934,9 @@ static uint32_t ssn_custom_basic_metadata_for_record(uint32_t rec,
             v = 10;
         stars[i] = (uint32_t)v;
     }
-    mem_write_and_flush((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x1cu),
+    mem_write_data((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x1cu),
                         stars, sizeof stars);
-    mem_write_and_flush((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x30u),
+    mem_write_data((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x30u),
                         stars, sizeof stars);
 
     (void)rec;
@@ -1059,9 +1059,9 @@ static void ssn_score_meta_patch_begin(void *vm,
     patch->virtual_index = virtual_index;
     patch->active = 1;
 
-    mem_write_and_flush((void *)(uintptr_t)(meta + 0x1cu),
+    mem_write_data((void *)(uintptr_t)(meta + 0x1cu),
                         stars, sizeof stars);
-    mem_write_and_flush((void *)(uintptr_t)(meta + 0x30u),
+    mem_write_data((void *)(uintptr_t)(meta + 0x30u),
                         stars, sizeof stars);
     ssn_write_inline_string(rec + SSN_SONG_MUSICID_OFF, "ynzlmn");
 
@@ -1092,9 +1092,9 @@ static void ssn_score_meta_patch_end(ssn_score_meta_patch_t *patch) {
         restore_a[i] = patch->original[i];
         restore_b[i] = patch->original[4u + i];
     }
-    mem_write_and_flush((void *)(uintptr_t)(patch->meta + 0x1cu),
+    mem_write_data((void *)(uintptr_t)(patch->meta + 0x1cu),
                         restore_a, sizeof restore_a);
-    mem_write_and_flush((void *)(uintptr_t)(patch->meta + 0x30u),
+    mem_write_data((void *)(uintptr_t)(patch->meta + 0x30u),
                         restore_b, sizeof restore_b);
     ssn_write_inline_string(patch->rec + SSN_SONG_MUSICID_OFF,
                             g_ssn_virtual_songs[patch->virtual_index].short_id);
@@ -1223,7 +1223,7 @@ static int ssn_detail_replay_begin(void *vm,
         detail[0x4du] = clear_mask;
         detail[0x4eu] = gold_mask;
         detail[0x4fu] = score_mask;
-        mem_write_and_flush(
+        mem_write_data(
             (void *)(uintptr_t)patch->detail_entry[detail_player],
             detail, sizeof detail);
         patch->detail_active_mask |= 1u << detail_player;
@@ -1237,9 +1237,9 @@ static int ssn_detail_replay_begin(void *vm,
     patch->old_count = *(volatile uint32_t *)(uintptr_t)(rec + 0x08u);
     new_start = SSN_REPLAY_OFFICIAL_ABSOLUTE - local.value;
     new_count = local.value + 1u;
-    mem_write_and_flush((void *)(uintptr_t)(rec + 0x04u),
+    mem_write_data((void *)(uintptr_t)(rec + 0x04u),
                         &new_start, sizeof new_start);
-    mem_write_and_flush((void *)(uintptr_t)(rec + 0x08u),
+    mem_write_data((void *)(uintptr_t)(rec + 0x08u),
                         &new_count, sizeof new_count);
     patch->active = 1;
 
@@ -1255,14 +1255,14 @@ static int ssn_detail_replay_begin(void *vm,
 static void ssn_detail_replay_end(const ssn_detail_replay_patch_t *patch) {
     if (!patch || !patch->active || !patch->board_rec)
         return;
-    mem_write_and_flush((void *)(uintptr_t)(patch->board_rec + 0x04u),
+    mem_write_data((void *)(uintptr_t)(patch->board_rec + 0x04u),
                         &patch->old_start, sizeof patch->old_start);
-    mem_write_and_flush((void *)(uintptr_t)(patch->board_rec + 0x08u),
+    mem_write_data((void *)(uintptr_t)(patch->board_rec + 0x08u),
                         &patch->old_count, sizeof patch->old_count);
     for (unsigned player = 0; player < 2u; player++)
         if ((patch->detail_active_mask & (1u << player)) &&
             patch->detail_entry[player])
-            mem_write_and_flush(
+            mem_write_data(
                 (void *)(uintptr_t)patch->detail_entry[player],
                 patch->old_detail[player], sizeof patch->old_detail[player]);
     dbg_print("[ssn] restored custom board range after detail replay\n");
