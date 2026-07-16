@@ -3,6 +3,7 @@
 
 #define ESE_SONG_ID_MAX    32
 #define ESE_SONG_SHORT_ID_MAX 16
+#define ESE_SONG_REV_MAX   16
 #define ESE_SONG_TITLE_MAX 96
 #define ESE_CATEGORY_ID_MAX    64
 #define ESE_CATEGORY_TITLE_MAX 64
@@ -34,6 +35,10 @@ typedef struct {
     /* Origin supplied by tjarepo's downloaded /library index. Older cached
      * indexes are inferred from the stable ese_/osu_ id prefix. */
     unsigned char source;
+    /* Server-side source_hash prefix from the /library index; empty on old
+     * indexes. Compared against the cached manifest's source_hash to detect
+     * songs whose source files or converter changed. */
+    char rev[ESE_SONG_REV_MAX];
 } ese_song_entry_t;
 
 typedef struct {
@@ -73,6 +78,10 @@ int ese_song_library_get2(int index, ese_song_entry_t *out,
 int ese_song_library_find_index(const char *song_id);
 int ese_song_library_is_cached_at(int library_index);
 int ese_song_library_cached_count(void);
+/* 1 if the song is cached locally but the server's rev no longer matches the
+ * cached manifest's source_hash (source files or converter changed). */
+int ese_song_library_is_stale_at(int library_index);
+int ese_song_library_stale_count(void);
 int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out);
 int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
                                  int *out_cat_idx);

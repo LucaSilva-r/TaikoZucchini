@@ -1776,6 +1776,17 @@ static void install_basic_lookup_hook(void) {
     if (!g_song_manifest ||
         !(g_song_capabilities & TAIKO_SONG_CAP_METADATA))
         return;
+    /* v9-patched EBOOTs carry a baked trampoline at the entry; publishing the
+     * detour address into the FPT cell arms it with plain data stores (no
+     * sys_dbg_write_process_memory, which HEN / lv2-locked consoles lack).
+     * Set the resume target BEFORE the publish makes the detour reachable. */
+    g_ssn_basic_lookup_resume = SSN_BASIC_LOOKUP_RETURN;
+    if (taiko_fpt_publish_ssn_basic_lookup(
+            (uint32_t)(uintptr_t)ssn_basic_lookup_detour_code)) {
+        g_basic_lookup_hook_installed = 1;
+        dbg_print("[ssn] basic lookup hook published via FPT\n");
+        return;
+    }
     cur = *(volatile uint32_t *)(uintptr_t)SSN_BASIC_LOOKUP_ENTRY;
     if (cur != SSN_BASIC_LOOKUP_EXPECT_INSTR) {
         g_basic_lookup_hook_installed = 1;
@@ -2807,6 +2818,14 @@ static void install_texretr_hook(void) {
     if (!g_song_manifest ||
         !(g_song_capabilities & TAIKO_SONG_CAP_TEXTURES))
         return;
+    /* Same FPT v9 publish path as the basic-lookup hook; resume first. */
+    g_ssn_texretr_resume = SSN_TEXRETR_RETURN;
+    if (taiko_fpt_publish_ssn_texretr(
+            (uint32_t)(uintptr_t)ssn_texretr_detour_code)) {
+        installed = 1;
+        dbg_print("[ssn] texretr hook published via FPT\n");
+        return;
+    }
     cur = *(volatile uint32_t *)(uintptr_t)SSN_TEXRETR_ENTRY;
     if (cur != SSN_TEXRETR_EXPECT_INSTR) {
         installed = 1;
@@ -3069,6 +3088,14 @@ static void install_e46_listbuild_bridge(void) {
 
     if (g_e46_listbuild_bridge_installed)
         return;
+    /* v9-patched EBOOTs already carry the bridge; arming it is one data
+     * store. On success skip every runtime .text poke below. */
+    if (taiko_fpt_publish_ssn_listbuild(
+            (uint32_t)(uintptr_t)&hk_e46_listbuild_bridge)) {
+        g_e46_listbuild_bridge_installed = 1;
+        dbg_print("[ssn] listbuild bridge published via FPT\n");
+        return;
+    }
     if (callsite != SSN_SCENE_TEMPVEC_EXPECT_NOP) {
         dbg_print("[ssn] e46 listbuild callsite unexpected, skip\n");
         dbg_print_hex32("  callsite", SSN_E46_LISTBUILD_CALLSITE);
@@ -3172,11 +3199,26 @@ void songselect_natives_install(void) {
 
     dbg_print("[ssn] installing resolved songselect hooks\n");
     if (g_song_capabilities & TAIKO_SONG_CAP_NATIVE_TABLE) {
+        /* v9-patched EBOOTs route each native row through a baked dispatch
+         * stub: read the patcher-saved original OPD, then arm the hook cell
+         * (in that order, so a dispatched call never runs a hook whose
+         * original pointer is still null). Rows without a baked stub fall
+         * back to the runtime table poke (pre-v9 EBOOTs / dev consoles). */
 #define INSTALL_RESOLVED_NATIVE(index, name)                                  \
-        install_one(g_song_manifest->native_slots[index],                     \
-                    (native_fn)&hk_##name, &g_orig_##name);                   \
-        log_install_one(g_song_manifest->native_slots[index], #name,          \
-                        g_orig_##name);
+        do {                                                                  \
+            uint32_t orig_opd_ = taiko_fpt_ssn_native_orig(index);            \
+            if (orig_opd_) {                                                  \
+                g_orig_##name = (native_fn)(uintptr_t)orig_opd_;              \
+                taiko_fpt_publish_ssn_native(index,                          \
+                        (uint32_t)(uintptr_t)&hk_##name);                    \
+                dbg_print("[ssn] FPT native " #name "\n");                   \
+            } else {                                                          \
+                install_one(g_song_manifest->native_slots[index],            \
+                            (native_fn)&hk_##name, &g_orig_##name);          \
+                log_install_one(g_song_manifest->native_slots[index], #name, \
+                                g_orig_##name);                              \
+            }                                                                 \
+        } while (0);
         SONGSEL_NATIVES(INSTALL_RESOLVED_NATIVE)
 #undef INSTALL_RESOLVED_NATIVE
     }

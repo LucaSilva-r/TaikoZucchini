@@ -22,7 +22,7 @@
 
 /* Song page (10) + Prev/Next/queue-category/clear-category/Back actions. */
 #define SONG_ROWS_MAX (ESE_SONG_PAGE_MAX + 5)
-#define CATEGORY_ROWS_MAX (ESE_CATEGORY_LIST_MAX + 4)
+#define CATEGORY_ROWS_MAX (ESE_CATEGORY_LIST_MAX + 5)
 
 enum {
     CATEGORY_CLOSE = -1,
@@ -30,6 +30,7 @@ enum {
     CATEGORY_CLEAR_QUEUE = -3,
     CATEGORY_QUEUE_ALL = -4,
     CATEGORY_SEARCH = -5,
+    CATEGORY_QUEUE_UPDATES = -6,
 };
 
 typedef struct song_download_queue {
@@ -97,7 +98,8 @@ static void queue_set_category(song_download_queue_t *q, int cat_idx,
         if (!ese_song_library_get2(i, &song, &song_cat) ||
             (cat_idx >= 0 && song_cat != cat_idx))
             continue;
-        if (selected && ese_song_library_is_cached_at(i))
+        if (selected && ese_song_library_is_cached_at(i) &&
+            !ese_song_library_is_stale_at(i))
             continue;
         queue_set(q, i, selected);
     }
@@ -217,8 +219,13 @@ static int download_song(const ese_song_entry_t *song) {
 
     if (!song || !song->id[0])
         return 0;
-    if (ese_song_is_cached(song->id))
-        return 2;
+    if (ese_song_is_cached(song->id)) {
+        int idx = ese_song_library_find_index(song->id);
+        /* Fresh cache -> nothing to do. A stale one falls through so
+         * prepare_and_cache's own hash check re-converts and re-downloads. */
+        if (idx < 0 || !ese_song_library_is_stale_at(idx))
+            return 2;
+    }
 
     /* ese_song_prepare_and_cache drives its own loading_screen for progress. */
     rc = ese_song_prepare_and_cache(song->id,
@@ -328,6 +335,8 @@ static int categories_screen(const ese_category_entry_t *cats, int cat_count,
     for (;;) {
         int n = 0;
         int queue_all_row;
+        int updates_row;
+        int stale_count;
         int download_row;
         int clear_row;
         int search_row;
@@ -348,6 +357,13 @@ static int categories_screen(const ese_category_entry_t *cats, int cat_count,
         lines[n] = "Queue all undownloaded";
         vals[n] = "";
         kinds[n] = TAIKO_OVL_ROW_ACTION;
+        n++;
+        updates_row = n;
+        stale_count = ese_song_library_stale_count();
+        lines[n] = "Queue song updates";
+        snprintf(values[n], sizeof values[n], "%d songs", stale_count);
+        vals[n] = values[n];
+        kinds[n] = stale_count ? TAIKO_OVL_ROW_ACTION : TAIKO_OVL_ROW_DISABLED;
         n++;
         download_row = n;
         lines[n] = "Download queue";
@@ -385,6 +401,8 @@ static int categories_screen(const ese_category_entry_t *cats, int cat_count,
                 return CATEGORY_SEARCH;
             if (sel == queue_all_row)
                 return CATEGORY_QUEUE_ALL;
+            if (sel == updates_row && stale_count)
+                return CATEGORY_QUEUE_UPDATES;
             if (sel == download_row && queue->count)
                 return CATEGORY_DOWNLOAD_QUEUE;
             if (sel == clear_row && queue->count)
@@ -422,6 +440,7 @@ static int load_song_page(const ese_category_entry_t *cat, const char *query,
                           ese_song_entry_t songs[ESE_SONG_PAGE_MAX],
                           int indexes[ESE_SONG_PAGE_MAX],
                           unsigned char cached[ESE_SONG_PAGE_MAX],
+                          unsigned char stale[ESE_SONG_PAGE_MAX],
                           int *out_total) {
     int searching = query && query[0];
     if (searching)
@@ -436,12 +455,15 @@ static int load_song_page(const ese_category_entry_t *cat, const char *query,
     for (int i = 0; i < ESE_SONG_PAGE_MAX; i++) {
         indexes[i] = -1;
         cached[i] = 0;
+        stale[i] = 0;
     }
     for (int i = 0; i < count; i++) {
         indexes[i] = ese_song_library_find_index(songs[i].id);
         cached[i] = indexes[i] >= 0 ?
             (unsigned char)ese_song_library_is_cached_at(indexes[i]) :
             (unsigned char)ese_song_is_cached(songs[i].id);
+        stale[i] = (cached[i] && indexes[i] >= 0) ?
+            (unsigned char)ese_song_library_is_stale_at(indexes[i]) : 0;
     }
     if (searching)
         search_busy_end();
@@ -476,6 +498,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
     ese_song_entry_t songs[ESE_SONG_PAGE_MAX];
     int indexes[ESE_SONG_PAGE_MAX];
     unsigned char cached[ESE_SONG_PAGE_MAX];
+    unsigned char stale[ESE_SONG_PAGE_MAX];
     static char lbuf[SONG_ROWS_MAX][ESE_SONG_TITLE_MAX];
     const char *lines[SONG_ROWS_MAX];
     const char *vals[SONG_ROWS_MAX];
@@ -487,7 +510,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
     int is_search = query && query[0];
 
     int count = load_song_page(cat, query, offset, songs, indexes, cached,
-                               &total);
+                               stale, &total);
     if (count <= 0) {
         taiko_overlay_show_prompt(is_search ? "No matching songs" :
                                                "No songs in category");
@@ -507,7 +530,15 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
             snprintf(lbuf[n], sizeof lbuf[n], "%s",
                      song_overlay_title(&songs[i]));
             lines[n] = lbuf[n];
-            if (cached[i]) {
+            if (cached[i] && stale[i]) {
+                if (queue_contains(queue, indexes[i])) {
+                    vals[n] = "queued";
+                    kinds[n] = TAIKO_OVL_ROW_TOGGLE_ON | song_source_kind(&songs[i]);
+                } else {
+                    vals[n] = "update";
+                    kinds[n] = TAIKO_OVL_ROW_NORMAL | song_source_kind(&songs[i]);
+                }
+            } else if (cached[i]) {
                 vals[n] = "downloaded";
                 kinds[n] = TAIKO_OVL_ROW_DISABLED | song_source_kind(&songs[i]);
             } else if (queue_contains(queue, indexes[i])) {
@@ -554,7 +585,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
 
         if (edge & MENU_BTN_CROSS) {
             if (sel < count) {
-                if (cached[sel]) {
+                if (cached[sel] && !stale[sel]) {
                     taiko_overlay_show_prompt("Already downloaded");
                 } else if (indexes[sel] >= 0) {
                     queue_set(queue, indexes[sel],
@@ -576,7 +607,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
                 offset -= ESE_SONG_PAGE_MAX;
                 if (offset < 0) offset = 0;
                 count = load_song_page(cat, query, offset, songs, indexes,
-                                       cached, &total);
+                                       cached, stale, &total);
                 sel = page_nav_selection(count, is_search, offset > 0,
                                          offset + count < total, 0);
                 if (sel < 0) sel = 0;
@@ -584,7 +615,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
             } else if (sel == next_row) {
                 offset += ESE_SONG_PAGE_MAX;
                 count = load_song_page(cat, query, offset, songs, indexes,
-                                       cached, &total);
+                                       cached, stale, &total);
                 sel = page_nav_selection(count, is_search, offset > 0,
                                          offset + count < total, 1);
                 if (sel < 0) sel = 0;
@@ -636,7 +667,10 @@ void custom_song_launcher_run(void) {
     sys_timer_usleep(SETTLE_US);
     (void)menu_pad_pressed();
 
-    /* 3. Real menu. */
+    /* 3. Real menu. Re-sync the library on every open (hash-gated: one cheap
+     * request when unchanged) so songs added to the server while the machine
+     * runs show up without a reboot. */
+    ese_library_sync();
     int cat_count = ese_song_fetch_categories(cats, ESE_CATEGORY_LIST_MAX);
     if (cat_count > 0 && queue_init(&queue)) {
         for (;;) {
@@ -652,6 +686,18 @@ void custom_song_launcher_run(void) {
                 char msg[64];
                 queue_set_category(&queue, -1, 1);
                 snprintf(msg, sizeof msg, "Queued %d songs", queue.count - before);
+                taiko_overlay_show_prompt(msg);
+                continue;
+            }
+            if (action == CATEGORY_QUEUE_UPDATES) {
+                int before = queue.count;
+                char msg[64];
+                for (int i = 0; i < queue.library_count; i++) {
+                    if (ese_song_library_is_stale_at(i))
+                        queue_set(&queue, i, 1);
+                }
+                snprintf(msg, sizeof msg, "Queued %d updates",
+                         queue.count - before);
                 taiko_overlay_show_prompt(msg);
                 continue;
             }

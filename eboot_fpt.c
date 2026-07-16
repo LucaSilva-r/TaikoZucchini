@@ -53,6 +53,8 @@ static uintptr_t fpt_total_size(uint32_t version, uint32_t slots) {
         size += sizeof(uint32_t);
     if (version >= 7u)
         size += sizeof(taiko_song_loader_manifest_t);
+    if (version >= 9u)
+        size += (3u + 2u * TAIKO_SONG_NATIVE_COUNT) * sizeof(uint32_t);
     return size;
 }
 
@@ -119,6 +121,51 @@ int taiko_fpt_publish_serial(const char *serial12) {
         cell[i * 2]     = 0x00;
         cell[i * 2 + 1] = (uint8_t)serial12[i];
     }
+    return 1;
+}
+
+int taiko_fpt_publish_ssn_basic_lookup(uint32_t detour_code) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 9u)
+        return 0;
+    *(volatile uint32_t *)&t->ssn_basic_lookup_code = detour_code;
+    __asm__ volatile("sync" ::: "memory");
+    return 1;
+}
+
+int taiko_fpt_publish_ssn_texretr(uint32_t detour_code) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 9u)
+        return 0;
+    *(volatile uint32_t *)&t->ssn_texretr_code = detour_code;
+    __asm__ volatile("sync" ::: "memory");
+    return 1;
+}
+
+int taiko_fpt_publish_ssn_listbuild(uint32_t hook_opd) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 9u)
+        return 0;
+    *(volatile uint32_t *)&t->ssn_listbuild_hook_opd = hook_opd;
+    __asm__ volatile("sync" ::: "memory");
+    return 1;
+}
+
+uint32_t taiko_fpt_ssn_native_orig(uint32_t index) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 9u || index >= TAIKO_SONG_NATIVE_COUNT)
+        return 0;
+    return t->ssn_native_orig_opd[index];
+}
+
+int taiko_fpt_publish_ssn_native(uint32_t index, uint32_t hook_opd) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 9u || index >= TAIKO_SONG_NATIVE_COUNT)
+        return 0;
+    if (!t->ssn_native_orig_opd[index])
+        return 0;
+    *(volatile uint32_t *)&t->ssn_native_hook_opd[index] = hook_opd;
+    __asm__ volatile("sync" ::: "memory");
     return 1;
 }
 

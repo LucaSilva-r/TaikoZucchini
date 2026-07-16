@@ -837,6 +837,321 @@ static int patch_result_table_null_guard(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     return 0;
 }
 
+/* --- songselect hook trampolines (FPT v9) ---------------------------------
+ * Baked equivalents of the two runtime .text pokes in hooks/songselect_natives
+ * (install_basic_lookup_hook / install_e46_listbuild_bridge). Runtime pokes
+ * need sys_dbg_write_process_memory, which HEN / lv2-locked consoles lack, so
+ * customs silently vanished from song select there. The baked trampolines
+ * dispatch through FPT v9 cells the sprx publishes with plain data stores;
+ * while a cell is zero the game takes its original path. */
+
+static uint32_t ppc_lis(unsigned rd, uint32_t va) {
+    return 0x3C000000u | ((rd & 31u) << 21) | ((va >> 16) & 0xFFFFu);
+}
+
+static uint32_t ppc_ori_lo(unsigned rd, uint32_t va) {
+    return 0x60000000u | ((rd & 31u) << 21) | ((rd & 31u) << 16) |
+           (va & 0xFFFFu);
+}
+
+static uint32_t ppc_lwz(unsigned rd, int16_t off, unsigned ra) {
+    return 0x80000000u | ((rd & 31u) << 21) | ((ra & 31u) << 16) |
+           (uint16_t)off;
+}
+
+static uint32_t ppc_mr(unsigned rd, unsigned rs) {
+    return 0x7C000378u | ((rs & 31u) << 21) | ((rd & 31u) << 16) |
+           ((rs & 31u) << 11);
+}
+
+/* Basic-metadata lookup: branch at the function entry into a trampoline that
+ * calls the sprx detour (raw code address in the FPT cell) or, while the cell
+ * is zero, replays the overwritten prologue instruction and resumes. The
+ * detour itself replays the prologue on its miss path, matching the runtime
+ * hook's contract. Clobbers r12/cr7/ctr, all volatile at function entry. */
+static int patch_ssn_basic_lookup(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                  uint16_t phnum, uint32_t fpt_va,
+                                  const taiko_song_loader_manifest_t *m,
+                                  uint64_t tramp_off, uint32_t tramp_va,
+                                  uint64_t next_load_off,
+                                  uint64_t *append_end) {
+    enum { TRAMP_WORDS = 9 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    uint64_t entry_off = 0;
+    uint32_t branch = 0;
+    uint32_t resume = 0;
+    uint32_t cell_va = fpt_va +
+        (uint32_t)offsetof(taiko_fpt_t, ssn_basic_lookup_code);
+
+    if (!m || !(m->capabilities & TAIKO_SONG_CAP_METADATA) ||
+        !m->basic_lookup_entry || !m->basic_lookup_original ||
+        !m->basic_lookup_resume)
+        return -8;
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+    if (va_to_off(ctx, phdrs, phnum, m->basic_lookup_entry, &entry_off) != 0 ||
+        entry_off + 4u > ctx->buf_len)
+        return -3;
+    if (load_be32(ctx->buf + entry_off) != m->basic_lookup_original) {
+        dbg_print_hex32("[patch] ssn basic entry mismatch",
+                        load_be32(ctx->buf + entry_off));
+        return -4;
+    }
+    if (!encode_relative_b(m->basic_lookup_entry, tramp_va, &branch))
+        return -5;
+    if (!encode_relative_b(tramp_va + 0x20u, m->basic_lookup_resume,
+                           &resume))
+        return -6;
+
+    uint8_t *t = ctx->buf + tramp_off;
+    store_be32(t + 0x00, ppc_lis(12u, cell_va));         /* lis r12,hi(cell)   */
+    store_be32(t + 0x04, ppc_ori_lo(12u, cell_va));      /* ori r12,r12,lo     */
+    store_be32(t + 0x08, ppc_lwz(12u, 0, 12u));          /* lwz r12,0(r12)     */
+    store_be32(t + 0x0C, 0x2F8C0000u);                   /* cmpwi cr7,r12,0    */
+    store_be32(t + 0x10, 0x419E000Cu);                   /* beq cr7,original   */
+    store_be32(t + 0x14, 0x7D8903A6u);                   /* mtctr r12          */
+    store_be32(t + 0x18, 0x4E800420u);                   /* bctr -> detour     */
+    store_be32(t + 0x1C, m->basic_lookup_original);      /* original prologue  */
+    store_be32(t + 0x20, resume);                        /* b entry+4          */
+    store_be32(ctx->buf + entry_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+
+    dbg_print("[patch] ssn basic lookup trampoline\n");
+    dbg_print_hex32("[patch] ssn basic tramp va", tramp_va);
+    dbg_print_hex32("[patch] ssn basic cell", cell_va);
+    return 0;
+}
+
+/* Texture-retrieval lookup: identical shape to the basic-lookup trampoline,
+ * dispatching through the ssn_texretr_code cell. The detour replays the
+ * (relocatable) overwritten first instruction itself. */
+static int patch_ssn_texretr(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                             uint16_t phnum, uint32_t fpt_va,
+                             const taiko_song_loader_manifest_t *m,
+                             uint64_t tramp_off, uint32_t tramp_va,
+                             uint64_t next_load_off,
+                             uint64_t *append_end) {
+    enum { TRAMP_WORDS = 9 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    uint64_t entry_off = 0;
+    uint32_t branch = 0;
+    uint32_t resume = 0;
+    uint32_t cell_va = fpt_va +
+        (uint32_t)offsetof(taiko_fpt_t, ssn_texretr_code);
+
+    if (!m || !(m->capabilities & TAIKO_SONG_CAP_TEXTURES) ||
+        !m->texture_lookup_entry || !m->texture_lookup_original ||
+        !m->texture_lookup_resume)
+        return -8;
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+    if (va_to_off(ctx, phdrs, phnum, m->texture_lookup_entry,
+                  &entry_off) != 0 ||
+        entry_off + 4u > ctx->buf_len)
+        return -3;
+    if (load_be32(ctx->buf + entry_off) != m->texture_lookup_original) {
+        dbg_print_hex32("[patch] ssn texretr entry mismatch",
+                        load_be32(ctx->buf + entry_off));
+        return -4;
+    }
+    if (!encode_relative_b(m->texture_lookup_entry, tramp_va, &branch))
+        return -5;
+    if (!encode_relative_b(tramp_va + 0x20u, m->texture_lookup_resume,
+                           &resume))
+        return -6;
+
+    uint8_t *t = ctx->buf + tramp_off;
+    store_be32(t + 0x00, ppc_lis(12u, cell_va));         /* lis r12,hi(cell)   */
+    store_be32(t + 0x04, ppc_ori_lo(12u, cell_va));      /* ori r12,r12,lo     */
+    store_be32(t + 0x08, ppc_lwz(12u, 0, 12u));          /* lwz r12,0(r12)     */
+    store_be32(t + 0x0C, 0x2F8C0000u);                   /* cmpwi cr7,r12,0    */
+    store_be32(t + 0x10, 0x419E000Cu);                   /* beq cr7,original   */
+    store_be32(t + 0x14, 0x7D8903A6u);                   /* mtctr r12          */
+    store_be32(t + 0x18, 0x4E800420u);                   /* bctr -> detour     */
+    store_be32(t + 0x1C, m->texture_lookup_original);    /* original instr     */
+    store_be32(t + 0x20, resume);                        /* b resume           */
+    store_be32(ctx->buf + entry_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+
+    dbg_print("[patch] ssn texretr trampoline\n");
+    dbg_print_hex32("[patch] ssn texretr tramp va", tramp_va);
+    return 0;
+}
+
+/* Native registration table: rewire each resolved row's OPD pointer (RX data,
+ * unwritable at runtime on HEN) to a baked dispatch stub. The stub calls the
+ * hook OPD published in ssn_native_hook_opd[i], or the original OPD while the
+ * cell is zero. The original OPD address is saved into ssn_native_orig_opd[i]
+ * so the sprx can chain to the original without reading the (rewired) row. */
+static int patch_ssn_native_table(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                  uint16_t phnum, uint32_t fpt_va,
+                                  const taiko_song_loader_manifest_t *m,
+                                  uint64_t tramp_off, uint32_t tramp_va,
+                                  uint64_t next_load_off,
+                                  uint64_t *append_end) {
+    enum { STUB_WORDS = 11 };
+    enum { STUB_BYTES = STUB_WORDS * 4 + 8 }; /* code + trailing OPD */
+    uint64_t cur_off = tramp_off;
+    uint32_t cur_va = tramp_va;
+    int baked = 0;
+
+    if (!m || !(m->capabilities & TAIKO_SONG_CAP_NATIVE_TABLE))
+        return -8;
+
+    uint64_t hook_cells_off = 0;
+    uint64_t orig_cells_off = 0;
+    if (va_to_off(ctx, phdrs, phnum,
+                  fpt_va + (uint32_t)offsetof(taiko_fpt_t,
+                                              ssn_native_hook_opd),
+                  &hook_cells_off) != 0 ||
+        va_to_off(ctx, phdrs, phnum,
+                  fpt_va + (uint32_t)offsetof(taiko_fpt_t,
+                                              ssn_native_orig_opd),
+                  &orig_cells_off) != 0)
+        return -9;
+
+    for (uint32_t i = 0; i < TAIKO_SONG_NATIVE_COUNT; i++) {
+        uint32_t row_va = m->native_slots[i];
+        uint64_t row_off = 0;
+        uint64_t opd_off = 0;
+        if (!row_va)
+            continue;
+        if (va_to_off(ctx, phdrs, phnum, row_va, &row_off) != 0 ||
+            row_off + 4u > ctx->buf_len)
+            continue;
+        uint32_t orig_opd = load_be32(ctx->buf + row_off);
+        if (!orig_opd ||
+            va_to_off(ctx, phdrs, phnum, orig_opd, &opd_off) != 0 ||
+            opd_off + 8u > ctx->buf_len)
+            continue;
+
+        uint64_t stub_off = align_u64(cur_off, 8);
+        uint32_t stub_va = cur_va + (uint32_t)(stub_off - cur_off);
+        uint64_t stub_end = stub_off + STUB_BYTES;
+        if (stub_end > ctx->buf_len)
+            return -1;
+        if (next_load_off && stub_end > next_load_off)
+            return -2;
+
+        uint32_t cell_va = fpt_va +
+            (uint32_t)offsetof(taiko_fpt_t, ssn_native_hook_opd) + i * 4u;
+        uint32_t opd_va = stub_va + STUB_WORDS * 4u;
+        uint32_t orig_toc = load_be32(ctx->buf + opd_off + 4u);
+
+        uint8_t *t = ctx->buf + stub_off;
+        store_be32(t + 0x00, ppc_lis(11u, cell_va));     /* lis r11,hi(cell)  */
+        store_be32(t + 0x04, ppc_ori_lo(11u, cell_va));  /* ori r11,r11,lo    */
+        store_be32(t + 0x08, ppc_lwz(11u, 0, 11u));      /* lwz r11,0(r11)    */
+        store_be32(t + 0x0C, 0x2F8B0000u);               /* cmpwi cr7,r11,0   */
+        store_be32(t + 0x10, 0x409E000Cu);               /* bne cr7,dispatch  */
+        store_be32(t + 0x14, ppc_lis(11u, orig_opd));    /* lis r11,hi(orig)  */
+        store_be32(t + 0x18, ppc_ori_lo(11u, orig_opd)); /* ori r11,r11,lo    */
+        store_be32(t + 0x1C, ppc_lwz(12u, 0, 11u));      /* lwz r12,0(r11)    */
+        store_be32(t + 0x20, ppc_lwz(2u, 4, 11u));       /* lwz r2,4(r11)     */
+        store_be32(t + 0x24, 0x7D8903A6u);               /* mtctr r12         */
+        store_be32(t + 0x28, 0x4E800420u);               /* bctr (tail call)  */
+        store_be32(t + 0x2C, stub_va);                   /* stub OPD: code    */
+        store_be32(t + 0x30, orig_toc);                  /* stub OPD: toc     */
+
+        store_be32(ctx->buf + row_off, opd_va);
+        store_be32(ctx->buf + orig_cells_off + i * 4u, orig_opd);
+        store_be32(ctx->buf + hook_cells_off + i * 4u, 0);
+
+        cur_off = stub_end;
+        cur_va = stub_va + STUB_BYTES;
+        baked++;
+    }
+
+    if (append_end && *append_end < cur_off)
+        *append_end = cur_off;
+
+    dbg_print_hex32("[patch] ssn native rows baked", (uint32_t)baked);
+    return baked > 0 ? 0 : -10;
+}
+
+/* List-build injection: replace the resolved NOP callsite with a branch into
+ * a trampoline reproducing the runtime bridge (owner/tempvec args, call
+ * through the hook OPD, TOC restore), guarded by the FPT cell. The skip path
+ * only clobbers r11/cr7, both dead across the callsite (the published-path
+ * clobber set is a superset and the runtime bridge already relied on it). */
+static int patch_ssn_listbuild_bridge(self_ctx_t *ctx, elf64_phdr_t *phdrs,
+                                      uint16_t phnum, uint32_t fpt_va,
+                                      const taiko_song_loader_manifest_t *m,
+                                      uint64_t tramp_off, uint32_t tramp_va,
+                                      uint64_t next_load_off,
+                                      uint64_t *append_end) {
+    enum { TRAMP_WORDS = 16 };
+    uint64_t tramp_end = tramp_off + TRAMP_WORDS * 4u;
+    uint64_t callsite_off = 0;
+    uint32_t branch = 0;
+    uint32_t back = 0;
+    uint32_t cell_va = fpt_va +
+        (uint32_t)offsetof(taiko_fpt_t, ssn_listbuild_hook_opd);
+
+    if (!m || !(m->capabilities & TAIKO_SONG_CAP_INJECTION) ||
+        !m->inject_callsite || !m->inject_return ||
+        m->inject_owner_reg > 31u)
+        return -8;
+    if (tramp_end > ctx->buf_len)
+        return -1;
+    if (next_load_off && tramp_end > next_load_off)
+        return -2;
+    if (va_to_off(ctx, phdrs, phnum, m->inject_callsite, &callsite_off) != 0 ||
+        callsite_off + 4u > ctx->buf_len)
+        return -3;
+    if (load_be32(ctx->buf + callsite_off) != 0x60000000u) {
+        dbg_print_hex32("[patch] ssn listbuild callsite mismatch",
+                        load_be32(ctx->buf + callsite_off));
+        return -4;
+    }
+    if (!encode_relative_b(m->inject_callsite, tramp_va, &branch))
+        return -5;
+    if (!encode_relative_b(tramp_va + 0x38u, m->inject_return, &back))
+        return -6;
+
+    uint32_t back_skip = 0;
+    if (!encode_relative_b(tramp_va + 0x3Cu, m->inject_return, &back_skip))
+        return -7;
+
+    unsigned owner = m->inject_owner_reg;
+    uint8_t *t = ctx->buf + tramp_off;
+    store_be32(t + 0x00, ppc_lis(11u, cell_va));          /* lis r11,hi(cell)  */
+    store_be32(t + 0x04, ppc_ori_lo(11u, cell_va));       /* ori r11,r11,lo    */
+    store_be32(t + 0x08, ppc_lwz(11u, 0, 11u));           /* lwz r11,0(r11)    */
+    store_be32(t + 0x0C, 0x2F8B0000u);                    /* cmpwi cr7,r11,0   */
+    store_be32(t + 0x10, 0x419E002Cu);                    /* beq cr7,skip      */
+    store_be32(t + 0x14, ppc_mr(3u, owner));              /* mr r3,owner       */
+    store_be32(t + 0x18, 0x38810000u |
+                         ((uint16_t)(int16_t)m->inject_temp_sp_off));
+                                                          /* addi r4,r1,tempsp */
+    store_be32(t + 0x1C, ppc_mr(5u, owner));              /* mr r5,owner       */
+    store_be32(t + 0x20, ppc_lwz(12u, 0, 11u));           /* lwz r12,0(r11)    */
+    store_be32(t + 0x24, ppc_lwz(2u, 4, 11u));            /* lwz r2,4(r11)     */
+    store_be32(t + 0x28, 0x7D8903A6u);                    /* mtctr r12         */
+    store_be32(t + 0x2C, 0x4E800421u);                    /* bctrl -> hook     */
+    store_be32(t + 0x30, ppc_lis(2u, m->songselect_toc)); /* lis r2,hi(toc)    */
+    store_be32(t + 0x34, ppc_ori_lo(2u, m->songselect_toc)); /* ori r2,lo      */
+    store_be32(t + 0x38, back);                           /* b inject_return   */
+    store_be32(t + 0x3C, back_skip);                      /* skip: b return    */
+    store_be32(ctx->buf + callsite_off, branch);
+
+    if (append_end && *append_end < tramp_end)
+        *append_end = tramp_end;
+
+    dbg_print("[patch] ssn listbuild trampoline\n");
+    dbg_print_hex32("[patch] ssn listbuild tramp va", tramp_va);
+    dbg_print_hex32("[patch] ssn listbuild cell", cell_va);
+    return 0;
+}
+
 static void update_self_section_size(self_ctx_t *ctx, uint16_t ph_index,
                                      uint64_t old_size, uint64_t new_size) {
     if (!ctx || !ctx->si)
@@ -1158,6 +1473,50 @@ int sprx_loader_patch_apply(self_ctx_t *ctx, const char *sprx_path) {
     if (result_rc != 0)
         dbg_print_hex32("[patch] result table guard skipped",
                         (uint32_t)result_rc);
+
+    uint64_t ssn_basic_off = align_u64(append_end, 4);
+    uint32_t ssn_basic_va =
+        (uint32_t)(payload_va + (ssn_basic_off - payload_off));
+    int ssn_basic_rc = patch_ssn_basic_lookup(ctx, phdrs, phnum, fpt_va,
+                                              song_manifest,
+                                              ssn_basic_off, ssn_basic_va,
+                                              next_load_off, &append_end);
+    if (ssn_basic_rc != 0)
+        dbg_print_hex32("[patch] ssn basic lookup skipped",
+                        (uint32_t)ssn_basic_rc);
+
+    uint64_t ssn_lb_off = align_u64(append_end, 4);
+    uint32_t ssn_lb_va =
+        (uint32_t)(payload_va + (ssn_lb_off - payload_off));
+    int ssn_lb_rc = patch_ssn_listbuild_bridge(ctx, phdrs, phnum, fpt_va,
+                                               song_manifest,
+                                               ssn_lb_off, ssn_lb_va,
+                                               next_load_off, &append_end);
+    if (ssn_lb_rc != 0)
+        dbg_print_hex32("[patch] ssn listbuild bridge skipped",
+                        (uint32_t)ssn_lb_rc);
+
+    uint64_t ssn_tex_off = align_u64(append_end, 4);
+    uint32_t ssn_tex_va =
+        (uint32_t)(payload_va + (ssn_tex_off - payload_off));
+    int ssn_tex_rc = patch_ssn_texretr(ctx, phdrs, phnum, fpt_va,
+                                       song_manifest,
+                                       ssn_tex_off, ssn_tex_va,
+                                       next_load_off, &append_end);
+    if (ssn_tex_rc != 0)
+        dbg_print_hex32("[patch] ssn texretr skipped",
+                        (uint32_t)ssn_tex_rc);
+
+    uint64_t ssn_nat_off = align_u64(append_end, 8);
+    uint32_t ssn_nat_va =
+        (uint32_t)(payload_va + (ssn_nat_off - payload_off));
+    int ssn_nat_rc = patch_ssn_native_table(ctx, phdrs, phnum, fpt_va,
+                                            song_manifest,
+                                            ssn_nat_off, ssn_nat_va,
+                                            next_load_off, &append_end);
+    if (ssn_nat_rc != 0)
+        dbg_print_hex32("[patch] ssn native table skipped",
+                        (uint32_t)ssn_nat_rc);
 
     uint32_t resume_va = main_va + 16u;
     uint32_t main_w3 = load_be32(ctx->buf + main_off + 12u);

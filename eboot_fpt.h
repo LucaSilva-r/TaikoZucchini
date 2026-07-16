@@ -6,7 +6,7 @@
 #include "song_loader_manifest.h"
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 8u           /* v8: multi-generation song manifest */
+#define TAIKO_FPT_VERSION 9u           /* v9: songselect hook dispatch cells */
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
 
 /* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the
@@ -97,6 +97,20 @@ typedef struct {
     /* Kept as reserved storage so every pre-v7 field retains its offset. */
     uint32_t song_select_reserved;
     taiko_song_loader_manifest_t song_loader;
+    /* v9: songselect hook dispatch cells. The patcher bakes text-side
+     * trampolines/stubs that call through these; the sprx publishes them with
+     * plain data stores at boot. Song injection therefore needs no runtime
+     * .text writes (sys_dbg_write_process_memory is unavailable on HEN /
+     * lv2-locked consoles). Zero = hook unpublished, baked code takes the
+     * original path. */
+    uint32_t ssn_basic_lookup_code;  /* raw code address of the lookup detour */
+    uint32_t ssn_texretr_code;       /* raw code address of the texretr detour */
+    uint32_t ssn_listbuild_hook_opd; /* OPD address of hk_e46_listbuild_bridge */
+    /* Native registration table dispatch: hook OPDs published at runtime, and
+     * the row's original OPD saved by the patcher when it rewired the row to
+     * its baked dispatch stub (0 = row not baked in this EBOOT). */
+    uint32_t ssn_native_hook_opd[TAIKO_SONG_NATIVE_COUNT];
+    uint32_t ssn_native_orig_opd[TAIKO_SONG_NATIVE_COUNT];
 } taiko_fpt_t;
 
 /* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
@@ -114,5 +128,15 @@ uintptr_t taiko_fpt_table_address(void);
 uint32_t taiko_fpt_version_seen(void);
 int taiko_fpt_available(void);
 const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void);
+/* Publish the v9 songselect hook cells. Return 0 (and do nothing) on tables
+ * older than v9 — callers then fall back to runtime text pokes. */
+int taiko_fpt_publish_ssn_basic_lookup(uint32_t detour_code);
+int taiko_fpt_publish_ssn_texretr(uint32_t detour_code);
+int taiko_fpt_publish_ssn_listbuild(uint32_t hook_opd);
+/* Original OPD the patcher saved when baking native row `index` (0 when the
+ * row was not baked). Read this and store it BEFORE publishing the hook so a
+ * dispatched call can never see a hook without its original. */
+uint32_t taiko_fpt_ssn_native_orig(uint32_t index);
+int taiko_fpt_publish_ssn_native(uint32_t index, uint32_t hook_opd);
 
 #endif

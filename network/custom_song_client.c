@@ -273,9 +273,11 @@ static int                  g_lib_cat_count;
 static ese_song_entry_t    *g_lib_songs;     /* malloc[g_lib_song_count] */
 static short               *g_lib_song_cat;  /* malloc[]: index into g_lib_cats */
 static unsigned char       *g_lib_cached;    /* malloc[]: local manifest exists */
+static unsigned char       *g_lib_stale;     /* malloc[]: cached but rev differs */
 static int                  g_lib_song_count;
 static int                  g_lib_loaded;
 static int                  g_lib_cache_scanned;
+static int                  g_lib_stale_scanned;
 static char                 g_lib_hash[ESE_LIB_HASH_MAX];
 
 static int lib_cat_index(const char *id) {
@@ -315,10 +317,12 @@ static void lib_free(void) {
     free(g_lib_songs);     g_lib_songs = NULL;
     free(g_lib_song_cat);  g_lib_song_cat = NULL;
     free(g_lib_cached);    g_lib_cached = NULL;
+    free(g_lib_stale);     g_lib_stale = NULL;
     g_lib_song_count = 0;
     g_lib_cat_count = 0;
     g_lib_loaded = 0;
     g_lib_cache_scanned = 0;
+    g_lib_stale_scanned = 0;
     g_lib_hash[0] = 0;
 }
 
@@ -366,6 +370,33 @@ static int lib_find_song_index(const char *song_id) {
     return -1;
 }
 
+/* 1 when the cached manifest's source_hash starts with the library rev.
+ * Unknown (no rev, unreadable manifest) counts as a match so old indexes or
+ * odd local state never trigger spurious mass re-downloads. */
+static int local_manifest_rev_matches(const char *song_id, const char *rev) {
+    char root[192], path[256], lhash[64];
+    size_t mlen = 0;
+    unsigned char *local;
+    size_t rlen;
+
+    if (!rev || !rev[0])
+        return 1;
+    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+        !append_path(path, sizeof path, root, "manifest.json"))
+        return 1;
+    local = read_file_alloc(path, &mlen);
+    if (!local)
+        return 1;
+    lhash[0] = 0;
+    json_get_string_after(local, local + mlen, "\"source_hash\"",
+                          lhash, sizeof lhash);
+    free(local);
+    if (!lhash[0])
+        return 1;
+    rlen = strlen(rev);
+    return strncmp(lhash, rev, rlen) == 0;
+}
+
 static void lib_refresh_cached_flags(void) {
     int fd = -1;
     CellFsDirent de;
@@ -398,6 +429,34 @@ static void lib_refresh_cached_flags(void) {
 
     dbg_print("[ese] cached library songs=");
     dbg_print_hex32("", (uint32_t)cached);
+}
+
+/* Separate from the cached-flags scan on purpose: this reads one manifest per
+ * cached song, which takes seconds on a big library. The song-select injection
+ * path only needs cached flags and must stay fast; only the downloader menu
+ * (stale accessors below) ever pays for this pass. */
+static void lib_refresh_stale_flags(void) {
+    int stale = 0;
+
+    if (!g_lib_loaded || !g_lib_stale)
+        return;
+    if (!g_lib_cache_scanned)
+        lib_refresh_cached_flags();
+    memset(g_lib_stale, 0, (size_t)g_lib_song_count);
+    g_lib_stale_scanned = 1;
+
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (!g_lib_cached[i] || !g_lib_songs[i].rev[0])
+            continue;
+        if (!local_manifest_rev_matches(g_lib_songs[i].id,
+                                        g_lib_songs[i].rev)) {
+            g_lib_stale[i] = 1;
+            stale++;
+        }
+    }
+
+    dbg_print("[ese] stale library songs=");
+    dbg_print_hex32("", (uint32_t)stale);
 }
 
 /* Parse a flat "e:5,n:7,h:9,m:10,x:10" diffs string into canonical star slots
@@ -485,8 +544,13 @@ static int parse_library(const unsigned char *body, size_t len) {
         g_lib_songs = (ese_song_entry_t *)malloc(sizeof(ese_song_entry_t) * (size_t)nsong);
         g_lib_song_cat = (short *)malloc(sizeof(short) * (size_t)nsong);
         g_lib_cached = (unsigned char *)malloc((size_t)nsong);
-        if (!g_lib_songs || !g_lib_song_cat || !g_lib_cached) { lib_free(); return 0; }
+        g_lib_stale = (unsigned char *)malloc((size_t)nsong);
+        if (!g_lib_songs || !g_lib_song_cat || !g_lib_cached || !g_lib_stale) {
+            lib_free();
+            return 0;
+        }
         memset(g_lib_cached, 0, (size_t)nsong);
+        memset(g_lib_stale, 0, (size_t)nsong);
     }
 
     for (p = songs_key; g_lib_song_count < nsong; ) {
@@ -521,6 +585,7 @@ static int parse_library(const unsigned char *body, size_t len) {
         for (int d = 0; d < ESE_DIFF_SLOTS; d++) s->stars[d] = -1;
         if (json_get_string_after(idp, item_end, "\"diffs\"", diffs, sizeof diffs))
             parse_diffs_str(diffs, s->stars);
+        json_get_string_after(idp, item_end, "\"rev\"", s->rev, sizeof s->rev);
         char source[8];
         source[0] = 0;
         if (json_get_string_after(idp, item_end, "\"source\"",
@@ -711,6 +776,32 @@ int ese_song_library_is_cached_at(int library_index) {
     if (!g_lib_cache_scanned)
         lib_refresh_cached_flags();
     return g_lib_cached ? g_lib_cached[library_index] != 0 : 0;
+}
+
+int ese_song_library_is_stale_at(int library_index) {
+    if (!g_lib_loaded || library_index < 0 ||
+        library_index >= g_lib_song_count)
+        return 0;
+    if (!g_lib_stale_scanned)
+        lib_refresh_stale_flags();
+    return g_lib_stale ? g_lib_stale[library_index] != 0 : 0;
+}
+
+int ese_song_library_stale_count(void) {
+    int count = 0;
+
+    if (!g_lib_loaded)
+        return 0;
+    if (!g_lib_stale_scanned)
+        lib_refresh_stale_flags();
+    if (!g_lib_stale)
+        return 0;
+
+    for (int i = 0; i < g_lib_song_count; i++) {
+        if (g_lib_stale[i])
+            count++;
+    }
+    return count;
 }
 
 int ese_song_library_cached_count(void) {
@@ -1172,10 +1263,14 @@ static int write_local_manifest(const char *song_id,
     ok = write_file(path, body, len);
     if (ok) {
         int idx = lib_find_song_index(song_id);
-        if (g_lib_cache_scanned && g_lib_cached && idx >= 0)
+        if (g_lib_cache_scanned && g_lib_cached && idx >= 0) {
             g_lib_cached[idx] = 1;
-        else
+            if (g_lib_stale)
+                g_lib_stale[idx] = 0;
+        } else {
             g_lib_cache_scanned = 0;
+            g_lib_stale_scanned = 0;
+        }
     }
     return ok;
 }
