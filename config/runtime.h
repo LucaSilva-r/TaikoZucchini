@@ -10,9 +10,15 @@
  *
  * Features are boot-only: changes require restart. */
 
+/* Shared config path; also read raw by the connector mgmt poll so the
+ * heartbeat can report current config without a cfg emitter. */
+#define TAIKO_GLOBAL_CONFIG_PATH "/dev_hdd0/plugins/taiko/taiko_config.cfg"
+
 #define TAIKO_REDIRECT_HOST_MAX 64
 #define TAIKO_API_TOKEN_MAX 160
 #define TAIKO_DONGLE_SERIAL_LEN 12  /* 12 ASCII digits, "26841" prefix */
+#define TAIKO_CABINET_ID_LEN 8      /* 8 hex chars, auto-generated first boot */
+#define TAIKO_CABINET_NAME_MAX 32
 #define TAIKO_CHASSIS_FLAG_COUNT 20 /* must match CI_F__COUNT in storage/chassisinfo_schema.h */
 
 typedef struct {
@@ -65,11 +71,22 @@ typedef struct {
     char     online_redirect_host[TAIKO_REDIRECT_HOST_MAX];
     uint16_t online_redirect_port;
 
-    /* Separate endpoint for the TJARepo conversion service. Kept out of
+    /* Separate endpoint for the Connector conversion service. Kept out of
      * online_redirect_host so TaikOnline traffic and song conversion can
      * live on different domains. */
-    char     tjarepo_host[TAIKO_REDIRECT_HOST_MAX];
-    uint16_t tjarepo_port;
+    char     connector_host[TAIKO_REDIRECT_HOST_MAX];
+    uint16_t connector_port;
+
+    /* Seconds the chassisinfo synth waits at boot for the first connector
+     * poll, so config queued while the cabinet was offline applies before
+     * the game reads its operator flags. 0 disables the wait. */
+    uint16_t mgmt_boot_wait;
+
+    /* Stable cabinet identity for the connector. cabinet_id is generated
+     * on first boot (dongle serials collide across cabinets: they all
+     * default to CFG_DONGLE_SERIAL); cabinet_name is operator-chosen. */
+    char     cabinet_id[TAIKO_CABINET_ID_LEN + 1];
+    char     cabinet_name[TAIKO_CABINET_NAME_MAX];
 
     /* Optional override for the baked TaikOnline card issuer bearer token.
      * Empty means use TAIKO_ZUCCHINI_API_TOKEN from the binary. */
@@ -136,5 +153,16 @@ const char *taiko_cfg_dongle_serial(void);
 /* Validate + store a 12-digit dongle serial (must start "26841"). Returns
  * 0 on success, -1 if rejected (g_cfg.dongle_serial left unchanged). */
 int taiko_cfg_set_dongle_serial(const char *s);
+
+/* Apply one key=value through the same section handlers file parsing
+ * uses (identical validation/normalization; bad values are ignored).
+ * Returns 0 when the section name matched, -1 otherwise. Does NOT save;
+ * call taiko_cfg_save() after a batch. Used by the connector mgmt poll. */
+int taiko_cfg_apply_kv(const char *section, const char *key,
+                       const char *value);
+
+/* Returns the persisted cabinet_id, generating (and saving) it on first
+ * call if the config predates cabinet identity. Never empty. */
+const char *taiko_cfg_cabinet_id(void);
 
 #endif

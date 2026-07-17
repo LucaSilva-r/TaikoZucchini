@@ -13,6 +13,11 @@
 #define ESE_COURSE_LABEL_MAX   24
 #define ESE_COURSE_LIST_MAX    8
 
+/* prepare_and_cache result used when Connector has already classified the
+ * conversion as failed/not-found. Retrying the same immutable conversion job
+ * cannot repair it; managed sync should skip it and continue. */
+#define ESE_PREPARE_ERR_SERVER_FAILED (-4)
+
 /* Canonical difficulty slots in the index: Easy,Normal,Hard,Oni,Ura. */
 #define ESE_DIFF_SLOTS 5
 enum {
@@ -53,7 +58,21 @@ typedef struct {
     int stars;
 } ese_course_entry_t;
 
+#include "http_client.h"
+
 int ese_song_service_ready(void);
+/* Suppress overlay cards/prompts during background (mgmt poll) work. */
+void ese_song_client_set_quiet(int quiet);
+/* Restrict conversion/download/cache writes to attract. Used by the managed
+ * background worker; manual picker calls leave this disabled. */
+void ese_song_client_set_attract_only(int attract_only);
+/* Force the next cached/stale query to rescan custom_songs on disk. */
+void ese_library_mark_dirty(void);
+/* Connector request with token/host plumbing and a text/plain body.
+ * Caller owns resp (http_response_free). */
+int ese_api_request_text(const char *method, const char *path,
+                         const void *body, size_t body_len,
+                         http_response_t *resp);
 /* Sync the in-memory library from tjarepo (/library), hash-gated + disk-cached.
  * Returns 1 if a usable library is loaded. Categories/pages are served from it. */
 int ese_library_sync(void);

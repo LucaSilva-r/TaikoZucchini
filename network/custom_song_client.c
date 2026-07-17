@@ -13,10 +13,12 @@
 #include "config.h"
 #include "config/runtime.h"
 #include "debug.h"
+#include "game_state.h"
 #include "http_client.h"
 #include "overlay.h"
+#include "title_prerender.h"
 
-#define ESE_API_CATEGORIES_PATH "/api/tjarepo/songs/categories"
+#define ESE_API_CATEGORIES_PATH "/api/connector/songs/categories"
 #define ESE_CUSTOM_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
 /* Per-request length. Streams straight to disk over ONE keep-alive TLS
  * connection (http_download_ranged), so request the whole asset in one go;
@@ -53,9 +55,28 @@ static void copy_limited(char *out, size_t cap, const char *src,
  * a transient toast while converting/downloading. num/den < 0 = indeterminate
  * (no percentage). ponytail: per-asset/per-poll granularity, no chunk-level
  * progress. */
+/* Background (connector mgmt poll) downloads must not flash overlay cards
+ * mid-gameplay; the in-game picker sets this back to 0 for its own runs. */
+static int g_ese_quiet;
+static volatile int g_ese_attract_only;
+
+void ese_song_client_set_quiet(int quiet) {
+    g_ese_quiet = quiet;
+}
+
+void ese_song_client_set_attract_only(int attract_only) {
+    g_ese_attract_only = attract_only != 0;
+}
+
+static int ese_work_window_open(void) {
+    return !g_ese_attract_only ||
+           taiko_game_state_current() == TAIKO_GAME_STATE_ATTRACT;
+}
+
 static void loading_screen(const char *message, int num, int den) {
     static unsigned spin;            /* advances each indeterminate frame */
     char bar[48];
+    if (g_ese_quiet) return;
     int determinate = (den > 0 && num >= 0);
     int filled = determinate ? num * 20 / den : -1;
     int sweep = determinate ? -1 : (int)(spin++ % 20u);
@@ -93,7 +114,7 @@ static const char *api_token(void) {
 }
 
 int ese_song_service_ready(void) {
-    return g_cfg.tjarepo_host[0] &&
+    return g_cfg.connector_host[0] &&
            token_valid_for_header(api_token());
 }
 
@@ -110,20 +131,22 @@ static int api_request(const char *method, const char *path,
     char headers[256];
     int hn;
 
-    if (!ese_song_service_ready())
+    if (!ese_song_service_ready() || !ese_work_window_open())
         return -1;
     hn = api_headers(headers, sizeof headers);
     if (hn < 0)
         return -1;
 
-    int port = g_cfg.tjarepo_port ? (int)g_cfg.tjarepo_port : 443;
-    return http_request_direct(method, g_cfg.tjarepo_host, port, path,
+    int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
+    return http_request_direct(method, g_cfg.connector_host, port, path,
                                headers, (size_t)hn, NULL, 0, resp);
 }
 
-static int api_request_json(const char *method, const char *path,
-                            const void *body, size_t body_len,
-                            http_response_t *resp) {
+/* Text-body request with the same host/token plumbing; used by the
+ * connector management poll (plain-text protocol, no JSON writer). */
+int ese_api_request_text(const char *method, const char *path,
+                         const void *body, size_t body_len,
+                         http_response_t *resp) {
     char headers[320];
     int hn;
     int extra;
@@ -134,12 +157,35 @@ static int api_request_json(const char *method, const char *path,
     if (hn < 0)
         return -1;
     extra = snprintf(headers + hn, sizeof headers - (size_t)hn,
+                     "Content-Type: text/plain\r\n");
+    if (extra <= 0 || (size_t)extra >= sizeof headers - (size_t)hn)
+        return -1;
+
+    int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
+    return http_request_direct(method, g_cfg.connector_host, port, path,
+                               headers, (size_t)(hn + extra),
+                               body, body_len, resp);
+}
+
+static int api_request_json(const char *method, const char *path,
+                            const void *body, size_t body_len,
+                            http_response_t *resp) {
+    char headers[320];
+    int hn;
+    int extra;
+
+    if (!ese_song_service_ready() || !ese_work_window_open())
+        return -1;
+    hn = api_headers(headers, sizeof headers);
+    if (hn < 0)
+        return -1;
+    extra = snprintf(headers + hn, sizeof headers - (size_t)hn,
                      "Content-Type: application/json\r\n");
     if (extra <= 0 || (size_t)extra >= sizeof headers - (size_t)hn)
         return -1;
 
-    int port = g_cfg.tjarepo_port ? (int)g_cfg.tjarepo_port : 443;
-    return http_request_direct(method, g_cfg.tjarepo_host, port, path,
+    int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
+    return http_request_direct(method, g_cfg.connector_host, port, path,
                                headers, (size_t)(hn + extra),
                                body, body_len, resp);
 }
@@ -324,6 +370,15 @@ static void lib_free(void) {
     g_lib_cache_scanned = 0;
     g_lib_stale_scanned = 0;
     g_lib_hash[0] = 0;
+}
+
+/* Force the next cached/stale query to rescan the custom_songs dirs.
+ * Same two writes write_local_manifest does after a download; safe to
+ * call from the mgmt poll thread (the scan itself runs lazily on the
+ * game thread at the next accessor call). */
+void ese_library_mark_dirty(void) {
+    g_lib_cache_scanned = 0;
+    g_lib_stale_scanned = 0;
 }
 
 static int streq_c(const char *a, const char *b) {
@@ -615,7 +670,7 @@ int ese_library_sync(void) {
     int have_server = 0;
 
     memset(&resp, 0, sizeof resp);
-    if (api_request("GET", "/api/tjarepo/library/hash", &resp) == 0 &&
+    if (api_request("GET", "/api/connector/library/hash", &resp) == 0 &&
         resp.status == 200 && resp.body) {
         const unsigned char *e = resp.body + resp.body_len;
         if (json_get_string_after(resp.body, e, "\"hash\"",
@@ -652,9 +707,10 @@ int ese_library_sync(void) {
         return g_lib_loaded; /* offline, no cache improvement possible */
 
     /* download the full library and refresh the disk cache */
-    taiko_overlay_show_prompt("Syncing song library...");
+    if (!g_ese_quiet)
+        taiko_overlay_show_prompt("Syncing song library...");
     memset(&resp, 0, sizeof resp);
-    int rc = api_request("GET", "/api/tjarepo/library", &resp);
+    int rc = api_request("GET", "/api/connector/library", &resp);
     if (rc != 0 || resp.status != 200 || !resp.body) {
         dbg_print("[ese] library download failed\n");
         http_response_free(&resp);
@@ -1201,6 +1257,10 @@ typedef struct { int fd; int ok; } dl_sink_t;
 static int dl_file_sink(void *vctx, const void *data, size_t len) {
     dl_sink_t *c = (dl_sink_t *)vctx;
     uint64_t wrote = 0;
+    if (!ese_work_window_open()) {
+        c->ok = 0;
+        return -1;
+    }
     if (cellFsWrite(c->fd, data, len, &wrote) != CELL_FS_SUCCEEDED ||
         wrote != len) {
         c->ok = 0;
@@ -1219,7 +1279,7 @@ static int download_asset_chunked(const char *song_id, const char *asset_path) {
         !append_path(dest, sizeof dest, root, asset_path))
         return 0;
     int n = snprintf(path_base, sizeof path_base,
-                     "/api/tjarepo/conversions/%s/assets/%s", song_id, asset_path);
+                     "/api/connector/conversions/%s/assets/%s", song_id, asset_path);
     if (n <= 0 || (size_t)n >= sizeof path_base)
         return 0;
     if (!ese_song_service_ready())
@@ -1234,10 +1294,10 @@ static int download_asset_chunked(const char *song_id, const char *asset_path) {
     }
 
     dl_sink_t sc = { fd, 1 };
-    int port = g_cfg.tjarepo_port ? (int)g_cfg.tjarepo_port : 443;
+    int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
     /* ONE keep-alive TLS connection streams every ranged chunk straight to disk
      * (no per-chunk handshake, no whole-file buffering). */
-    int rc = http_download_ranged(g_cfg.tjarepo_host, port, path_base,
+    int rc = http_download_ranged(g_cfg.connector_host, port, path_base,
                                   headers, (size_t)hn, ESE_DOWNLOAD_CHUNK,
                                   dl_file_sink, &sc);
     cellFsClose(fd);
@@ -1344,7 +1404,7 @@ int ese_song_prepare_batch(const int *library_indexes, int count) {
 
     loading_screen("Starting server conversions...", -1, -1);
     memset(&resp, 0, sizeof resp);
-    ok = api_request_json("POST", "/api/tjarepo/songs/prepare-batch",
+    ok = api_request_json("POST", "/api/connector/songs/prepare-batch",
                           body, len, &resp) == 0 &&
          (resp.status == 200 || resp.status == 202);
     if (!ok)
@@ -1366,7 +1426,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
     unsigned char *ready_body = NULL;
     size_t ready_len = 0;
 
-    if (!song_id || !song_id[0])
+    if (!song_id || !song_id[0] || !ese_work_window_open())
         return -1;
     if (out_course_count)
         *out_course_count = 0;
@@ -1396,7 +1456,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
             http_response_t hr;
             if (lhash[0] &&
                 snprintf(hpath, sizeof hpath,
-                         "/api/tjarepo/songs/%s/hash", song_id) > 0) {
+                         "/api/connector/songs/%s/hash", song_id) > 0) {
                 memset(&hr, 0, sizeof hr);
                 if (api_request("GET", hpath, &hr) == 0 && hr.status == 200 &&
                     hr.body) {
@@ -1427,7 +1487,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
     }
 
     loading_screen("Preparing...", -1, -1);
-    int n = snprintf(path, sizeof path, "/api/tjarepo/songs/%s/prepare",
+    int n = snprintf(path, sizeof path, "/api/connector/songs/%s/prepare",
                      song_id);
     if (n <= 0 || (size_t)n >= sizeof path)
         return -1;
@@ -1460,13 +1520,13 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
             dbg_print(song_id);
             dbg_print("\n");
             http_response_free(&resp);
-            return -4;
+            return ESE_PREPARE_ERR_SERVER_FAILED;
         }
 
         http_response_free(&resp);
         loading_screen("Converting on server...", poll + 1, 45);
         sys_timer_sleep(1);
-        n = snprintf(path, sizeof path, "/api/tjarepo/conversions/%s",
+        n = snprintf(path, sizeof path, "/api/connector/conversions/%s",
                      song_id);
         if (n <= 0 || (size_t)n >= sizeof path)
             return -1;
@@ -1514,6 +1574,12 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
         }
     }
 
+    if (!ese_work_window_open()) {
+        if (ready_body)
+            free(ready_body);
+        return -10;
+    }
+
     if (courses && course_cap > 0 && out_course_count) {
         *out_course_count = parse_courses(ready_body, ready_len,
                                           courses, course_cap);
@@ -1522,5 +1588,10 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
     int ok = write_local_manifest(song_id, ready_body, ready_len);
     if (ready_body)
         free(ready_body);
+    if (ok) {
+        loading_screen("Rendering title textures...", -1, -1);
+        if (taiko_title_prerender_after_download(song_id, title) < 0)
+            return -11;
+    }
     return ok ? 1 : -9;
 }

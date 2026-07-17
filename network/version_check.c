@@ -19,6 +19,7 @@
 #include "custom_song_client.h"
 #include "debug.h"
 #include "http_client.h"
+#include "mgmt_poll.h"
 #include "kb_input.h"
 #include "overlay.h"
 #include "usrdir_path.h"
@@ -567,6 +568,12 @@ static void run_update_check(void) {
 
 static void version_check_thread(uint64_t arg) {
     (void)arg;
+
+    /* Boot-priority connector poll, before the update-check delay, so
+     * remotely queued settings can apply before the game reads its
+     * chassisinfo (the synth gates on taiko_mgmt_first_poll_done). */
+    taiko_mgmt_boot_poll();
+
     sys_timer_sleep(8);
 
 #if TAIKO_UPDATE_LOCAL_TEST
@@ -578,15 +585,20 @@ static void version_check_thread(uint64_t arg) {
 
     if (!wait_for_net_link(20)) {
         dbg_print("[version] no IP after 20s; skipping update check\n");
-        sys_ppu_thread_exit(0);
+    } else {
+        run_update_check();
+
+        /* Warm the custom-song library at boot so opening the overlay is
+         * instant (the sync no longer runs on the overlay-open path). */
+        if (!taiko_mgmt_operation_active()) {
+            dbg_print("[version] warming custom-song library\n");
+            ese_library_sync();
+        }
     }
 
-    run_update_check();
-
-    /* Warm the custom-song library at boot so opening the overlay is instant
-     * (the sync no longer runs on the overlay-open path). */
-    dbg_print("[version] warming custom-song library\n");
-    ese_library_sync();
+    /* Thread becomes the connector management poll loop; never returns
+     * (keeps polling even when the cabinet had no IP at boot). */
+    taiko_mgmt_poll_run();
 
     sys_ppu_thread_exit(0);
 }

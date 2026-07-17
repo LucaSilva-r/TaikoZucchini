@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <cell/fs/cell_fs_file_api.h>
 #include <cell/gcm.h>
 #include <sys/memory.h>
 #include <sys/sys_time.h>
@@ -14,10 +13,12 @@
 #include "eboot_fpt.h"
 #include "icache.h"
 #include "overlay.h"
+#include "title_cache.h"
 #include "title_render.h"
 #include "custom_song_launcher.h"
 #include "network/custom_song_client.h"
 #include "network/extra_scores.h"
+#include "network/mgmt_poll.h"
 #include "song_loader_manifest.h"
 
 static const taiko_song_loader_manifest_t *g_song_manifest;
@@ -272,15 +273,11 @@ typedef int (*nu_tex_info_upload_fn)(uint32_t resource, void *pixels,
 #define SSN_RT_SONG_NAME_H     64u
 #define SSN_RT_SONG_NAME_TRANS_H 104u
 #define SSN_RT_MAX_PIXELS      (SSN_RT_SONG_NAME_W * SSN_RT_SONG_NAME_TRANS_H)
-#define SSN_RT_TITLE_OUTLINE   0x141428u
+#define SSN_OSU_SHORT_FILL_RGB 0xFFD1E6u
 #define SSN_NU_TEX_ALLOC_MGR_CELL (g_song_manifest->texture_alloc_manager_cell)
 
 static uint32_t g_rt_title_pixels[SSN_RT_MAX_PIXELS]
     __attribute__((aligned(128)));
-
-static uint8_t g_rt_cache_fill[SSN_RT_MAX_PIXELS];
-static uint8_t g_rt_cache_outline[SSN_RT_MAX_PIXELS];
-static uint8_t g_rt_cache_payload[SSN_RT_MAX_PIXELS * 4u];
 
 static int ssn_get_board_range(uint32_t idx, uint32_t *start, uint32_t *count);
 static int ssn_is_virtual_song(uint32_t folder, uint32_t local);
@@ -577,6 +574,8 @@ static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
         ese_category_entry_t cat;
 
         if (!ese_song_library_get_cached_at(i, &song, &cat_idx))
+            continue;
+        if (!taiko_mgmt_song_active(song.id))
             continue;
         if (!ese_song_make_short_id(song.id, short_id, sizeof short_id))
             continue;
@@ -1841,348 +1840,6 @@ static const char *ssn_rt_title_text(uint32_t index) {
     return NULL;
 }
 
-#define SSN_RT_CACHE_DIR "/dev_hdd0/plugins/taiko/title_cache"
-#define SSN_RT_CACHE_MAGIC 0x545a5443u /* TZTC */
-#define SSN_RT_CACHE_VERSION 1u
-#define SSN_RT_CACHE_RENDERER_VERSION 7u
-/* osu! converts keep their normal genre outline, but the short carousel title
- * fill is tinted a restrained pink so their origin remains visible in the
- * game's real song-select screen. */
-#define SSN_OSU_SHORT_FILL_RGB 0xFFD1E6u
-
-typedef struct ssn_rt_cache_header {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t renderer_version;
-    uint32_t type;
-    uint32_t width;
-    uint32_t height;
-    uint32_t cache_key_hi;
-    uint32_t cache_key_lo;
-    uint32_t outline_rgb;
-    uint32_t fill_bytes;
-    uint32_t outline_bytes;
-} ssn_rt_cache_header_t;
-
-static uint64_t ssn_hash64_byte(uint64_t h, uint8_t v) {
-    h ^= (uint64_t)v;
-    h *= 1099511628211ULL;
-    return h;
-}
-
-static uint64_t ssn_hash64_u32(uint64_t h, uint32_t v) {
-    h = ssn_hash64_byte(h, (uint8_t)(v >> 24));
-    h = ssn_hash64_byte(h, (uint8_t)(v >> 16));
-    h = ssn_hash64_byte(h, (uint8_t)(v >> 8));
-    h = ssn_hash64_byte(h, (uint8_t)v);
-    return h;
-}
-
-static uint64_t ssn_rt_cache_key(uint32_t type, const char *title,
-                                 uint32_t outline_rgb, uint32_t w,
-                                 uint32_t h) {
-    uint64_t key = 1469598103934665603ULL;
-    const unsigned char *p = (const unsigned char *)title;
-
-    key = ssn_hash64_u32(key, SSN_RT_CACHE_RENDERER_VERSION);
-    key = ssn_hash64_u32(key, type);
-    key = ssn_hash64_u32(key, w);
-    key = ssn_hash64_u32(key, h);
-    key = ssn_hash64_u32(key, outline_rgb & 0xffffffu);
-    while (p && *p)
-        key = ssn_hash64_byte(key, *p++);
-    return key ? key : 1ULL;
-}
-
-static int ssn_rt_cache_ensure_dir(void) {
-    static int ready;
-    int rc;
-
-    if (ready)
-        return 1;
-    rc = cellFsMkdir(SSN_RT_CACHE_DIR, CELL_FS_DEFAULT_CREATE_MODE_1);
-    if (rc == CELL_FS_SUCCEEDED || rc == CELL_FS_EEXIST) {
-        ready = 1;
-        return 1;
-    }
-    dbg_print("[ssn] title cache mkdir failed\n");
-    dbg_print_hex32("  rc", (uint32_t)rc);
-    return 0;
-}
-
-static void ssn_hex_fixed(char *out, uint32_t v, unsigned digits) {
-    static const char hex[] = "0123456789abcdef";
-    for (unsigned i = 0; i < digits; i++) {
-        unsigned shift = (digits - 1u - i) * 4u;
-        out[i] = hex[(v >> shift) & 0xfu];
-    }
-}
-
-static void ssn_dec3_fixed(char *out, uint32_t v) {
-    out[0] = (char)('0' + ((v / 100u) % 10u));
-    out[1] = (char)('0' + ((v / 10u) % 10u));
-    out[2] = (char)('0' + (v % 10u));
-}
-
-static void ssn_rt_cache_path(char *out, unsigned cap, uint64_t cache_key) {
-    const char *dir = SSN_RT_CACHE_DIR;
-    unsigned dir_len;
-    char *p;
-
-    if (!out || cap == 0)
-        return;
-    dir_len = (unsigned)strlen(dir);
-    if (cap < dir_len + 1u + 3u + 1u + 16u + 5u + 1u) {
-        out[0] = '\0';
-        return;
-    }
-    memcpy(out, dir, dir_len);
-    p = out + dir_len;
-    *p++ = '/';
-    ssn_dec3_fixed(p, SSN_RT_CACHE_RENDERER_VERSION);
-    p += 3;
-    *p++ = '_';
-    ssn_hex_fixed(p, (uint32_t)(cache_key >> 32), 8u);
-    p += 8;
-    ssn_hex_fixed(p, (uint32_t)cache_key, 8u);
-    p += 8;
-    memcpy(p, ".tztc", 6);
-}
-
-static uint32_t ssn_rt_cache_rle_encode(const uint8_t *src, uint32_t n,
-                                        uint8_t *dst, uint32_t cap) {
-    uint32_t si = 0;
-    uint32_t di = 0;
-
-    while (si < n) {
-        uint8_t v = src[si];
-        uint32_t run = 1;
-        while (si + run < n && run < 255u && src[si + run] == v)
-            run++;
-        if (di + 2u > cap)
-            return 0;
-        dst[di++] = (uint8_t)run;
-        dst[di++] = v;
-        si += run;
-    }
-    return di;
-}
-
-static int ssn_rt_cache_rle_decode(const uint8_t *src, uint32_t bytes,
-                                   uint8_t *dst, uint32_t n) {
-    uint32_t si = 0;
-    uint32_t di = 0;
-
-    while (si + 1u < bytes && di < n) {
-        uint32_t run = src[si++];
-        uint8_t v = src[si++];
-        if (run == 0 || di + run > n)
-            return 0;
-        memset(dst + di, v, run);
-        di += run;
-    }
-    return si == bytes && di == n;
-}
-
-static uint8_t ssn_clamp_u8_i(int v) {
-    if (v < 0)
-        return 0;
-    if (v > 255)
-        return 255;
-    return (uint8_t)v;
-}
-
-static void ssn_rt_cache_split_planes(const uint32_t *argb, uint32_t pixels,
-                                      uint32_t outline_rgb) {
-    int or_ = (int)((outline_rgb >> 16) & 0xffu);
-    int og_ = (int)((outline_rgb >> 8) & 0xffu);
-    int ob_ = (int)(outline_rgb & 0xffu);
-
-    for (uint32_t i = 0; i < pixels; i++) {
-        uint32_t p = argb[i];
-        int a = (int)((p >> 24) & 0xffu);
-        int r = (int)((p >> 16) & 0xffu);
-        int g = (int)((p >> 8) & 0xffu);
-        int b = (int)(p & 0xffu);
-        int sum = 0;
-        int cnt = 0;
-        int f;
-        int o;
-
-        if (!a) {
-            g_rt_cache_fill[i] = 0;
-            g_rt_cache_outline[i] = 0;
-            continue;
-        }
-        if (or_ < 255) {
-            sum += (255 * r - or_ * a) / (255 - or_);
-            cnt++;
-        }
-        if (og_ < 255) {
-            sum += (255 * g - og_ * a) / (255 - og_);
-            cnt++;
-        }
-        if (ob_ < 255) {
-            sum += (255 * b - ob_ * a) / (255 - ob_);
-            cnt++;
-        }
-        f = cnt ? (sum + cnt / 2) / cnt : a;
-        if (f < 0)
-            f = 0;
-        if (f > a)
-            f = a;
-        o = (f >= 255) ? 0 : ((a - f) * 255 + (255 - f) / 2) / (255 - f);
-        g_rt_cache_fill[i] = ssn_clamp_u8_i(f);
-        g_rt_cache_outline[i] = ssn_clamp_u8_i(o);
-    }
-}
-
-static void ssn_rt_cache_compose_colored_argb(uint32_t *argb, uint32_t pixels,
-                                              uint32_t outline_rgb,
-                                              uint32_t fill_rgb) {
-    uint32_t or_ = (outline_rgb >> 16) & 0xffu;
-    uint32_t og_ = (outline_rgb >> 8) & 0xffu;
-    uint32_t ob_ = outline_rgb & 0xffu;
-    uint32_t fr_ = (fill_rgb >> 16) & 0xffu;
-    uint32_t fg_ = (fill_rgb >> 8) & 0xffu;
-    uint32_t fb_ = fill_rgb & 0xffu;
-
-    for (uint32_t i = 0; i < pixels; i++) {
-        uint32_t f = g_rt_cache_fill[i];
-        uint32_t o = g_rt_cache_outline[i];
-        uint32_t obg = (o * (255u - f) + 127u) / 255u;
-        uint32_t a = f + obg;
-        uint32_t r = (fr_ * f + or_ * obg + 127u) / 255u;
-        uint32_t g = (fg_ * f + og_ * obg + 127u) / 255u;
-        uint32_t b = (fb_ * f + ob_ * obg + 127u) / 255u;
-        if (a > 255u) a = 255u;
-        if (r > 255u) r = 255u;
-        if (g > 255u) g = 255u;
-        if (b > 255u) b = 255u;
-        argb[i] = (a << 24) | (r << 16) | (g << 8) | b;
-    }
-}
-
-static void ssn_rt_cache_compose_argb(uint32_t *argb, uint32_t pixels,
-                                      uint32_t outline_rgb) {
-    ssn_rt_cache_compose_colored_argb(argb, pixels, outline_rgb, 0xffffffu);
-}
-
-static void ssn_rt_tint_fill_argb(uint32_t *argb, uint32_t pixels,
-                                  uint32_t outline_rgb, uint32_t fill_rgb) {
-    ssn_rt_cache_split_planes(argb, pixels, outline_rgb);
-    ssn_rt_cache_compose_colored_argb(argb, pixels, outline_rgb, fill_rgb);
-}
-
-static int ssn_rt_cache_load(uint32_t type, const char *title,
-                             uint32_t outline_rgb, uint32_t w,
-                             uint32_t h, uint32_t *argb) {
-    char path[192];
-    ssn_rt_cache_header_t hdr;
-    uint32_t pixels = w * h;
-    uint64_t cache_key = ssn_rt_cache_key(type, title, outline_rgb, w, h);
-    uint64_t got = 0;
-    int fd = -1;
-    int rc;
-
-    if (!argb || pixels == 0 || pixels > SSN_RT_MAX_PIXELS)
-        return 0;
-    ssn_rt_cache_path(path, sizeof path, cache_key);
-    if (!path[0])
-        return 0;
-    rc = cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0);
-    if (rc != CELL_FS_SUCCEEDED)
-        return 0;
-    rc = cellFsRead(fd, &hdr, sizeof hdr, &got);
-    if (rc != CELL_FS_SUCCEEDED || got != sizeof hdr)
-        goto fail;
-    if (hdr.magic != SSN_RT_CACHE_MAGIC ||
-        hdr.version != SSN_RT_CACHE_VERSION ||
-        hdr.renderer_version != SSN_RT_CACHE_RENDERER_VERSION ||
-        hdr.type != type || hdr.width != w || hdr.height != h ||
-        hdr.cache_key_hi != (uint32_t)(cache_key >> 32) ||
-        hdr.cache_key_lo != (uint32_t)cache_key ||
-        hdr.outline_rgb != outline_rgb ||
-        hdr.fill_bytes > pixels * 2u || hdr.outline_bytes > pixels * 2u ||
-        hdr.fill_bytes + hdr.outline_bytes > sizeof g_rt_cache_payload)
-        goto fail;
-    rc = cellFsRead(fd, g_rt_cache_payload,
-                    hdr.fill_bytes + hdr.outline_bytes, &got);
-    cellFsClose(fd);
-    if (rc != CELL_FS_SUCCEEDED ||
-        got != (uint64_t)(hdr.fill_bytes + hdr.outline_bytes))
-        return 0;
-    if (!ssn_rt_cache_rle_decode(g_rt_cache_payload, hdr.fill_bytes,
-                                 g_rt_cache_fill, pixels))
-        return 0;
-    if (!ssn_rt_cache_rle_decode(g_rt_cache_payload + hdr.fill_bytes,
-                                 hdr.outline_bytes, g_rt_cache_outline, pixels))
-        return 0;
-    ssn_rt_cache_compose_argb(argb, pixels, outline_rgb);
-    return 1;
-
-fail:
-    cellFsClose(fd);
-    return 0;
-}
-
-static void ssn_rt_cache_store(uint32_t type, const char *title,
-                               uint32_t outline_rgb, uint32_t w,
-                               uint32_t h, const uint32_t *argb) {
-    char path[192];
-    ssn_rt_cache_header_t hdr;
-    uint32_t pixels = w * h;
-    uint64_t cache_key = ssn_rt_cache_key(type, title, outline_rgb, w, h);
-    uint32_t fill_bytes;
-    uint32_t outline_bytes;
-    uint64_t wrote = 0;
-    int fd = -1;
-    int rc;
-
-    if (!argb || pixels == 0 || pixels > SSN_RT_MAX_PIXELS)
-        return;
-    if (!ssn_rt_cache_ensure_dir())
-        return;
-    ssn_rt_cache_split_planes(argb, pixels, outline_rgb);
-    fill_bytes = ssn_rt_cache_rle_encode(
-        g_rt_cache_fill, pixels, g_rt_cache_payload,
-        (uint32_t)sizeof g_rt_cache_payload);
-    if (!fill_bytes)
-        return;
-    outline_bytes = ssn_rt_cache_rle_encode(
-        g_rt_cache_outline, pixels, g_rt_cache_payload + fill_bytes,
-        (uint32_t)sizeof g_rt_cache_payload - fill_bytes);
-    if (!outline_bytes)
-        return;
-
-    hdr.magic = SSN_RT_CACHE_MAGIC;
-    hdr.version = SSN_RT_CACHE_VERSION;
-    hdr.renderer_version = SSN_RT_CACHE_RENDERER_VERSION;
-    hdr.type = type;
-    hdr.width = w;
-    hdr.height = h;
-    hdr.cache_key_hi = (uint32_t)(cache_key >> 32);
-    hdr.cache_key_lo = (uint32_t)cache_key;
-    hdr.outline_rgb = outline_rgb;
-    hdr.fill_bytes = fill_bytes;
-    hdr.outline_bytes = outline_bytes;
-
-    ssn_rt_cache_path(path, sizeof path, cache_key);
-    if (!path[0])
-        return;
-    rc = cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
-                    &fd, NULL, 0);
-    if (rc != CELL_FS_SUCCEEDED)
-        return;
-    rc = cellFsWrite(fd, &hdr, sizeof hdr, &wrote);
-    if (rc == CELL_FS_SUCCEEDED && wrote == sizeof hdr)
-        rc = cellFsWrite(fd, g_rt_cache_payload,
-                         fill_bytes + outline_bytes, &wrote);
-    cellFsClose(fd);
-    if (rc != CELL_FS_SUCCEEDED ||
-        wrote != (uint64_t)(fill_bytes + outline_bytes))
-        cellFsUnlink(path);
-}
 
 static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
                                         uint32_t game_toc) {
@@ -2455,22 +2112,22 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
         if (index < g_ssn_virtual_song_count)
             genre_outline = g_ssn_virtual_songs[index].outline;
         if (type == TITLE_TEX_SONGLIST_SHORT) {
-            actual_outline = genre_outline ? genre_outline : SSN_RT_TITLE_OUTLINE;
+            actual_outline = taiko_title_cache_outline(type, genre_outline);
             tint_osu_short = index < g_ssn_virtual_song_count &&
                 g_ssn_virtual_songs[index].song.source == ESE_SONG_SOURCE_OSU;
         }
-        render_key = ssn_rt_cache_key(type, title, actual_outline, w, h);
+        render_key = taiko_title_cache_key(type, title, actual_outline, w, h);
         t0 = (uint64_t)sys_time_get_system_time();
-        if (!ssn_rt_cache_load(type, title, actual_outline, w, h,
-                               g_rt_title_pixels)) {
+        if (!taiko_title_cache_load(type, title, actual_outline, w, h,
+                                    g_rt_title_pixels)) {
             dt = (uint64_t)sys_time_get_system_time() - t0;
             memset(g_rt_title_pixels, 0, w * h * 4u);
             t0 = (uint64_t)sys_time_get_system_time();
             if (!title_tex_render(type, title, g_rt_title_pixels, w, h,
                                   genre_outline))
                 return 0;
-            ssn_rt_cache_store(type, title, actual_outline, w, h,
-                               g_rt_title_pixels);
+            taiko_title_cache_store(type, title, actual_outline, w, h,
+                                    g_rt_title_pixels);
             dt = (uint64_t)sys_time_get_system_time() - t0;
             if (cache_miss_logs < 24u) {
                 cache_miss_logs++;
@@ -2492,8 +2149,9 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
             }
         }
         if (tint_osu_short)
-            ssn_rt_tint_fill_argb(g_rt_title_pixels, w * h, actual_outline,
-                                  SSN_OSU_SHORT_FILL_RGB);
+            taiko_title_cache_tint_fill(g_rt_title_pixels, w * h,
+                                        actual_outline,
+                                        SSN_OSU_SHORT_FILL_RGB);
     }
 
     vtbl = *(volatile uint32_t *)(uintptr_t)res;

@@ -6,6 +6,12 @@ void taiko_overlay_show_message(const char *message);
 void taiko_overlay_show_message_box(const char *title, const char *message);
 void taiko_overlay_show_update_available(const char *latest_version);
 
+/* Discreet attract-screen activity indicator. Callers own individual bits so
+ * independent background jobs cannot hide one another's indicator. */
+#define TAIKO_OVL_ACTIVITY_SONG_SYNC       (1u << 0)
+#define TAIKO_OVL_ACTIVITY_TITLE_PRERENDER (1u << 1)
+void taiko_overlay_activity_set(unsigned activity_bit, int active);
+
 /* Like taiko_overlay_show_message but renders even after the 60s boot
  * window has closed (used for the mid-game "hold L3+R3" card prompt). */
 void taiko_overlay_show_prompt(const char *message);

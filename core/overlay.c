@@ -11,6 +11,7 @@
 
 #include "debug.h"
 #include "eboot_fpt.h"
+#include "game_state.h"
 #include "menu_font_20.h"
 #include "overlay_quad_shaders.h"
 #include "qr_encode.h"
@@ -174,6 +175,7 @@ static volatile int g_card_active;
 static volatile int g_card_cur = -1;
 static volatile int g_card_reading = -1;
 static overlay_card_state_t g_card_state[2];
+static volatile uint32_t g_activity_flags;
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -1136,6 +1138,40 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
     (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
 }
 
+/* A deliberately unobtrusive 10 px orange mark in the lower-right corner.
+ * It is emitted from its own reusable command-buffer slot, so it composes
+ * with the menu/toast call above without touching the game's render state. */
+static void maybe_draw_activity(void *ctx, uint8_t id) {
+    if (!g_activity_flags ||
+        taiko_game_state_current() != TAIKO_GAME_STATE_ATTRACT ||
+        !ensure_overlay_mapped())
+        return;
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end)
+        return;
+
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    int x = (int)b.width - 22;
+    int y = (int)b.height - 22;
+    if (x < 0 || y < 0 ||
+        !append_rect(&cmd, &b, x + 2, y, 6, 2, SWATCH_ORANGE) ||
+        !append_rect(&cmd, &b, x, y + 2, 10, 6, SWATCH_ORANGE) ||
+        !append_rect(&cmd, &b, x + 2, y + 8, 6, 2, SWATCH_ORANGE))
+        return;
+    (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
     if (!g_local_base) {
         CellGcmConfig cfg;
@@ -1151,11 +1187,19 @@ static int hk_flip_command(void *ctx, uint8_t id) {
         maybe_draw_message_box(ctx, id);
     else if (g_toast_frames > 0)
         maybe_draw_toast(ctx, id);
+    maybe_draw_activity(ctx, id);
     if (taiko_video_upscale_active())
         (void)taiko_video_upscale_inject_blit(ctx, id);
 
     gcm_flip_command_fn orig = (gcm_flip_command_fn)g_orig_flip_command;
     return orig ? orig(ctx, id) : 0;
+}
+
+void taiko_overlay_activity_set(unsigned activity_bit, int active) {
+    if (active)
+        __sync_fetch_and_or(&g_activity_flags, (uint32_t)activity_bit);
+    else
+        __sync_fetch_and_and(&g_activity_flags, ~(uint32_t)activity_bit);
 }
 
 static int hk_set_display_buffer(uint8_t id, uint32_t offset, uint32_t pitch,

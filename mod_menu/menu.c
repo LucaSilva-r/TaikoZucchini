@@ -34,6 +34,8 @@
 #include "taiko_frame.h"
 #include "kb_input.h"
 #include "online_diag.h"
+#include "title_prerender.h"
+#include "network/mgmt_poll.h"
 
 #define COLOR_BG        MENU_RGB(0x00, 0x00, 0x00)
 #define COLOR_PANEL     MENU_RGB(0x10, 0x14, 0x18)
@@ -161,9 +163,10 @@ typedef enum {
     ITEM_ACTION,
     ITEM_HOST_EDIT, /* string-editor row: opens OSK on confirm */
     ITEM_PORT_EDIT, /* uint16 editor row: opens numeric OSK */
-    ITEM_TJAREPO_HOST_EDIT, /* TJARepo service host */
-    ITEM_TJAREPO_PORT_EDIT, /* TJARepo service port */
+    ITEM_TJAREPO_HOST_EDIT, /* Connector service host */
+    ITEM_TJAREPO_PORT_EDIT, /* Connector service port */
     ITEM_SERIAL_EDIT, /* dongle serial: opens numeric OSK */
+    ITEM_CABINET_NAME_EDIT, /* display name shown in the connector UI */
 } item_kind_t;
 
 typedef struct {
@@ -196,11 +199,14 @@ static const menu_item_t g_items[] = {
     { ITEM_PORT_EDIT, "Redirect port",
       "Private server TCP port. Usually 443.",
       0, 0 },
-    { ITEM_TJAREPO_HOST_EDIT, "TJARepo host",
+    { ITEM_TJAREPO_HOST_EDIT, "Connector host",
       "Converter service hostname for browsing/downloading custom songs.",
       0, 0 },
-    { ITEM_TJAREPO_PORT_EDIT, "TJARepo port",
+    { ITEM_TJAREPO_PORT_EDIT, "Connector port",
       "Converter service TCP port. Usually 443, or 8090 for local Docker.",
+      0, 0 },
+    { ITEM_CABINET_NAME_EDIT, "Cabinet name",
+      "Display name for this cabinet in the connector management UI.",
       0, 0 },
 
     { ITEM_SECTION, "Dongle", "", 0, 0 },
@@ -576,16 +582,16 @@ static void draw_frame(void) {
             menu_draw_text(&menu_font_30_font,
                            rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, buf);
         } else if (it->kind == ITEM_TJAREPO_HOST_EDIT) {
-            const char *s = g_cfg.tjarepo_host[0]
-                              ? g_cfg.tjarepo_host
+            const char *s = g_cfg.connector_host[0]
+                              ? g_cfg.connector_host
                               : "(unset)";
-            uint32_t c = g_cfg.tjarepo_host[0] ? COLOR_TEXT : COLOR_DIM;
+            uint32_t c = g_cfg.connector_host[0] ? COLOR_TEXT : COLOR_DIM;
             int tw = menu_text_width(&menu_font_30_font, s);
             menu_draw_text(&menu_font_30_font,
                            rx + LIST_W - tw - 24, ry + 6, c, s);
         } else if (it->kind == ITEM_TJAREPO_PORT_EDIT) {
             char buf[8];
-            unsigned v = g_cfg.tjarepo_port;
+            unsigned v = g_cfg.connector_port;
             int n = 0;
             if (v == 0) buf[n++] = '0';
             else {
@@ -602,6 +608,14 @@ static void draw_frame(void) {
             int tw = menu_text_width(&menu_font_30_font, s);
             menu_draw_text(&menu_font_30_font,
                            rx + LIST_W - tw - 24, ry + 6, COLOR_TEXT, s);
+        } else if (it->kind == ITEM_CABINET_NAME_EDIT) {
+            const char *s = g_cfg.cabinet_name[0]
+                              ? g_cfg.cabinet_name
+                              : "(unset)";
+            uint32_t c = g_cfg.cabinet_name[0] ? COLOR_TEXT : COLOR_DIM;
+            int tw = menu_text_width(&menu_font_30_font, s);
+            menu_draw_text(&menu_font_30_font,
+                           rx + LIST_W - tw - 24, ry + 6, c, s);
         }
     }
 
@@ -788,19 +802,19 @@ static void menu_loop(void) {
                 (void)menu_pad_pressed();
             } else if (it->kind == ITEM_TJAREPO_HOST_EDIT && (edge & MENU_BTN_CROSS)) {
                 char buf[TAIKO_REDIRECT_HOST_MAX];
-                int rc = menu_osk_input("TJARepo host (e.g. tjarepo.example.com)",
-                                        g_cfg.tjarepo_host,
+                int rc = menu_osk_input("Connector host (e.g. connector.example.com)",
+                                        g_cfg.connector_host,
                                         MENU_OSK_TEXT,
                                         buf, sizeof buf);
                 if (rc == 0) {
-                    taiko_cfg_normalize_host(g_cfg.tjarepo_host,
+                    taiko_cfg_normalize_host(g_cfg.connector_host,
                                              TAIKO_REDIRECT_HOST_MAX, buf);
-                    g_status = "TJARepo host updated";
+                    g_status = "Connector host updated";
                 }
                 (void)menu_pad_pressed();
             } else if (it->kind == ITEM_TJAREPO_PORT_EDIT && (edge & MENU_BTN_CROSS)) {
                 char cur[8];
-                unsigned v = g_cfg.tjarepo_port;
+                unsigned v = g_cfg.connector_port;
                 int n = 0;
                 if (v == 0) cur[n++] = '0';
                 else {
@@ -811,7 +825,7 @@ static void menu_loop(void) {
                 cur[n] = 0;
 
                 char buf[8];
-                int rc = menu_osk_input("TJARepo port (1-65535)",
+                int rc = menu_osk_input("Connector port (1-65535)",
                                         cur, MENU_OSK_NUMERIC,
                                         buf, sizeof buf);
                 if (rc == 0) {
@@ -822,11 +836,27 @@ static void menu_loop(void) {
                         if (pv > 65535u) { pv = 0; break; }
                     }
                     if (pv > 0) {
-                        g_cfg.tjarepo_port = (uint16_t)pv;
-                        g_status = "TJARepo port updated";
+                        g_cfg.connector_port = (uint16_t)pv;
+                        g_status = "Connector port updated";
                     } else {
                         g_status = "Invalid port (1-65535)";
                     }
+                }
+                (void)menu_pad_pressed();
+            } else if (it->kind == ITEM_CABINET_NAME_EDIT && (edge & MENU_BTN_CROSS)) {
+                char buf[TAIKO_CABINET_NAME_MAX];
+                int rc = menu_osk_input("Cabinet name (shown in connector UI)",
+                                        g_cfg.cabinet_name,
+                                        MENU_OSK_TEXT,
+                                        buf, sizeof buf);
+                if (rc == 0) {
+                    int n = 0;
+                    while (buf[n] && n < TAIKO_CABINET_NAME_MAX - 1) {
+                        g_cfg.cabinet_name[n] = buf[n];
+                        n++;
+                    }
+                    g_cfg.cabinet_name[n] = 0;
+                    g_status = "Cabinet name updated";
                 }
                 (void)menu_pad_pressed();
             } else if (it->kind == ITEM_SERIAL_EDIT && (edge & MENU_BTN_CROSS)) {
@@ -1008,7 +1038,8 @@ static const uint8_t KAT_PATTERN[] = { 0, 0, 1, 1, 0, 0 };
 #define IG_Q_RESUME    0
 #define IG_Q_SAVE      1
 #define IG_Q_FTP       2
-#define IG_SEC_QUICK   3
+#define IG_Q_TITLES    3
+#define IG_SEC_QUICK   4
 #define IG_GBASE       1000   /* IG_GBASE + i references g_items[i] */
 
 static volatile int g_ingame_open;
@@ -1029,6 +1060,8 @@ static void ig_kb_pump(void) {
 
 static int ig_row_selectable(int code) {
     if (code == IG_SEC_QUICK) return 0;
+    if (code == IG_Q_TITLES)
+        return !taiko_mgmt_operation_active();
     if (code == IG_Q_RESUME || code == IG_Q_SAVE || code == IG_Q_FTP) return 1;
     if (code >= IG_GBASE) {
         int i = code - IG_GBASE;
@@ -1043,6 +1076,7 @@ static void ig_build_rows(void) {
     g_ig_rows[g_ig_row_count++] = IG_Q_RESUME;
     g_ig_rows[g_ig_row_count++] = IG_Q_SAVE;
     g_ig_rows[g_ig_row_count++] = IG_Q_FTP;
+    g_ig_rows[g_ig_row_count++] = IG_Q_TITLES;
     for (int i = 0; i < ITEM_COUNT && g_ig_row_count < IG_ROWS_MAX; i++) {
         if (g_items[i].kind == ITEM_SECTION || item_visible(i))
             g_ig_rows[g_ig_row_count++] = IG_GBASE + i;
@@ -1124,6 +1158,28 @@ static void ig_row_info(int code, char *label, int lcap,
         *kind = up ? TAIKO_OVL_ROW_TOGGLE_ON : TAIKO_OVL_ROW_TOGGLE_OFF;
         return;
     }
+    if (code == IG_Q_TITLES) {
+        unsigned done = 0;
+        unsigned total = 0;
+        ig_append(label, 0, lcap, "Pre-render missing song titles");
+        if (taiko_mgmt_operation_active()) {
+            ig_append(value, 0, vcap, "SYNC BUSY");
+            *kind = TAIKO_OVL_ROW_DISABLED;
+        } else if (taiko_title_prerender_is_running()) {
+            taiko_title_prerender_progress(&done, &total, NULL, NULL);
+            if (total) {
+                int n = ig_append_u32(value, 0, vcap, done);
+                n = ig_append(value, n, vcap, "/");
+                ig_append_u32(value, n, vcap, total);
+            } else {
+                ig_append(value, 0, vcap, "STARTING");
+            }
+        } else {
+            ig_append(value, 0, vcap, ">");
+        }
+        *kind = TAIKO_OVL_ROW_ACTION;
+        return;
+    }
 
     int i = code - IG_GBASE;
     if (i < 0 || i >= ITEM_COUNT) return;
@@ -1163,17 +1219,22 @@ static void ig_row_info(int code, char *label, int lcap,
         ig_append_u32(value, 0, vcap, g_cfg.online_redirect_port);
         break;
     case ITEM_TJAREPO_HOST_EDIT:
-        ig_append(label, 0, lcap, "TJARepo host");
-        ig_append(value, 0, vcap, g_cfg.tjarepo_host[0]
-                                    ? g_cfg.tjarepo_host : "(unset)");
+        ig_append(label, 0, lcap, "Connector host");
+        ig_append(value, 0, vcap, g_cfg.connector_host[0]
+                                    ? g_cfg.connector_host : "(unset)");
         break;
     case ITEM_TJAREPO_PORT_EDIT:
-        ig_append(label, 0, lcap, "TJARepo port");
-        ig_append_u32(value, 0, vcap, g_cfg.tjarepo_port);
+        ig_append(label, 0, lcap, "Connector port");
+        ig_append_u32(value, 0, vcap, g_cfg.connector_port);
         break;
     case ITEM_SERIAL_EDIT:
         ig_append(label, 0, lcap, "Dongle serial");
         ig_append(value, 0, vcap, taiko_cfg_dongle_serial());
+        break;
+    case ITEM_CABINET_NAME_EDIT:
+        ig_append(label, 0, lcap, "Cabinet name");
+        ig_append(value, 0, vcap, g_cfg.cabinet_name[0]
+                                    ? g_cfg.cabinet_name : "(unset)");
         break;
     }
 }
@@ -1184,6 +1245,7 @@ static const char *ig_desc_for(int code) {
     if (code == IG_Q_RESUME)  return "Close this menu and return to the game.";
     if (code == IG_Q_SAVE)    return "Write the current settings to taiko_config.cfg now.";
     if (code == IG_Q_FTP)     return "Toggle the operator FTP server for transferring files over the network.";
+    if (code == IG_Q_TITLES)  return "Generate missing long and short vertical title textures for every downloaded custom song.";
     int i = code - IG_GBASE;
     if (i >= 0 && i < ITEM_COUNT && g_items[i].desc && g_items[i].desc[0])
         return g_items[i].desc;
@@ -1288,6 +1350,23 @@ static void ig_activate(int code, uint32_t edge, int *close) {
         }
         return;
     }
+    if (code == IG_Q_TITLES) {
+        int rc;
+        if (!(edge & MENU_BTN_CROSS))
+            return;
+        if (taiko_mgmt_operation_active()) {
+            g_status = "Managed song sync must finish first";
+            return;
+        }
+        rc = taiko_title_prerender_all_async();
+        if (rc > 0)
+            g_status = "Song title pre-render started in the background";
+        else if (rc == 0)
+            g_status = "Song title pre-render is already running";
+        else
+            g_status = "Could not start the song title pre-render worker";
+        return;
+    }
 
     int i = code - IG_GBASE;
     if (i < 0 || i >= ITEM_COUNT) return;
@@ -1316,7 +1395,8 @@ static void ig_activate(int code, uint32_t edge, int *close) {
     } else if ((it->kind == ITEM_HOST_EDIT || it->kind == ITEM_PORT_EDIT ||
                 it->kind == ITEM_TJAREPO_HOST_EDIT ||
                 it->kind == ITEM_TJAREPO_PORT_EDIT ||
-                it->kind == ITEM_SERIAL_EDIT) &&
+                it->kind == ITEM_SERIAL_EDIT ||
+                it->kind == ITEM_CABINET_NAME_EDIT) &&
                (edge & MENU_BTN_CROSS)) {
         g_status = "Edit text/number fields from the boot menu (tap F2 at startup)";
     }
@@ -1383,13 +1463,14 @@ static void menu_ingame_run(void) {
  * -------------------------------------------------------------------- */
 
 #define MAIN_QUICK_MAX     4
-#define MAIN_ROWS_MAX      (MAIN_QUICK_MAX + 6)
+#define MAIN_ROWS_MAX      (MAIN_QUICK_MAX + 7)
 #define MAIN_SEC_QUICK     0
 #define MAIN_SEC_SETTINGS  1
 #define MAIN_SETTINGS      2
 #define MAIN_CARDS         3
 #define MAIN_SONGS         4
-#define MAIN_CLOSE         5
+#define MAIN_OPS           5
+#define MAIN_CLOSE         6
 #define MAIN_CARD_BASE     1000
 
 static volatile int g_main_menu_open;
@@ -1418,6 +1499,7 @@ static int main_build_rows(int *rows, int cap) {
     if (n < cap) rows[n++] = MAIN_SETTINGS;
     if (card_picker_available() && n < cap) rows[n++] = MAIN_CARDS;
     if (n < cap) rows[n++] = MAIN_SONGS;
+    if (n < cap) rows[n++] = MAIN_OPS;
     if (n < cap) rows[n++] = MAIN_CLOSE;
     return n;
 }
@@ -1426,6 +1508,8 @@ static int main_row_selectable(int code) {
     if (code == MAIN_SEC_QUICK || code == MAIN_SEC_SETTINGS)
         return 0;
     if (code >= MAIN_CARD_BASE && !card_picker_available())
+        return 0;
+    if (code == MAIN_SONGS && taiko_mgmt_operation_active())
         return 0;
     return 1;
 }
@@ -1461,6 +1545,7 @@ static const char *main_row_label(int code) {
     case MAIN_SETTINGS: return "Mod settings";
     case MAIN_CARDS:    return "Card reader";
     case MAIN_SONGS:    return "Custom song loader";
+    case MAIN_OPS:      return "Background operations";
     case MAIN_CLOSE:    return "Close";
     default:            return "";
     }
@@ -1481,7 +1566,9 @@ static const char *main_row_desc(int code) {
     case MAIN_CARDS:
         return "Pick, create, or scan a saved card for the current card prompt.";
     case MAIN_SONGS:
-        return "Browse and download custom songs from the configured TJARepo service.";
+        return "Browse and download custom songs from the configured Connector service.";
+    case MAIN_OPS:
+        return "Live status for managed song synchronization and title texture generation.";
     case MAIN_CLOSE:
         return "Close this menu and return to the game.";
     default:
@@ -1493,6 +1580,39 @@ static void main_render(const int *rows, int count, int sel) {
     const char *lines[MAIN_ROWS_MAX];
     const char *values[MAIN_ROWS_MAX];
     unsigned char kinds[MAIN_ROWS_MAX];
+    char ops_value[48];
+    char ops_desc[240];
+    taiko_mgmt_operation_t op;
+    unsigned title_done = 0, title_total = 0, title_failed = 0;
+    taiko_mgmt_operation_snapshot(&op);
+    ops_value[0] = 0;
+    ops_desc[0] = 0;
+    if (op.active) {
+        snprintf(ops_value, sizeof ops_value, "%u/%u %s",
+                 op.done, op.total, op.phase);
+        snprintf(ops_desc, sizeof ops_desc,
+                 "Managed selection seq %d: %s (%u of %u ready, %u failed).%s%s%s%s",
+                 op.seq, op.phase, op.done, op.total, op.failed,
+                 op.song[0] ? " Current song: " : "",
+                 op.song, op.error[0] ? " Error: " : "", op.error);
+    } else if (taiko_title_prerender_is_running()) {
+        taiko_title_prerender_progress(&title_done, &title_total,
+                                       NULL, &title_failed);
+        snprintf(ops_value, sizeof ops_value, "%u/%u titles",
+                 title_done, title_total);
+        snprintf(ops_desc, sizeof ops_desc,
+                 "Pre-rendering missing title textures: %u of %u songs checked, %u failed.",
+                 title_done, title_total, title_failed);
+    } else if (op.phase[0] && strcmp(op.phase, "idle") != 0) {
+        snprintf(ops_value, sizeof ops_value, "%s", op.phase);
+        snprintf(ops_desc, sizeof ops_desc,
+                 "Last managed selection seq %d: %s (%u of %u ready, %u failed).%s%s",
+                 op.seq, op.phase, op.done, op.total, op.failed,
+                 op.error[0] ? " Error: " : "", op.error);
+    } else {
+        snprintf(ops_value, sizeof ops_value, "idle");
+        snprintf(ops_desc, sizeof ops_desc, "No background operation is running.");
+    }
     for (int i = 0; i < count; i++) {
         lines[i] = main_row_label(rows[i]);
         values[i] = "";
@@ -1501,6 +1621,15 @@ static void main_render(const int *rows, int count, int sel) {
         else if (rows[i] >= MAIN_CARD_BASE && !card_picker_available()) {
             values[i] = "can't swipe BanaPass now";
             kinds[i] = TAIKO_OVL_ROW_DISABLED;
+        }
+        else if (rows[i] == MAIN_SONGS && taiko_mgmt_operation_active()) {
+            values[i] = "sync in progress";
+            kinds[i] = TAIKO_OVL_ROW_DISABLED;
+        }
+        else if (rows[i] == MAIN_OPS) {
+            values[i] = ops_value;
+            kinds[i] = op.active || taiko_title_prerender_is_running()
+                ? TAIKO_OVL_ROW_TOGGLE_ON : TAIKO_OVL_ROW_NORMAL;
         }
         else if (rows[i] == MAIN_CLOSE)
             kinds[i] = TAIKO_OVL_ROW_ACTION;
@@ -1511,8 +1640,10 @@ static void main_render(const int *rows, int count, int sel) {
     char title[64];
     snprintf(title, sizeof title, "Taiko Zucchini %s", TAIKO_MOD_VERSION);
 
+    const char *desc = rows[sel] == MAIN_OPS
+        ? ops_desc : main_row_desc(rows[sel]);
     taiko_overlay_menu_set(title, lines, values, kinds,
-                           count, sel, 0, main_row_desc(rows[sel]),
+                           count, sel, 0, desc,
                            "Up/Down  X:select  O/F4:close  -  Drum: ka=move don-R=select don-L=back");
     taiko_overlay_menu_active(1);
 }

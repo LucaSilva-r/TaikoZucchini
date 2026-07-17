@@ -8,9 +8,11 @@
 #include <sys/timer.h>
 
 #include "debug.h"
+#include "game_state.h"
 #include "menu_osk.h"
 #include "menu_pad.h"
 #include "network/custom_song_client.h"
+#include "network/mgmt_poll.h"
 #include "overlay.h"
 #include "taiko_frame.h"
 #include "title_render.h"
@@ -630,7 +632,10 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
 
 /* Frames to let a scene toggle present behind our opaque cover. The game (not
  * us) flips, so we set the cover active and sleep long enough for a few flips. */
-#define SETTLE_US (150 * 1000)
+#define SETTLE_US              (150 * 1000)
+#define TEST_ENTER_SETTLE_US   (750 * 1000)
+#define TEST_WINDOW_POLL_US     (20 * 1000)
+#define TEST_WINDOW_TIMEOUT_US  (8 * 1000 * 1000)
 
 /* Put the opaque cover on screen with a one-line status. */
 static void show_cover(const char *status) {
@@ -638,6 +643,54 @@ static void show_cover(const char *status) {
     taiko_overlay_menu_opaque(1);
     taiko_overlay_menu_set("Custom Songs", &line, NULL, NULL, 1, 0, 0, NULL, NULL);
     taiko_overlay_menu_active(1);
+}
+
+static int wait_for_game_state(taiko_game_state_t wanted) {
+    unsigned waited = 0;
+    while (waited < TEST_WINDOW_TIMEOUT_US) {
+        if (taiko_game_state_current() == wanted)
+            return 1;
+        sys_timer_usleep(TEST_WINDOW_POLL_US);
+        waited += TEST_WINDOW_POLL_US;
+    }
+    return taiko_game_state_current() == wanted;
+}
+
+static void close_update_cover(void) {
+    taiko_overlay_menu_active(0);
+    taiko_overlay_menu_opaque(0);
+    taiko_frame_set_gated(0);
+    (void)menu_pad_pressed();
+}
+
+int taiko_custom_song_update_window_enter(const char *status) {
+    /* Gate before drawing: no operator/menu input may leak into the service
+     * scene while the song database is being changed. */
+    taiko_frame_set_gated(1);
+    show_cover(status ? status : "Updating song library...");
+    sys_timer_usleep(SETTLE_US);
+
+    taiko_frame_set_test(1);
+    /* Test-menu resources are cached after their first load, so subsequent
+     * entries do not necessarily emit a /testmode/ file open for game_state to
+     * observe. The original downloader successfully used a held TEST level and
+     * a fixed settle; give the automatic commit a little more headroom. */
+    sys_timer_usleep(TEST_ENTER_SETTLE_US);
+    (void)menu_pad_pressed();
+    return 1;
+}
+
+int taiko_custom_song_update_window_leave(const char *status) {
+    int reached_attract;
+
+    show_cover(status ? status : "Reloading song library...");
+    taiko_frame_set_test(0);
+    reached_attract = wait_for_game_state(TAIKO_GAME_STATE_ATTRACT);
+    if (!reached_attract)
+        dbg_print("[songs] service window exit timed out\n");
+    sys_timer_usleep(SETTLE_US);
+    close_update_cover();
+    return reached_attract;
 }
 
 void custom_song_launcher_run(void) {
@@ -648,24 +701,20 @@ void custom_song_launcher_run(void) {
     memset(&queue, 0, sizeof queue);
 
     if (!ese_song_service_ready()) {
-        taiko_overlay_show_prompt("Set TJARepo host/token first");
+        taiko_overlay_show_prompt("Set Connector host/token first");
         return;
     }
 
-    /* Gate first: input is suppressed so our menu navigation can't leak into
-     * the test menu underneath. The TEST-switch control below is applied every
-     * frame independent of gating, so gating doesn't block enter/exit. */
-    taiko_frame_set_gated(1);
+    /* The mgmt poll skips its song sync while the picker owns the
+     * download pipeline (both share the ese_* client state). */
+    g_ese_ui_busy = 1;
 
-    /* 1. Cover the screen FIRST so the test-menu transition is never seen. */
-    show_cover("Loading...");
-    sys_timer_usleep(SETTLE_US);
-
-    /* 2. Hold the TEST switch on -> game drops into the paused, silent test menu
-     * behind the cover. */
-    taiko_frame_set_test(1);
-    sys_timer_usleep(SETTLE_US);
-    (void)menu_pad_pressed();
+    /* Enter the paused, silent operator-test scene behind an opaque cover. */
+    if (!taiko_custom_song_update_window_enter("Loading...")) {
+        g_ese_ui_busy = 0;
+        taiko_overlay_show_prompt("Could not enter test menu");
+        return;
+    }
 
     /* 3. Real menu. Re-sync the library on every open (hash-gated: one cheap
      * request when unchanged) so songs added to the server while the machine
@@ -725,14 +774,7 @@ void custom_song_launcher_run(void) {
     }
     queue_destroy(&queue);
 
-    /* 4. Release the TEST switch behind the cover -> game exits to attract; let
-     * it settle, THEN drop the cover so the transition is never seen. */
-    show_cover("Closing...");
-    taiko_frame_set_test(0);
-    sys_timer_usleep(SETTLE_US);
-
-    taiko_overlay_menu_active(0);
-    taiko_overlay_menu_opaque(0);
-    taiko_frame_set_gated(0);
-    (void)menu_pad_pressed();
+    /* Release TEST behind the cover and wait for the rebuilt attract scene. */
+    (void)taiko_custom_song_update_window_leave("Closing...");
+    g_ese_ui_busy = 0;
 }

@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <sys/sys_time.h>
 
 #include "config.h"
 #include "cfg_file.h"
@@ -12,12 +13,12 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 16  /* v16: tjarepo endpoint + Dan-i Dojo patch */
+#define TAIKO_CFG_VERSION 17  /* v17: tjarepo -> connector rename + cabinet identity + mgmt poll */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
- * file. A per-game USRDIR/taiko_config.cfg (TAIKO_CONFIG_NAME) is an
- * optional hand-edited overlay applied on top of the global values. */
-#define TAIKO_GLOBAL_CONFIG_PATH "/dev_hdd0/plugins/taiko/taiko_config.cfg"
+ * file (TAIKO_GLOBAL_CONFIG_PATH, exported via runtime.h). A per-game
+ * USRDIR/taiko_config.cfg (TAIKO_CONFIG_NAME) is an optional hand-edited
+ * overlay applied on top of the global values. */
 
 /* Static-initialized so the early-boot path (before taiko_cfg_init runs)
  * still sees sane defaults. */
@@ -47,8 +48,11 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_enable = 0,
     .online_redirect_host   = {0},
     .online_redirect_port   = 443,
-    .tjarepo_host           = {0},
-    .tjarepo_port           = 443,
+    .connector_host           = {0},
+    .connector_port           = 443,
+    .mgmt_boot_wait           = 8,
+    .cabinet_id               = {0},
+    .cabinet_name             = {0},
 
     /* Offline-by-default: a fresh install should boot and play on every
      * build with no operator intervention. is_promotion + force_offline
@@ -109,6 +113,26 @@ static void handle_patches(const char *key, const char *value, void *u) {
     SET_BIT("upscale_blit",         upscale_blit);
 }
 
+static void copy_trimmed_str(char *dst, size_t cap, const char *value) {
+    while (*value == ' ' || *value == '\t') value++;
+    size_t n = 0;
+    while (value[n] && value[n] != '\r' && value[n] != '\n' && n < cap - 1) {
+        dst[n] = value[n];
+        n++;
+    }
+    while (n && (dst[n - 1] == ' ' || dst[n - 1] == '\t')) n--;
+    dst[n] = 0;
+}
+
+static int cabinet_id_valid(const char *s) {
+    for (int i = 0; i < TAIKO_CABINET_ID_LEN; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return 0;
+    }
+    return s[TAIKO_CABINET_ID_LEN] == 0;
+}
+
 static void handle_meta(const char *key, const char *value, void *u) {
     (void)u;
     if (cfg_file_str_eq_ci(key, "config_version")) {
@@ -119,6 +143,18 @@ static void handle_meta(const char *key, const char *value, void *u) {
             value++;
         }
         g_loaded_version = v;
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "cabinet_id")) {
+        char tmp[TAIKO_CABINET_ID_LEN + 1];
+        copy_trimmed_str(tmp, sizeof tmp, value);
+        if (cabinet_id_valid(tmp))
+            memcpy(g_cfg.cabinet_id, tmp, sizeof tmp);
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "cabinet_name")) {
+        copy_trimmed_str(g_cfg.cabinet_name, TAIKO_CABINET_NAME_MAX, value);
+        return;
     }
 }
 
@@ -197,12 +233,16 @@ static void handle_network(const char *key, const char *value, void *u) {
         g_cfg.online_redirect_port = (uint16_t)v;
         return;
     }
-    if (cfg_file_str_eq_ci(key, "tjarepo_host")) {
-        taiko_cfg_normalize_host(g_cfg.tjarepo_host,
+    /* tjarepo_* are the pre-rename key names; old config files still use
+     * them until the v17 rewrite emits connector_*. */
+    if (cfg_file_str_eq_ci(key, "connector_host") ||
+        cfg_file_str_eq_ci(key, "tjarepo_host")) {
+        taiko_cfg_normalize_host(g_cfg.connector_host,
                                  TAIKO_REDIRECT_HOST_MAX, value);
         return;
     }
-    if (cfg_file_str_eq_ci(key, "tjarepo_port")) {
+    if (cfg_file_str_eq_ci(key, "connector_port") ||
+        cfg_file_str_eq_ci(key, "tjarepo_port")) {
         while (*value == ' ' || *value == '\t') value++;
         unsigned v = 0;
         while (*value >= '0' && *value <= '9') {
@@ -210,7 +250,18 @@ static void handle_network(const char *key, const char *value, void *u) {
             value++;
         }
         if (v == 0 || v > 65535u) v = 443;
-        g_cfg.tjarepo_port = (uint16_t)v;
+        g_cfg.connector_port = (uint16_t)v;
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "mgmt_boot_wait")) {
+        while (*value == ' ' || *value == '\t') value++;
+        unsigned v = 0;
+        while (*value >= '0' && *value <= '9') {
+            v = v * 10u + (unsigned)(*value - '0');
+            value++;
+        }
+        if (v > 60) v = 60;
+        g_cfg.mgmt_boot_wait = (uint16_t)v;
         return;
     }
     if (cfg_file_str_eq_ci(key, "zucchini_api_token")) {
@@ -398,7 +449,15 @@ static void write_cfg_file(const char *path) {
     cfg_file_write_str(fd, "[meta]\n");
     cfg_file_write_str(fd, "config_version = ");
     cfg_file_write_uint(fd, (unsigned)TAIKO_CFG_VERSION);
-    cfg_file_write_str(fd, "\n\n");
+    cfg_file_write_str(fd, "\n");
+    emit_kv_str(fd,
+        "Auto-generated stable cabinet identity for the connector "
+        "management service. Do not share across cabinets.",
+        "cabinet_id", g_cfg.cabinet_id);
+    emit_kv_str(fd,
+        "Operator-chosen display name shown in the connector UI.",
+        "cabinet_name", g_cfg.cabinet_name);
+    cfg_file_write_str(fd, "\n");
 
     cfg_file_write_str(fd, "[identity]\n");
     emit_kv_str(fd,
@@ -501,12 +560,17 @@ static void write_cfg_file(const char *path) {
         "TCP port for the redirected hostname (typically 443).",
         "online_redirect_port", (unsigned)g_cfg.online_redirect_port);
     emit_kv_str(fd,
-        "Hostname for the separate TJARepo converter service. Used only "
+        "Hostname for the separate Connector converter service. Used only "
         "by the custom song browser/downloader.",
-        "tjarepo_host", g_cfg.tjarepo_host);
+        "connector_host", g_cfg.connector_host);
     emit_kv_uint(fd,
-        "TCP port for the TJARepo converter service.",
-        "tjarepo_port", (unsigned)g_cfg.tjarepo_port);
+        "TCP port for the Connector converter service.",
+        "connector_port", (unsigned)g_cfg.connector_port);
+    emit_kv_uint(fd,
+        "Seconds boot waits for the first connector poll before the game "
+        "reads chassisinfo, so remotely queued settings apply immediately. "
+        "0 disables the wait.",
+        "mgmt_boot_wait", (unsigned)g_cfg.mgmt_boot_wait);
     emit_kv_str(fd,
         "Optional TaikOnline card issuer bearer token override. Leave blank "
         "for official builds with the token baked into zucchini.sprx.",
@@ -544,6 +608,26 @@ static void parse_into_cfg(const char *buf, size_t len) {
     cfg_file_parse(buf, len, SECTIONS, sizeof SECTIONS / sizeof SECTIONS[0]);
 }
 
+/* 8 hex chars from the µs clock mixed through splitmix64 — dongle serials
+ * collide across cabinets (all default to CFG_DONGLE_SERIAL), so the
+ * connector needs an identity that is unique in practice. */
+static void cabinet_id_generate(void) {
+    static const char hexd[] = "0123456789abcdef";
+    uint64_t z = (uint64_t)sys_time_get_system_time();
+    z ^= (uintptr_t)&z * 0x9E3779B97F4A7C15ULL;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    z ^= (z >> 31);
+    for (int i = 0; i < TAIKO_CABINET_ID_LEN; i++) {
+        g_cfg.cabinet_id[i] = hexd[z & 0xF];
+        z >>= 4;
+    }
+    g_cfg.cabinet_id[TAIKO_CABINET_ID_LEN] = 0;
+    dbg_print("[cfg] generated cabinet_id ");
+    dbg_print(g_cfg.cabinet_id);
+    dbg_print("\n");
+}
+
 /* Load the shared config from the fixed plugin-dir path. The plugin
  * directory always exists, so this needs no USRDIR resolution. Writes
  * defaults if the file is absent, and rewrites on version mismatch or
@@ -558,6 +642,7 @@ static void load_global(void) {
 
     if (!read_ok || got == 0) {
         dbg_print("[cfg] global absent, writing defaults\n");
+        cabinet_id_generate();
         write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
         return;
     }
@@ -570,7 +655,15 @@ static void load_global(void) {
     if (!g_cfg.dongle_serial[0])
         coerce_dongle_serial_to_default("missing");
 
-    if (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset) {
+    /* Config predates cabinet identity (or the key was mangled). */
+    int id_generated = 0;
+    if (!g_cfg.cabinet_id[0]) {
+        cabinet_id_generate();
+        id_generated = 1;
+    }
+
+    if (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset ||
+        id_generated) {
         dbg_print_hex32("[cfg] rewriting; loaded version",
                         (uint32_t)g_loaded_version);
         write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
@@ -628,4 +721,25 @@ void taiko_cfg_try_late_load(void) {
 
 void taiko_cfg_save(void) {
     write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
+}
+
+int taiko_cfg_apply_kv(const char *section, const char *key,
+                       const char *value) {
+    if (!section || !key || !value) return -1;
+    for (size_t i = 0; i < sizeof SECTIONS / sizeof SECTIONS[0]; i++) {
+        if (cfg_file_str_eq_ci(section, SECTIONS[i].section)) {
+            SECTIONS[i].handler(key, value, SECTIONS[i].user);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+const char *taiko_cfg_cabinet_id(void) {
+    if (!g_cfg.cabinet_id[0]) {
+        /* Config predating identity that hasn't been rewritten yet. */
+        cabinet_id_generate();
+        taiko_cfg_save();
+    }
+    return g_cfg.cabinet_id;
 }

@@ -93,7 +93,7 @@ SYM     := $(BIN_DIR)/$(TARGET_NAME).sym
 BOOTSTRAP_EBOOT := bootstrap_eboot/bin/eboot.elf
 FTP_EBOOT := ftp_eboot/bin/ftp_eboot.elf
 
-SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_override.c core/custom_song_launcher.c core/qr_encode.c core/title_render.c core/libc_stubs.c core/patch_ui.c core/patch_warn.c core/write_probe.c core/rsx_init.c core/overlay.c eboot_fpt.c \
+SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_override.c core/custom_song_launcher.c core/qr_encode.c core/title_render.c core/title_cache.c core/title_prerender.c core/libc_stubs.c core/patch_ui.c core/patch_warn.c core/write_probe.c core/rsx_init.c core/overlay.c eboot_fpt.c \
            mod_menu/menu.c mod_menu/menu_draw.c mod_menu/menu_pad.c mod_menu/menu_actions.c \
            mod_menu/menu_osk.c \
            ftp/ftp_server.c \
@@ -125,7 +125,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            hooks/video_out_hook.c \
            hooks/songselect_natives.c \
            network/uri.c network/http_client.c network/version_check.c \
-           network/custom_song_client.c network/extra_scores.c
+           network/custom_song_client.c network/extra_scores.c \
+           network/mgmt_poll.c
 OBJS    := $(SRCS:.c=.o)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf
@@ -302,7 +303,8 @@ hooks/video_out_hook.o: hooks/video_out_hook.c hooks/video_out_hook.h eboot_fpt.
 hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h song_loader_manifest.h core/debug.h core/icache.h
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
-network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h config/version.h core/debug.h core/overlay.h
+network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h network/mgmt_poll.h config/version.h core/debug.h core/overlay.h
+network/mgmt_poll.o:      network/mgmt_poll.c      network/mgmt_poll.h network/custom_song_client.h network/http_client.h config/runtime.h config/version.h config/cfg_file.h core/debug.h core/game_version.h
 hooks/cell_http_shim.o: hooks/cell_http_shim.c hooks/cell_http_shim.h network/http_client.h core/debug.h config/runtime.h config.h
 
 RPCS3_DEV_HDD0 ?= $(HOME)/.config/rpcs3/dev_hdd0
