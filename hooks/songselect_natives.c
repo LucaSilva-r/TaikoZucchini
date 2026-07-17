@@ -1880,11 +1880,12 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
     return ret;
 }
 
-/* Fixed per-type texture pool. Each slot owns ONE game-pool descriptor
- * (allocated once). The descriptor keeps its game-owned CPU buffer pointer so
- * the game allocator can tear it down safely; after each upload we copy the
- * produced texels into our RSX-mapped memory and redirect only the sampled IO
- * offset to our buffer. Slots are LRU-reused by re-uploading pixels. */
+/* Fixed per-type texture pool. Each slot uses a game-pool descriptor only as
+ * an upload staging object, then copies its 0x40-byte draw-facing state into a
+ * stable SPRX-owned descriptor. Scene teardown may poison/free the staging
+ * object while NU::Draw still has requests queued; returning the stable copy
+ * keeps those asynchronous requests valid. Slots are LRU-reused by
+ * re-uploading pixels. */
 /* The side-column list keeps 16 short titles live, including one just outside
  * the visible/preload window. Keep several long-title descriptors as well so
  * triple-buffered frames never retain a descriptor that LRU reuse has already
@@ -1917,7 +1918,7 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
     (SSN_RT_POOL_MEM_SIZE / SSN_RT_POOL_SLAB_SIZE)
 
 typedef struct ssn_rt_pool_slot {
-    uint32_t resource;   /* game-pool descriptor (0 = slot never allocated) */
+    uint32_t resource;   /* game-owned upload descriptor (may be scene-freed) */
     uint32_t registered_key; /* permanent key owned by the game texture map */
     uint32_t buf;        /* our mapped texel buffer (CPU EA) */
     uint32_t io;         /* our RSX IO offset for buf */
@@ -1925,7 +1926,9 @@ typedef struct ssn_rt_pool_slot {
     uint32_t game_io;    /* descriptor's original game-owned IO offset */
     uint32_t index;      /* song index currently loaded into this slot */
     uint32_t lru;        /* last-use tick */
-} ssn_rt_pool_slot_t;
+    uint32_t draw_ready;
+    uint32_t draw_desc[16]; /* persistent 0x40-byte descriptor copy */
+} __attribute__((aligned(16))) ssn_rt_pool_slot_t;
 
 static ssn_rt_pool_slot_t g_rt_pool_long[SSN_RT_POOL_LONG];
 static ssn_rt_pool_slot_t g_rt_pool_short[SSN_RT_POOL_SHORT];
@@ -1952,6 +1955,9 @@ static void ssn_rt_reset_pool_descriptors(ssn_rt_pool_slot_t *pool,
         pool[i].game_io = 0;
         pool[i].index = 0;
         pool[i].lru = 0;
+        pool[i].draw_ready = 0;
+        /* Do not clear draw_desc: the draw thread may still hold its address.
+         * It remains a valid rendering object until this slot is reused. */
     }
 }
 
@@ -2099,6 +2105,32 @@ static uint32_t ssn_rt_alloc_descriptor(uint32_t registered_key,
     return res;
 }
 
+static int ssn_rt_upload_resource_live(const ssn_rt_pool_slot_t *slot) {
+    uint32_t vtbl;
+    uint32_t upload_opd;
+
+    if (!slot || !slot->resource ||
+        !ssn_heap_ptr_sane(slot->resource))
+        return 0;
+    vtbl = *(volatile uint32_t *)(uintptr_t)slot->resource;
+    if (!ssn_ptr_sane(vtbl))
+        return 0;
+    upload_opd = *(volatile uint32_t *)(uintptr_t)(vtbl + 0x20u);
+    if (!ssn_ptr_sane(upload_opd))
+        return 0;
+    return *(volatile uint32_t *)(uintptr_t)(slot->resource + 0x08u) ==
+           slot->registered_key;
+}
+
+static void ssn_rt_forget_upload_resource(ssn_rt_pool_slot_t *slot) {
+    if (!slot)
+        return;
+    slot->resource = 0;
+    slot->registered_key = 0;
+    slot->game_buf = 0;
+    slot->game_io = 0;
+}
+
 /* Render title -> our slot buffer via the game's own upload (handles any
  * swizzle), then force the descriptor to point at OUR buffer + known IO offset
  * (main-memory location). No allocation. */
@@ -2178,17 +2210,9 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t type,
     upload_opd = *(volatile uint32_t *)(uintptr_t)(vtbl + 0x20u);
     if (!ssn_ptr_sane(upload_opd))
         return 0;
-    if (slot->game_buf) {
-        *(volatile uint32_t *)(uintptr_t)(res + 0x34u) = slot->game_buf;
-        *(volatile uint32_t *)(uintptr_t)(res + 0x30u) = slot->game_io;
-        *(volatile uint32_t *)(uintptr_t)(res + 0x08u) =
-            slot->registered_key;
-        icache_flush((void *)(uintptr_t)res, 0x40u);
-    }
-
     /* Let the game upload into its OWN buffer, then copy the produced
-     * (possibly swizzled) texels into our mapped buffer. Do not replace +0x34:
-     * scene teardown treats that as an allocator-owned CPU pointer. */
+     * (possibly swizzled) texels into our mapped buffer. The original remains
+     * untouched so its scene can destroy it normally. */
     if (((nu_tex_info_upload_fn)(uintptr_t)upload_opd)(res, g_rt_title_pixels,
                                                        1u, 0u) != 0)
         return 0;
@@ -2199,18 +2223,19 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t type,
         memcpy((void *)(uintptr_t)slot->buf, (const void *)(uintptr_t)gbuf,
                w * h * 4u);
     }
-    *(volatile uint32_t *)(uintptr_t)(res + 0x30u) = slot->io;  /* our offset */
-    *(volatile uint32_t *)(uintptr_t)(res + 0x20u) = 0x0000aae4u; /* std ARGB
+    memcpy(slot->draw_desc, (const void *)(uintptr_t)res,
+           sizeof slot->draw_desc);
+    slot->draw_desc[0x30u / 4u] = slot->io;  /* our persistent pixel offset */
+    slot->draw_desc[0x34u / 4u] = slot->buf; /* matching persistent CPU EA */
+    slot->draw_desc[0x20u / 4u] = 0x0000aae4u; /* std ARGB
         remap: the A1R5G5B5-derived default routed alpha from the wrong texel
         component, so the opaque outline sampled as transparent. */
-    *(volatile uint32_t *)(uintptr_t)(res + 0x18u) = 1u;        /* main mem */
-    /* The requested custom key is handled by our lookup detour. Never replace
-     * the descriptor's manager key: doing so leaves a dangling map entry when
-     * the song-select scene destroys the resource. */
-    *(volatile uint32_t *)(uintptr_t)(res + 0x08u) =
-        slot->registered_key;
-    icache_flush((void *)(uintptr_t)res, 0x40u);
+    slot->draw_desc[0x18u / 4u] = 1u;        /* main memory */
+    slot->draw_desc[0x08u / 4u] = slot->registered_key;
+    icache_flush(slot->draw_desc, sizeof slot->draw_desc);
     icache_flush((void *)(uintptr_t)slot->buf, w * h * 4u);
+    __sync_synchronize();
+    slot->draw_ready = 1;
     return 1;
 }
 
@@ -2230,9 +2255,9 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
 
     /* already resident? */
     for (i = 0; i < n; i++) {
-        if (pool[i].resource && pool[i].index == index) {
+        if (pool[i].draw_ready && pool[i].index == index) {
             pool[i].lru = ++g_rt_pool_tick;
-            return pool[i].resource;
+            return (uint32_t)(uintptr_t)pool[i].draw_desc;
         }
     }
 
@@ -2248,6 +2273,8 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
     if (!victim)
         return 0;
 
+    if (victim->resource && !ssn_rt_upload_resource_live(victim))
+        ssn_rt_forget_upload_resource(victim);
     if (!victim->resource) {
         uint32_t w = 0;
         uint32_t h = 0;
@@ -2266,7 +2293,7 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
         return 0;
     victim->index = index;
     victim->lru = ++g_rt_pool_tick;
-    return victim->resource;
+    return (uint32_t)(uintptr_t)victim->draw_desc;
 }
 
 /* Decode a custom title handle. The game's visible songlist usage is inverted
