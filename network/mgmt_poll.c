@@ -634,6 +634,19 @@ static void selection_worker(uint64_t arg) {
                 last_error = "connector marked song conversion broken";
                 continue;
             }
+
+            /* The connector sends the complete desired set for every
+             * selection revision. Songs already present in the published
+             * active set need no filesystem or manifest work: only newly
+             * selected songs can require conversion/download. This keeps a
+             * one-song edit proportional to that edit instead of rescanning
+             * thousands of installed songs and their title textures. */
+            if (g_active_enabled &&
+                sorted_contains(g_active_sel, g_active_count, g_job_sel[i])) {
+                done++;
+                continue;
+            }
+
             int idx = ese_song_library_find_index(g_job_sel[i]);
             if (idx < 0) {
                 g_job_broken[i] = 1;
@@ -641,21 +654,11 @@ static void selection_worker(uint64_t arg) {
                 last_error = "selected song is absent from the library";
             } else if (ese_song_is_cached(g_job_sel[i]) &&
                        !ese_song_library_is_stale_at(idx)) {
-                ese_song_entry_t cached_song;
-                wait_for_attract("waiting_attract", done,
-                                 (unsigned)g_job_sel_count, failed);
-                operation_set(1, g_job_seq, "rendering", done,
-                              (unsigned)g_job_sel_count, failed,
-                              g_job_sel[i], "");
-                if (ese_song_library_get(idx, &cached_song) &&
-                    taiko_title_prerender_after_download(
-                        cached_song.id, cached_song.title) >= 0) {
-                    done++;
-                } else {
-                    failed++;
-                    retryable_failed++;
-                    last_error = "title texture generation failed";
-                }
+                /* Successful installs prerender their own title textures.
+                 * Do not probe both cache files again on every selection
+                 * change; legacy gaps are handled by the explicit bulk
+                 * title-repair action in the mod menu. */
+                done++;
             } else {
                 g_missing_index[missing] = idx;
                 g_missing_job_index[missing] = i;

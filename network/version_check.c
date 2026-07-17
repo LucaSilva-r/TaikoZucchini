@@ -32,6 +32,26 @@
 
 static int g_started;
 
+/* RPCS3 resolves PRX imports eagerly, but real hardware leaves the libnetctl
+ * stub target null until CELL_SYSMODULE_NETCTL is loaded. The version thread
+ * starts before the game brings networking up, so load both libraries before
+ * its first cellNetCtlGetState call. The game remains responsible for
+ * sys_net/cellNetCtl initialization and teardown. */
+static int load_network_imports(void) {
+    int rc = cellSysmoduleLoadModule(CELL_SYSMODULE_NET);
+    if (rc != CELL_OK && rc != CELL_SYSMODULE_ERROR_DUPLICATED) {
+        dbg_print_hex32("[version] sysmodule NET load rc", (uint32_t)rc);
+        return 0;
+    }
+    rc = cellSysmoduleLoadModule(CELL_SYSMODULE_NETCTL);
+    if (rc != CELL_OK && rc != CELL_SYSMODULE_ERROR_DUPLICATED) {
+        dbg_print_hex32("[version] sysmodule NETCTL load rc", (uint32_t)rc);
+        return 0;
+    }
+    dbg_print("[version] network imports ready\n");
+    return 1;
+}
+
 static const char *skip_v(const char *s) {
     return (s && (*s == 'v' || *s == 'V')) ? s + 1 : s;
 }
@@ -518,10 +538,8 @@ static int install_update_from_local_file(const char *path) {
 #endif
 
 static int wait_for_net_link(int max_seconds) {
-    /* cellNetCtlInit is harmless if libnet hasn't loaded; the stub itself
-     * just NOOPs and the state poll returns failure, which we treat as
-     * "not ready". We poll once a second up to the cap so a slow DHCP
-     * lease doesn't permanently skip the check. */
+    /* The game owns cellNetCtlInit. Poll once a second until its initialization
+     * and DHCP complete; any interim error simply means "not ready". */
     for (int i = 0; i < max_seconds; i++) {
         int state = 0;
         if (cellNetCtlGetState(&state) == 0 &&
@@ -568,6 +586,11 @@ static void run_update_check(void) {
 
 static void version_check_thread(uint64_t arg) {
     (void)arg;
+
+    if (!load_network_imports()) {
+        dbg_print("[version] networking unavailable; background poll disabled\n");
+        sys_ppu_thread_exit(0);
+    }
 
     /* Boot-priority connector poll, before the update-check delay, so
      * remotely queued settings can apply before the game reads its

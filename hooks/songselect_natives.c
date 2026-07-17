@@ -1471,6 +1471,7 @@ static uint32_t g_ssn_src_begin;
  * allocation through the correct game heap. */
 static void ssn_prepare_custom_categories(void) {
     static uint32_t prepared_begin;
+    static uint32_t prepared_end;
     ssn_category_record_t records[SSN_CATEGORY_RECORD_MAX];
     ssn_category_toast_t toast_records[SSN_CATEGORY_RECORD_MAX];
     uint32_t proxy_owner[4] = { 0, 0, 0, 0 };
@@ -1496,7 +1497,11 @@ static void ssn_prepare_custom_categories(void) {
     if (!ssn_ptr_sane(begin) || end < begin || cap < end ||
         ((end - begin) % SSN_BOARD_RECORD_SIZE) != 0)
         return;
-    if (prepared_begin == begin)
+    /* Scene teardown frees this allocation, and the game allocator commonly
+     * reuses the same begin address for the next scene's fresh stock vector.
+     * Its end differs because our prepared vector has extra page records, so
+     * use the full live range as the generation identity. */
+    if (prepared_begin == begin && prepared_end == end)
         return;
     count = (end - begin) / SSN_BOARD_RECORD_SIZE;
     if (count < 2u || count > SSN_CATEGORY_RECORD_MAX)
@@ -1616,6 +1621,7 @@ static void ssn_prepare_custom_categories(void) {
         new_begin + new_cap_count * SSN_BOARD_RECORD_SIZE;
     __asm__ volatile("sync" ::: "memory");
     prepared_begin = new_begin;
+    prepared_end = new_begin + out_count * SSN_BOARD_RECORD_SIZE;
     memcpy(g_ssn_category_toasts, toast_records,
            out_count * sizeof toast_records[0]);
     g_ssn_category_toast_count = out_count;
@@ -1729,6 +1735,8 @@ static int ssn_ppc_branch(uint32_t src, uint32_t dst, int link,
 uint32_t g_ssn_basic_lookup_resume;
 
 extern char ssn_basic_lookup_detour_code[];
+/* These PRX symbols can relocate with bit 15 set in their low half. Pair
+ * @ha with signed addi; @ha + ori would address the following 64 KiB page. */
 __asm__(
 ".globl ssn_basic_lookup_detour_code\n"
 "ssn_basic_lookup_detour_code:\n"
@@ -1740,7 +1748,7 @@ __asm__(
 "std 4,0x30(1)\n"
 "std 5,0x38(1)\n"
 "lis 11,hk_basic_musicid_lookup@ha\n"
-"ori 11,11,hk_basic_musicid_lookup@l\n"
+"addi 11,11,hk_basic_musicid_lookup@l\n"
 "lwz 12,0(11)\n"
 "lwz 2,4(11)\n"
 "mtctr 12\n"
@@ -1755,7 +1763,7 @@ __asm__(
 "blr\n"
 "1:\n"
 "lis 11,g_ssn_basic_lookup_resume@ha\n"
-"ori 11,11,g_ssn_basic_lookup_resume@l\n"
+"addi 11,11,g_ssn_basic_lookup_resume@l\n"
 "lwz 12,0(11)\n"
 "ld 2,0x20(1)\n"
 "ld 3,0x28(1)\n"
@@ -2449,7 +2457,7 @@ __asm__(
 "std 10,0x60(1)\n"
 "mr 5,2\n"                    /* helper arg3 = original game TOC */
 "lis 11,hk_texretr_lookup@ha\n"
-"ori 11,11,hk_texretr_lookup@l\n"
+"addi 11,11,hk_texretr_lookup@l\n"
 "lwz 12,0(11)\n"
 "lwz 2,4(11)\n"
 "mtctr 12\n"
@@ -2476,7 +2484,7 @@ __asm__(
 "addi 1,1,0x100\n"
 "3:\n"
 "lis 11,g_ssn_texretr_resume@ha\n"
-"ori 11,11,g_ssn_texretr_resume@l\n"
+"addi 11,11,g_ssn_texretr_resume@l\n"
 "lwz 12,0(11)\n"
 "lis 9,0x446f\n"              /* re-execute overwritten original instruction */
 "mtctr 12\n"
@@ -2622,11 +2630,13 @@ static uint32_t ssn_vec90_custom_count(uint32_t vec) {
     return count;
 }
 
-/* Remove tagged rows from a game-owned BasicSong vector. Each record owns
- * four std::strings, so this must go through the game's vector erase helper;
- * a raw memmove would leak or double-free their heap storage. Erasing runs
- * from the back keeps all earlier addresses valid. */
-static int ssn_vec90_erase_custom(uint32_t vec) {
+/* Remove only deselected tagged rows from a game-owned BasicSong vector, then
+ * retag retained rows with their compacted virtual indices. Each record owns
+ * four std::strings, so removal must go through the game's vector erase helper;
+ * a raw memmove would leak or double-free their heap storage. */
+static int ssn_vec90_reconcile_custom(
+        uint32_t vec, const unsigned char keep[SSN_INJECT_MAX],
+        const uint16_t new_index[SSN_INJECT_MAX], uint32_t old_count) {
     record_erase_fn erase_records =
         (record_erase_fn)(uintptr_t)g_record_erase_desc;
     uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
@@ -2643,15 +2653,29 @@ static int ssn_vec90_erase_custom(uint32_t vec) {
         uint32_t result = 0;
         uint32_t old_end;
 
-        while (run_end > begin &&
-               !ssn_record_is_custom(run_end - SSN_SONG_RECORD_SIZE))
-            run_end -= SSN_SONG_RECORD_SIZE;
+        while (run_end > begin) {
+            uint32_t rec = run_end - SSN_SONG_RECORD_SIZE;
+            uint32_t uid = *(volatile uint32_t *)(uintptr_t)
+                (rec + SSN_SONG_UNIQUEID_OFF);
+            uint32_t old = uid - SSN_CUSTOM_UID_BASE;
+            if (ssn_record_is_custom(rec) &&
+                (old >= old_count || !keep[old]))
+                break;
+            run_end = rec;
+        }
         if (run_end == begin)
             break;
         run_begin = run_end - SSN_SONG_RECORD_SIZE;
-        while (run_begin > begin &&
-               ssn_record_is_custom(run_begin - SSN_SONG_RECORD_SIZE))
-            run_begin -= SSN_SONG_RECORD_SIZE;
+        while (run_begin > begin) {
+            uint32_t rec = run_begin - SSN_SONG_RECORD_SIZE;
+            uint32_t uid = *(volatile uint32_t *)(uintptr_t)
+                (rec + SSN_SONG_UNIQUEID_OFF);
+            uint32_t old = uid - SSN_CUSTOM_UID_BASE;
+            if (!ssn_record_is_custom(rec) ||
+                (old < old_count && keep[old]))
+                break;
+            run_begin = rec;
+        }
 
         old_end = end;
         erase_records(&result, vec - 4u, run_begin, run_end);
@@ -2661,24 +2685,36 @@ static int ssn_vec90_erase_custom(uint32_t vec) {
             end != old_end - (run_end - run_begin))
             return -1;
     }
+
+    begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
+    end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    for (uint32_t rec = begin; rec < end; rec += SSN_SONG_RECORD_SIZE) {
+        uint32_t uid;
+        uint32_t old;
+        if (!ssn_record_is_custom(rec))
+            continue;
+        uid = *(volatile uint32_t *)(uintptr_t)
+            (rec + SSN_SONG_UNIQUEID_OFF);
+        old = uid - SSN_CUSTOM_UID_BASE;
+        if (old >= old_count || !keep[old] ||
+            new_index[old] >= SSN_INJECT_MAX)
+            return -1;
+        *(volatile uint32_t *)(uintptr_t)(rec + SSN_SONG_UNIQUEID_OFF) =
+            SSN_CUSTOM_UID_BASE + new_index[old];
+    }
     return (int)removed;
 }
 
-static int ssn_refs_match_virtual(const ssn_inject_song_ref_t *refs,
-                                  int ref_count) {
-    if (ref_count < 0 || (uint32_t)ref_count != g_ssn_virtual_song_count)
+static int ssn_ref_matches_virtual(const ssn_inject_song_ref_t *ref,
+                                   const ssn_inject_song_t *old) {
+    if (!ref || !old)
         return 0;
-    for (int i = 0; i < ref_count; i++) {
-        const ssn_inject_song_t *old = &g_ssn_virtual_songs[i];
-        if (strncmp(refs[i].short_id, old->short_id,
-                    sizeof old->short_id) != 0 ||
-            refs[i].genre_id != old->genre_id ||
-            refs[i].outline != old->outline ||
-            strncmp(refs[i].sort_title, old->song.title,
-                    sizeof old->song.title) != 0)
-            return 0;
-    }
-    return 1;
+    return strncmp(ref->short_id, old->short_id,
+                   sizeof old->short_id) == 0 &&
+           ref->genre_id == old->genre_id &&
+           ref->outline == old->outline &&
+           strncmp(ref->sort_title, old->song.title,
+                   sizeof old->song.title) == 0;
 }
 
 static void ssn_reset_virtual_songs(void) {
@@ -2687,6 +2723,26 @@ static void ssn_reset_virtual_songs(void) {
     memset(g_ssn_inject_abs, 0, sizeof g_ssn_inject_abs);
     g_ssn_virtual_song_count = 0;
     g_ssn_injected_count = 0;
+    g_current_custom_song_valid = 0;
+}
+
+static void ssn_compact_virtual_songs(
+        const unsigned char keep[SSN_INJECT_MAX], uint32_t old_count) {
+    uint32_t out = 0;
+
+    ssn_rt_reset_descriptors();
+    memset(g_custom_basic_meta_ready, 0, sizeof g_custom_basic_meta_ready);
+    memset(g_ssn_inject_abs, 0, sizeof g_ssn_inject_abs);
+    for (uint32_t old = 0; old < old_count; old++) {
+        if (!keep[old])
+            continue;
+        if (out != old)
+            g_ssn_virtual_songs[out] = g_ssn_virtual_songs[old];
+        out++;
+    }
+    g_ssn_virtual_song_count = out;
+    g_ssn_injected_count = out;
+    g_current_custom_song_valid = 0;
 }
 
 /* Identity of the source array we last touched. `owner` is a stack address that
@@ -2716,6 +2772,9 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp)
     __attribute__((unused));
 static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     static ssn_inject_song_ref_t refs[SSN_INJECT_MAX];
+    static uint16_t desired[SSN_SHORT_HASH_CAP];
+    static uint16_t new_index[SSN_INJECT_MAX];
+    static unsigned char keep[SSN_INJECT_MAX];
     uint16_t existing[SSN_SHORT_HASH_CAP];
     int ref_count;
     uint32_t tvec = temp + 0x04u;
@@ -2736,33 +2795,56 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
 
     /* A pointer alone is not a reliable generation id: the allocator may
      * reuse the same address for a freshly rebuilt vector. Reconcile against
-     * the tagged rows actually present. If the active set changed, safely
-     * erase every old custom row from both parallel vectors and rebuild it. */
+     * the tagged rows actually present. Selection changes retain existing
+     * rows, erase only missing IDs, and append only genuinely new songs. */
     uint32_t source_custom = ssn_vec90_custom_count(svec);
     uint32_t temp_custom = ssn_vec90_custom_count(tvec);
     int fresh = src_begin != g_ssn_src_begin ||
                 (source_custom == 0 && g_ssn_virtual_song_count != 0);
-    int rebuild = !fresh &&
-        (!ssn_refs_match_virtual(refs, ref_count) ||
-         source_custom != g_ssn_virtual_song_count ||
-         temp_custom != g_ssn_virtual_song_count);
 
     if (fresh) {
         ssn_reset_virtual_songs();
         g_ssn_src_begin = src_begin;
-    } else if (rebuild) {
-        int temp_removed = ssn_vec90_erase_custom(tvec);
-        int source_removed = ssn_vec90_erase_custom(svec);
+    } else {
+        uint32_t old_count = g_ssn_virtual_song_count;
+        uint32_t retained = 0;
+
+        if (source_custom != old_count || temp_custom != old_count) {
+            dbg_print("[ssn] custom vector count mismatch; skip reconcile\n");
+            return;
+        }
+        memset(desired, 0, sizeof desired);
+        memset(keep, 0, sizeof keep);
+        for (int i = 0; i < ref_count; i++)
+            if (!ssn_ref_hash_add(refs, desired, (uint32_t)i))
+                return;
+        for (uint32_t old = 0; old < old_count; old++) {
+            int wanted = ssn_ref_hash_find(
+                refs, desired, g_ssn_virtual_songs[old].short_id);
+            new_index[old] = 0xffffu;
+            if (wanted < 0 ||
+                !ssn_ref_matches_virtual(&refs[wanted],
+                                         &g_ssn_virtual_songs[old]))
+                continue;
+            keep[old] = 1;
+            new_index[old] = (uint16_t)retained++;
+        }
+
+        if (retained == old_count && retained == (uint32_t)ref_count)
+            return;
+
+        int temp_removed = ssn_vec90_reconcile_custom(
+            tvec, keep, new_index, old_count);
+        int source_removed = ssn_vec90_reconcile_custom(
+            svec, keep, new_index, old_count);
         if (temp_removed < 0 || source_removed < 0) {
             dbg_print("[ssn] custom row reconciliation failed\n");
             return;
         }
         dbg_print_hex32("[ssn] pruned custom rows",
                         (uint32_t)source_removed);
-        ssn_reset_virtual_songs();
+        ssn_compact_virtual_songs(keep, old_count);
         g_ssn_src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
-    } else {
-        return;
     }
 
     if (ref_count <= 0)
@@ -2843,8 +2925,10 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
         }
     }
 
-    if (added)
-        ssn_recompute_inject_abs(svec);
+    /* Fresh insertion and removal-only compaction both change absolute source
+     * positions. ssn_compact_virtual_songs() deliberately clears this map, so
+     * rebuilding it cannot depend only on whether new rows were appended. */
+    ssn_recompute_inject_abs(svec);
     /* Growth changes the allocation identity. Track the new pointer so a later
      * call on this same source vector does not reset caches and inject again. */
     g_ssn_src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
