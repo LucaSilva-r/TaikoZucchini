@@ -204,6 +204,9 @@ SONGSEL_NATIVES(DECL_ORIG)
 static uint32_t g_record_insert_desc[2];
 typedef void (*record_insert_fn)(uint32_t owner, uint64_t pos,
                                  uint64_t count, uint32_t value);
+static uint32_t g_record_erase_desc[2];
+typedef uint32_t *(*record_erase_fn)(uint32_t *result, uint32_t owner,
+                                    uint32_t first, uint32_t last);
 
 typedef struct ssn_inject_song {
     ese_song_entry_t song;
@@ -1874,12 +1877,12 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
  * the game allocator can tear it down safely; after each upload we copy the
  * produced texels into our RSX-mapped memory and redirect only the sampled IO
  * offset to our buffer. Slots are LRU-reused by re-uploading pixels. */
-/* The side-column list preloads at least 15 short titles outside the visible
- * window. The selected long-title path only needs the current/next resources.
- * This layout preserves that preload window while keeping the mapped block at
- * 3 MB instead of the 5 MB required by 15+15. */
-#define SSN_RT_POOL_LONG  2u
-#define SSN_RT_POOL_SHORT 15u
+/* The side-column list keeps 16 short titles live, including one just outside
+ * the visible/preload window. Keep several long-title descriptors as well so
+ * triple-buffered frames never retain a descriptor that LRU reuse has already
+ * repainted. This still rounds to the same 3 MB mapped slab allocation. */
+#define SSN_RT_POOL_LONG  6u
+#define SSN_RT_POOL_SHORT 16u
 #define SSN_RT_POOL_HUD   1u   /* gameplay/result horizontal texture on demand */
 #define SSN_RT_POOL_TRANS 1u   /* scene-change texture is rendered on demand */
 #define SSN_RT_POOL_TOTAL (SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT + \
@@ -1907,6 +1910,7 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
 
 typedef struct ssn_rt_pool_slot {
     uint32_t resource;   /* game-pool descriptor (0 = slot never allocated) */
+    uint32_t registered_key; /* permanent key owned by the game texture map */
     uint32_t buf;        /* our mapped texel buffer (CPU EA) */
     uint32_t io;         /* our RSX IO offset for buf */
     uint32_t game_buf;   /* descriptor's original game-owned texel buffer */
@@ -1935,6 +1939,7 @@ static void ssn_rt_reset_pool_descriptors(ssn_rt_pool_slot_t *pool,
     unsigned i;
     for (i = 0; i < n; i++) {
         pool[i].resource = 0;
+        pool[i].registered_key = 0;
         pool[i].game_buf = 0;
         pool[i].game_io = 0;
         pool[i].index = 0;
@@ -2068,15 +2073,20 @@ static int ssn_rt_pool_mem_init(void) {
 
 /* Allocate one bare descriptor from the game texture pool (uncompressed
  * A8R8G8B8). Called at most POOL_TOTAL times over the whole run. */
-static uint32_t ssn_rt_alloc_descriptor(uint32_t w, uint32_t h) {
+static uint32_t ssn_rt_alloc_descriptor(uint32_t registered_key,
+                                        uint32_t w, uint32_t h) {
     uint32_t mgr = *(volatile uint32_t *)(uintptr_t)SSN_NU_TEX_ALLOC_MGR_CELL;
     uint32_t res = 0;
     if (!ssn_ptr_sane(mgr))
         return 0;
     if (((nu_tex_alloc_fn)(uintptr_t)g_nu_tex_alloc_desc)(
-            mgr, 0x30000u, 0x82u, w, h, 1u, 0u, &res) != 0)
+            mgr, registered_key, 0x82u, w, h, 1u, 0u, &res) != 0)
         return 0;
     if (!ssn_heap_ptr_sane(res))
+        return 0;
+    /* +0x08 is the key under which the allocator registered this descriptor.
+     * Scene teardown uses it to remove the same entry from the manager map. */
+    if (*(volatile uint32_t *)(uintptr_t)(res + 0x08u) != registered_key)
         return 0;
     return res;
 }
@@ -2084,8 +2094,8 @@ static uint32_t ssn_rt_alloc_descriptor(uint32_t w, uint32_t h) {
 /* Render title -> our slot buffer via the game's own upload (handles any
  * swizzle), then force the descriptor to point at OUR buffer + known IO offset
  * (main-memory location). No allocation. */
-static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
-                              uint32_t type, uint32_t index) {
+static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t type,
+                              uint32_t index) {
     uint32_t res = slot->resource;
     const char *title;
     uint32_t w = 0;
@@ -2163,6 +2173,8 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
     if (slot->game_buf) {
         *(volatile uint32_t *)(uintptr_t)(res + 0x34u) = slot->game_buf;
         *(volatile uint32_t *)(uintptr_t)(res + 0x30u) = slot->game_io;
+        *(volatile uint32_t *)(uintptr_t)(res + 0x08u) =
+            slot->registered_key;
         icache_flush((void *)(uintptr_t)res, 0x40u);
     }
 
@@ -2184,7 +2196,11 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
         remap: the A1R5G5B5-derived default routed alpha from the wrong texel
         component, so the opaque outline sampled as transparent. */
     *(volatile uint32_t *)(uintptr_t)(res + 0x18u) = 1u;        /* main mem */
-    *(volatile uint32_t *)(uintptr_t)(res + 0x08u) = key;
+    /* The requested custom key is handled by our lookup detour. Never replace
+     * the descriptor's manager key: doing so leaves a dangling map entry when
+     * the song-select scene destroys the resource. */
+    *(volatile uint32_t *)(uintptr_t)(res + 0x08u) =
+        slot->registered_key;
     icache_flush((void *)(uintptr_t)res, 0x40u);
     icache_flush((void *)(uintptr_t)slot->buf, w * h * 4u);
     return 1;
@@ -2230,14 +2246,15 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
         uint32_t res;
         if (!ssn_rt_title_dims(type, &w, &h))
             return 0;
-        res = ssn_rt_alloc_descriptor(w, h);
+        res = ssn_rt_alloc_descriptor(key, w, h);
         if (!res)
             return 0;
         victim->resource = res;      /* cache BEFORE upload: never re-alloc */
+        victim->registered_key = key;
         victim->game_io = *(volatile uint32_t *)(uintptr_t)(res + 0x30u);
         victim->game_buf = *(volatile uint32_t *)(uintptr_t)(res + 0x34u);
     }
-    if (!ssn_rt_slot_upload(victim, key, type, index))
+    if (!ssn_rt_slot_upload(victim, type, index))
         return 0;
     victim->index = index;
     victim->lru = ++g_rt_pool_tick;
@@ -2584,11 +2601,97 @@ static uint32_t ssn_vec90_insert_many(uint32_t vec, uint32_t at,
     return new_begin + at * SSN_SONG_RECORD_SIZE;
 }
 
+static int ssn_record_is_custom(uint32_t rec) {
+    uint32_t uid = *(volatile uint32_t *)(uintptr_t)
+        (rec + SSN_SONG_UNIQUEID_OFF);
+    return uid >= SSN_CUSTOM_UID_BASE &&
+           uid - SSN_CUSTOM_UID_BASE < SSN_INJECT_MAX;
+}
+
+static uint32_t ssn_vec90_custom_count(uint32_t vec) {
+    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
+    uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    uint32_t count = 0;
+
+    if (!ssn_ptr_sane(begin) || end < begin ||
+        ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
+        return 0;
+    for (uint32_t rec = begin; rec < end; rec += SSN_SONG_RECORD_SIZE)
+        if (ssn_record_is_custom(rec))
+            count++;
+    return count;
+}
+
+/* Remove tagged rows from a game-owned BasicSong vector. Each record owns
+ * four std::strings, so this must go through the game's vector erase helper;
+ * a raw memmove would leak or double-free their heap storage. Erasing runs
+ * from the back keeps all earlier addresses valid. */
+static int ssn_vec90_erase_custom(uint32_t vec) {
+    record_erase_fn erase_records =
+        (record_erase_fn)(uintptr_t)g_record_erase_desc;
+    uint32_t begin = *(volatile uint32_t *)(uintptr_t)(vec + 0x00u);
+    uint32_t end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+    uint32_t removed = 0;
+
+    if (!g_record_erase_desc[0] || !ssn_ptr_sane(begin) || end < begin ||
+        ((end - begin) % SSN_SONG_RECORD_SIZE) != 0)
+        return -1;
+
+    while (end > begin) {
+        uint32_t run_end = end;
+        uint32_t run_begin;
+        uint32_t result = 0;
+        uint32_t old_end;
+
+        while (run_end > begin &&
+               !ssn_record_is_custom(run_end - SSN_SONG_RECORD_SIZE))
+            run_end -= SSN_SONG_RECORD_SIZE;
+        if (run_end == begin)
+            break;
+        run_begin = run_end - SSN_SONG_RECORD_SIZE;
+        while (run_begin > begin &&
+               ssn_record_is_custom(run_begin - SSN_SONG_RECORD_SIZE))
+            run_begin -= SSN_SONG_RECORD_SIZE;
+
+        old_end = end;
+        erase_records(&result, vec - 4u, run_begin, run_end);
+        removed += (run_end - run_begin) / SSN_SONG_RECORD_SIZE;
+        end = *(volatile uint32_t *)(uintptr_t)(vec + 0x04u);
+        if (end < begin || ((end - begin) % SSN_SONG_RECORD_SIZE) != 0 ||
+            end != old_end - (run_end - run_begin))
+            return -1;
+    }
+    return (int)removed;
+}
+
+static int ssn_refs_match_virtual(const ssn_inject_song_ref_t *refs,
+                                  int ref_count) {
+    if (ref_count < 0 || (uint32_t)ref_count != g_ssn_virtual_song_count)
+        return 0;
+    for (int i = 0; i < ref_count; i++) {
+        const ssn_inject_song_t *old = &g_ssn_virtual_songs[i];
+        if (strncmp(refs[i].short_id, old->short_id,
+                    sizeof old->short_id) != 0 ||
+            refs[i].genre_id != old->genre_id ||
+            refs[i].outline != old->outline ||
+            strncmp(refs[i].sort_title, old->song.title,
+                    sizeof old->song.title) != 0)
+            return 0;
+    }
+    return 1;
+}
+
+static void ssn_reset_virtual_songs(void) {
+    ssn_rt_reset_descriptors();
+    memset(g_custom_basic_meta_ready, 0, sizeof g_custom_basic_meta_ready);
+    memset(g_ssn_inject_abs, 0, sizeof g_ssn_inject_abs);
+    g_ssn_virtual_song_count = 0;
+    g_ssn_injected_count = 0;
+}
+
 /* Identity of the source array we last touched. `owner` is a stack address that
- * aliases across calls; the heap source-array begin pointer is the real handle.
- * When it changes the game rebuilt its list (fresh, no customs) so we reset and
- * start over; otherwise it's the same persistent array and we only APPEND the
- * customs not already in it. */
+ * aliases across calls; the heap source-array begin pointer plus the tagged-row
+ * scan tells us whether to reset, reconcile, or reuse the current injection. */
 /* Rebuild g_ssn_inject_abs (virtual index -> absolute source position) by
  * scanning the source vector for our uniqueid-tagged records. Positions shift
  * as we append, so recompute after inserting. */
@@ -2629,17 +2732,39 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
 
     src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
 
-    /* Reset the per-virtual caches only on a FRESH array (game rebuilt its list
-     * -> no customs present); otherwise append into the same persistent array. */
-    if (src_begin != g_ssn_src_begin) {
-        ssn_rt_reset_descriptors();
-        for (uint32_t v = 0; v < SSN_INJECT_MAX; v++)
-            g_custom_basic_meta_ready[v] = 0;
-        g_ssn_virtual_song_count = 0;
+    ref_count = ssn_collect_cached_refs(refs, SSN_INJECT_MAX);
+
+    /* A pointer alone is not a reliable generation id: the allocator may
+     * reuse the same address for a freshly rebuilt vector. Reconcile against
+     * the tagged rows actually present. If the active set changed, safely
+     * erase every old custom row from both parallel vectors and rebuild it. */
+    uint32_t source_custom = ssn_vec90_custom_count(svec);
+    uint32_t temp_custom = ssn_vec90_custom_count(tvec);
+    int fresh = src_begin != g_ssn_src_begin ||
+                (source_custom == 0 && g_ssn_virtual_song_count != 0);
+    int rebuild = !fresh &&
+        (!ssn_refs_match_virtual(refs, ref_count) ||
+         source_custom != g_ssn_virtual_song_count ||
+         temp_custom != g_ssn_virtual_song_count);
+
+    if (fresh) {
+        ssn_reset_virtual_songs();
         g_ssn_src_begin = src_begin;
+    } else if (rebuild) {
+        int temp_removed = ssn_vec90_erase_custom(tvec);
+        int source_removed = ssn_vec90_erase_custom(svec);
+        if (temp_removed < 0 || source_removed < 0) {
+            dbg_print("[ssn] custom row reconciliation failed\n");
+            return;
+        }
+        dbg_print_hex32("[ssn] pruned custom rows",
+                        (uint32_t)source_removed);
+        ssn_reset_virtual_songs();
+        g_ssn_src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
+    } else {
+        return;
     }
 
-    ref_count = ssn_collect_cached_refs(refs, SSN_INJECT_MAX);
     if (ref_count <= 0)
         return;
 
@@ -2845,6 +2970,8 @@ void songselect_natives_install(void) {
     g_argrd_desc[1] = g_song_manifest->main_toc;
     g_record_insert_desc[0] = g_song_manifest->record_insert_code;
     g_record_insert_desc[1] = g_song_manifest->songselect_toc;
+    g_record_erase_desc[0] = g_song_manifest->record_erase_code;
+    g_record_erase_desc[1] = g_song_manifest->songselect_toc;
     g_notify_course_star_desc[0] = g_song_manifest->notify_course_star_code;
     g_notify_course_star_desc[1] = g_song_manifest->main_toc;
     g_basic_musicid_lookup_desc[0] = g_song_manifest->basic_lookup_entry;

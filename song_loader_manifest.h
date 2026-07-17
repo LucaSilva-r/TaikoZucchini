@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define TAIKO_SONG_LOADER_MAGIC   0x54534C4Du /* TSLM */
-#define TAIKO_SONG_LOADER_VERSION 2u
+#define TAIKO_SONG_LOADER_VERSION 3u
 #define TAIKO_SONG_LAYOUT_V1      1u
 
 enum taiko_song_native_slot {
@@ -50,6 +50,7 @@ typedef struct taiko_song_loader_manifest {
     uint32_t arg_reader_code;
     uint32_t songselect_state_cell;
     uint32_t record_insert_code;
+    uint32_t record_erase_code;
     uint32_t notify_course_star_code;
     uint32_t basic_lookup_entry;
     uint32_t basic_lookup_toc;

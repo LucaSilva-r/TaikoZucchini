@@ -296,6 +296,10 @@ void song_loader_patch_resolve(void) {
         0xf821fe61u, 0x7c0802a6u, 0xfa810140u, 0x3a81008cu,
         0xfba10188u, 0x7a9d0020u, 0xfac10150u, 0xfae10158u,
     };
+    static const uint32_t record_erase[] = {
+        0x7f853000u, 0x7c0802a6u, 0xf821ff61u, 0xfb410070u,
+        0xfb610078u, 0xfb810080u, 0xfbe10098u, 0xfba10088u,
+    };
     static const uint32_t notify_course[] = {
         0xf821ff71u, 0x7c0802a6u, 0xfbe10088u, 0x7c7f1b78u,
         0x8062cbacu, 0xfba10078u, 0x38630270u, 0xfbc10080u,
@@ -393,6 +397,7 @@ void song_loader_patch_resolve(void) {
     int have_native;
     int have_arg;
     int have_insert;
+    int have_erase;
     int have_notify;
     int have_basic;
     int have_alloc;
@@ -424,6 +429,8 @@ void song_loader_patch_resolve(void) {
                                     record_insert_blue,
                                     COUNT_OF(record_insert_blue),
                                     &g_manifest.record_insert_code, NULL);
+    have_erase = find_exact(record_erase, COUNT_OF(record_erase),
+                            &g_manifest.record_erase_code);
     have_notify = find_exact_either(notify_course, COUNT_OF(notify_course),
                                     notify_course_blue,
                                     COUNT_OF(notify_course_blue),
@@ -535,7 +542,8 @@ void song_loader_patch_resolve(void) {
         g_manifest.basic_lookup_toc)
         g_manifest.capabilities |= TAIKO_SONG_CAP_METADATA;
     if ((g_manifest.capabilities & TAIKO_SONG_CAP_METADATA) &&
-        have_insert && have_inject && have_island && g_manifest.songselect_toc)
+        have_insert && have_erase && have_inject && have_island &&
+        g_manifest.songselect_toc)
         g_manifest.capabilities |= TAIKO_SONG_CAP_INJECTION;
     if ((g_manifest.capabilities & TAIKO_SONG_CAP_INJECTION) &&
         have_alloc && have_texlookup && g_manifest.texture_alloc_toc &&
