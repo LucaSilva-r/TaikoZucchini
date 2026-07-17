@@ -455,9 +455,37 @@ static int ssl_write_all(mbedtls_ssl_context *ssl,
     return 0;
 }
 
+/* Scan a complete header block for Content-Length (case-insensitive).
+ * Returns 0 when absent or unparsable. */
+static size_t scan_content_length(const unsigned char *h, size_t len) {
+    static const char key[] = "content-length:";
+    for (size_t i = 0; i + (sizeof key - 1) <= len; i++) {
+        if (i != 0 && h[i - 1] != '\n') continue;
+        size_t k = 0;
+        for (; k < sizeof key - 1; k++) {
+            char c = (char)h[i + k];
+            if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            if (c != key[k]) break;
+        }
+        if (k != sizeof key - 1) continue;
+        size_t j = i + k;
+        while (j < len && (h[j] == ' ' || h[j] == '\t')) j++;
+        size_t v = 0;
+        int digits = 0;
+        while (j < len && h[j] >= '0' && h[j] <= '9') {
+            v = v * 10 + (size_t)(h[j] - '0');
+            j++;
+            digits = 1;
+        }
+        return digits ? v : 0;
+    }
+    return 0;
+}
+
 static int drain_response(mbedtls_ssl_context *ssl, bytebuf_t *buf) {
     unsigned char tmp[2048];
     int64_t deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
+    int sized = 0;
     for (;;) {
         int rc = mbedtls_ssl_read(ssl, tmp, sizeof tmp);
         if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
@@ -472,6 +500,23 @@ static int drain_response(mbedtls_ssl_context *ssl, bytebuf_t *buf) {
         if (buf->len + (size_t)rc > HTTP_CLIENT_BODY_MAX + 64 * 1024)
             return -1;
         if (bb_append(buf, tmp, (size_t)rc) != 0) return -1;
+        if (!sized) {
+            /* Once the header block is complete, reserve the exact final
+             * size in one shot. The doubling realloc ladder holds ~2x the
+             * body transiently, which fragments the small PRX heap until
+             * large downloads (song library, assets) start failing while
+             * small polls keep working. Chunked responses (no
+             * Content-Length) still take the doubling path. */
+            const char *he = strstr((const char *)buf->data, "\r\n\r\n");
+            if (he) {
+                sized = 1;
+                size_t hlen = (size_t)((const unsigned char *)he - buf->data) + 4;
+                size_t clen = scan_content_length(buf->data, hlen);
+                if (clen > 0 && clen <= HTTP_CLIENT_BODY_MAX &&
+                    bb_reserve(buf, hlen + clen + 1) != 0)
+                    return -1;
+            }
+        }
         deadline = now_ms() + HTTP_IO_TIMEOUT_MS;
     }
 }
@@ -727,8 +772,7 @@ static int http_request_inner(const char *method,
     const char *te = http_header_find(out, "Transfer-Encoding", &te_len);
     const char *cl = http_header_find(out, "Content-Length",    &cl_len);
 
-    unsigned char *body_out = NULL;
-    size_t         body_out_len = 0;
+    size_t body_out_len = 0;
 
     if (te && te_len == 7 && icase_eq(te, te_len, "chunked")) {
         long dec = dechunk(body_start, raw_body_len);
@@ -738,10 +782,6 @@ static int http_request_inner(const char *method,
             rc = -1; goto out_fail;
         }
         body_out_len = (size_t)dec;
-        body_out = (unsigned char *)malloc(body_out_len + 1);
-        if (!body_out) { free(headers); out->headers = NULL; rc = -1; goto out_fail; }
-        memcpy(body_out, body_start, body_out_len);
-        body_out[body_out_len] = '\0';
     } else if (cl) {
         size_t want = 0;
         for (size_t i = 0; i < cl_len; i++) {
@@ -756,21 +796,21 @@ static int http_request_inner(const char *method,
         }
         if (want > raw_body_len) want = raw_body_len;  /* server truncated */
         body_out_len = want;
-        body_out = (unsigned char *)malloc(body_out_len + 1);
-        if (!body_out) { free(headers); out->headers = NULL; rc = -1; goto out_fail; }
-        memcpy(body_out, body_start, body_out_len);
-        body_out[body_out_len] = '\0';
     } else {
         /* No framing — body is whatever ran until close. */
         body_out_len = raw_body_len;
-        body_out = (unsigned char *)malloc(body_out_len + 1);
-        if (!body_out) { free(headers); out->headers = NULL; rc = -1; goto out_fail; }
-        memcpy(body_out, body_start, body_out_len);
-        body_out[body_out_len] = '\0';
     }
 
-    out->body     = body_out;
+    /* Hand the drained buffer itself to the caller instead of a second
+     * full-size malloc+memcpy: the transient ~2x peak fragments the PRX
+     * heap. drain_response reserved the exact final size when the server
+     * sent Content-Length, so the kept buffer is not oversized. */
+    memmove(raw.data, body_start, body_out_len);
+    raw.data[body_out_len] = '\0';
+    out->body     = raw.data;
     out->body_len = body_out_len;
+    raw.data = NULL;
+    raw.len  = raw.cap = 0;
 
 #if CFG_HTTP_WIRE_LOG
     wire_dump("[wire] RESP body", body_out, body_out_len);
