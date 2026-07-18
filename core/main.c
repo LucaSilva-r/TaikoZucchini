@@ -44,6 +44,7 @@
 #include "menu_actions.h"
 #include "ftp_server.h"
 #include "version_check.h"
+#include "pairing.h"
 
 SYS_MODULE_INFO(taiko_dongle, 0, 1, 1);
 SYS_MODULE_START(taiko_start);
@@ -907,6 +908,7 @@ int taiko_start(unsigned int args, void *argp) {
         camera_qr_init();
     bpreader_hook_install();
     bpreader_serial_set_reader_enabled(1);
+    taiko_pairing_start();
     (void)taiko_game_chassisinfo_dir();  /* warm cache + log detected version */
     chassisinfo_hook_install();
     /* Publish the live dongle serial into the FPT so the patched fcntl
@@ -940,6 +942,7 @@ int taiko_start(unsigned int args, void *argp) {
 
 int taiko_stop(void) {
     patch_ui_close();
+    taiko_pairing_stop();
     if (g_cfg.online_diag)
         online_diag_stop();
     return SYS_PRX_STOP_OK;

@@ -39,18 +39,16 @@ static void capture_cb(const char code[21]) {
 }
 
 static void replay_card(const char *code20) {
-    if (!bpreader_serial_reader_enabled()) {
+    int rc = bpreader_serial_present_access_code(code20);
+    if (rc == BPREADER_PRESENT_DISABLED) {
         taiko_overlay_show_prompt("Card reader disabled");
-        return;
+    } else if (rc == BPREADER_PRESENT_BUSY) {
+        taiko_overlay_show_prompt("Card reader is busy");
+    } else if (rc == BPREADER_PRESENT_INVALID) {
+        taiko_overlay_show_prompt("Invalid card code");
+    } else if (rc == BPREADER_PRESENT_NOT_ENCODABLE) {
+        taiko_overlay_show_prompt("Card code is not MIFARE-encodable");
     }
-
-    char ac[21];
-    /* Stored codes are 20 decimal digits; bpreader treats them as hex
-     * (digits are valid hex), matching the QR decode path exactly. */
-    memcpy(ac, code20, 20);
-    ac[20] = '\0';
-    bpreader_serial_set_access_code(ac);
-    bpreader_serial_set_card_present(true);
 }
 
 static void action_add_keyboard(void) {
