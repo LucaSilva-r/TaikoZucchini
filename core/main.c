@@ -898,7 +898,8 @@ int taiko_start(unsigned int args, void *argp) {
      * gcm allocator runs. */
     taiko_video_upscale_install();
     taiko_overlay_hooks_install();
-    songselect_natives_install();
+    if (g_cfg.custom_song_injector)
+        songselect_natives_install();
     taiko_version_check_start();
     camera_diag_hooks_install();
     smart_stub_install();
@@ -926,9 +927,9 @@ int taiko_start(unsigned int args, void *argp) {
          * keyboard itself — see the self_poll flag on menu_ingame_start. */
         kb_input_init();
     }
-    /* In-game main menu (keyboard F4 / pad L3+R3). Must open in BOTH USIO
-     * states, so it is started unconditionally. The pad path is independent
-     * of USIO; when USIO is off the watcher also self-polls the keyboard. */
+    /* In-game main menu (keyboard F4 / pad L3+R3 / optional drum pattern).
+     * The config gate is checked inside menu_ingame_start. The pad path is
+     * independent of USIO; when USIO is off the watcher self-polls keyboard. */
     menu_ingame_start(!g_cfg.usio_emulation);
     if (g_cfg.online_diag)
         online_diag_start();

@@ -4,7 +4,6 @@
 
 #include <cell/fs/cell_fs_file_api.h>
 
-#include "debug.h"
 #include "enso_override.h"
 #include "game_state.h"
 #include "network/custom_song_client.h"
@@ -16,7 +15,7 @@
 #define KIND_MAX    8
 #define PATH_MAX    512
 #define AUDIO_FD_MAX 4
-#define ESE_CUSTOM_ROOT "/dev_hdd0/plugins/taiko/custom_songs"
+#define CUSTOM_SONG_ROOT "/dev_hdd0/plugins/taiko/custom_songs"
 
 typedef struct {
     int active;
@@ -59,10 +58,6 @@ static int str_equal(const char *a, const char *b) {
             return 0;
     }
     return *a == *b;
-}
-
-static int is_ese_short_id(const char *s) {
-    return s && strncmp(s, "ese_", 4) == 0;
 }
 
 static int copy_token_lower(char *out, unsigned int cap, const char *src,
@@ -145,7 +140,7 @@ static int extract_fumen_info(const char *path, char *song, unsigned int song_ca
     p++;
 
     /* Parse from the filename suffix, not its first underscore: injected song
-     * ids are themselves named "ese_<hash>". Expected forms are
+     * source IDs can contain underscores. Expected forms are
      * <song>_<course>.bin and <song>_<course>_<player>.bin. */
     filename = p;
     filename_end = filename;
@@ -324,11 +319,11 @@ static enso_audio_fd_t *find_audio_fd(int fd) {
     return NULL;
 }
 
-static int try_open_ese_short_alias(const char *path, int flags, int *fd,
-                                    const void *arg, uint64_t size,
-                                    int *out_rc) {
+static int try_open_custom_song_short_alias(const char *path, int flags,
+                                            int *fd, const void *arg,
+                                            uint64_t size, int *out_rc) {
     char song[SONG_ID_MAX];
-    char long_id[ESE_SONG_ID_MAX];
+    char long_id[CUSTOM_SONG_ID_MAX];
     char course[COURSE_MAX];
     char mapped_course[COURSE_MAX];
     char kind[KIND_MAX];
@@ -353,52 +348,36 @@ static int try_open_ese_short_alias(const char *path, int flags, int *fd,
          * solo chart to both players. Stock chart paths never enter here. */
         target_kind = str_equal(kind, "duet") ? "solo" : kind;
         target_duet_player = str_equal(kind, "duet") ? NULL : duet_player;
-        if (ese_song_resolve_short_id(song, long_id, sizeof long_id) &&
-            ese_song_map_course_for_short_id(song, course, mapped_course,
+        if (custom_song_resolve_short_id(song, long_id, sizeof long_id) &&
+            custom_song_map_course_for_short_id(song, course, mapped_course,
                                              sizeof mapped_course) &&
-            append_path(root, sizeof root, ESE_CUSTOM_ROOT, long_id) &&
+            append_path(root, sizeof root, CUSTOM_SONG_ROOT, long_id) &&
             build_folder_fumen_path(target, sizeof target, root,
                                     long_id, target_kind, mapped_course,
                                     target_duet_player)) {
             target_path = target;
-        } else if (is_ese_short_id(song)) {
-            dbg_print("[enso_override] ese fumen alias miss ");
-            dbg_print(song);
-            dbg_print("\n");
         }
     } else if (extract_song_audio_id(path, song, sizeof song)) {
-        if (ese_song_resolve_short_id(song, long_id, sizeof long_id) &&
-            append_path(root, sizeof root, ESE_CUSTOM_ROOT, long_id) &&
+        if (custom_song_resolve_short_id(song, long_id, sizeof long_id) &&
+            append_path(root, sizeof root, CUSTOM_SONG_ROOT, long_id) &&
             build_folder_audio_path(target, sizeof target, root,
                                     long_id, path)) {
             target_path = target;
-        } else if (is_ese_short_id(song)) {
-            dbg_print("[enso_override] ese audio alias miss ");
-            dbg_print(song);
-            dbg_print("\n");
         }
     }
 
     if (!target_path)
         return 0;
 
-    dbg_print("[enso_override] ese alias ");
-    dbg_print(path);
-    dbg_print(" -> ");
-    dbg_print(target_path);
-    dbg_print("\n");
-
     int rc = cellFsOpen(target_path, flags, fd, arg, size);
-    dbg_print_hex32("[enso_override] ese alias open rc", (uint32_t)rc);
     if (fd) {
-        dbg_print_hex32("[enso_override] ese alias fd", (uint32_t)*fd);
         if (rc == CELL_FS_SUCCEEDED && extract_song_audio_id(path, song, sizeof song))
             track_audio_fd(*fd);
     }
     if (rc == CELL_FS_SUCCEEDED && course[0] &&
         taiko_game_state_current() == TAIKO_GAME_STATE_GAMEPLAY) {
         uint32_t uid = 0;
-        char title[ESE_SONG_TITLE_MAX];
+        char title[CUSTOM_SONG_TITLE_MAX];
         title[0] = '\0';
         if (taiko_songselect_custom_info(song, &uid, title, sizeof title))
             (void)extra_scores_track_chart(uid, mapped_course[0], target_path,
@@ -412,7 +391,8 @@ static int try_open_ese_short_alias(const char *path, int flags, int *fd,
 int taiko_enso_override_try_open(const char *path, int flags, int *fd,
                                  const void *arg, uint64_t size,
                                  int *out_rc) {
-    return try_open_ese_short_alias(path, flags, fd, arg, size, out_rc);
+    return try_open_custom_song_short_alias(path, flags, fd, arg, size,
+                                            out_rc);
 }
 
 void taiko_enso_override_note_read(int fd, uint64_t requested,

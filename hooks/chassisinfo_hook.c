@@ -21,8 +21,6 @@
 #include <cell/fs/cell_fs_file_api.h>
 #include <cell/fs/cell_fs_errno.h>
 #include <sys/timer.h>
-
-#include "config/runtime.h"
 #include "network/mgmt_poll.h"
 #include "core/debug.h"
 
@@ -47,20 +45,14 @@ static int path_is_chassisinfo(const char *p) {
     return n >= tn && memcmp(p + (n - tn), tail, tn) == 0;
 }
 
-/* The game reads chassisinfo.xml once during boot. Hold that open (bounded
- * by mgmt_boot_wait) until the connector boot poll finished, so operator
- * flags queued while the cabinet was offline apply in this boot instead of
- * the next one. The mgmt poll sets the flag on success, failure, or when
- * management is disabled, so an offline cabinet never waits past the cap. */
+/* Preserve current-boot connector config without an arbitrary delay: wait
+ * only for the already-started request to return success or failure. */
 static void wait_for_boot_poll(void) {
-    int remain_ms = (int)g_cfg.mgmt_boot_wait * 1000;
-    if (taiko_mgmt_first_poll_done() || remain_ms == 0)
+    if (!taiko_mgmt_boot_poll_pending())
         return;
-    dbg_print("[chassis] waiting for connector boot poll\n");
-    while (remain_ms > 0 && !taiko_mgmt_first_poll_done()) {
-        sys_timer_usleep(100 * 1000);
-        remain_ms -= 100;
-    }
+    dbg_print("[chassis] waiting for connector request\n");
+    while (taiko_mgmt_boot_poll_pending())
+        sys_timer_usleep(10 * 1000);
 }
 
 int chassisinfo_synth_try_open(const char *path, int *out_fd) {

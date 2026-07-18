@@ -589,12 +589,11 @@ static void version_check_thread(uint64_t arg) {
 
     if (!load_network_imports()) {
         dbg_print("[version] networking unavailable; background poll disabled\n");
+        taiko_mgmt_boot_poll_finish();
         sys_ppu_thread_exit(0);
     }
 
-    /* Boot-priority connector poll, before the update-check delay, so
-     * remotely queued settings can apply before the game reads its
-     * chassisinfo (the synth gates on taiko_mgmt_first_poll_done). */
+    /* Resolve the boot config request before chassisinfo is synthesized. */
     taiko_mgmt_boot_poll();
 
     sys_timer_sleep(8);
@@ -615,7 +614,7 @@ static void version_check_thread(uint64_t arg) {
          * instant (the sync no longer runs on the overlay-open path). */
         if (!taiko_mgmt_operation_active()) {
             dbg_print("[version] warming custom-song library\n");
-            ese_library_sync();
+            custom_song_library_sync();
         }
     }
 
@@ -630,10 +629,13 @@ void taiko_version_check_start(void) {
     if (g_started) return;
     g_started = 1;
 
+    taiko_mgmt_boot_poll_arm();
     sys_ppu_thread_t tid = 0;
     int rc = sys_ppu_thread_create(&tid, version_check_thread, 0,
                                    1200, 64 * 1024, 0,
                                    "taiko_version_check");
-    if (rc != 0)
+    if (rc != 0) {
         dbg_print_hex32("[version] thread_create", (uint32_t)rc);
+        taiko_mgmt_boot_poll_finish();
+    }
 }

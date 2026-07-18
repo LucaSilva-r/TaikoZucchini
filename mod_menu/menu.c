@@ -64,6 +64,9 @@ typedef enum {
     F_USIO_EMULATION,
     F_QR_CARD_READER,
     F_SAVED_CARD_PROMPT,
+    F_INGAME_MOD_MENU,
+    F_DRUM_MENU_SHORTCUT,
+    F_CUSTOM_SONG_INJECTOR,
     F_CAMERA_DIAG_HOOKS,
     F_DATA00000_REDIRECT,
     F_ONLINE_DIAG,
@@ -97,6 +100,9 @@ static int field_get(field_id_t id) {
     case F_USIO_EMULATION:      return g_cfg.usio_emulation;
     case F_QR_CARD_READER:      return g_cfg.qr_card_reader;
     case F_SAVED_CARD_PROMPT:   return g_cfg.saved_card_prompt;
+    case F_INGAME_MOD_MENU:     return g_cfg.ingame_mod_menu;
+    case F_DRUM_MENU_SHORTCUT:  return g_cfg.drum_menu_shortcut;
+    case F_CUSTOM_SONG_INJECTOR:return g_cfg.custom_song_injector;
     case F_CAMERA_DIAG_HOOKS:   return g_cfg.camera_diag_hooks;
     case F_DATA00000_REDIRECT:  return g_cfg.data00000_redirect;
     case F_ONLINE_DIAG:         return g_cfg.online_diag;
@@ -128,6 +134,9 @@ static void field_set(field_id_t id, int v) {
     case F_USIO_EMULATION:      g_cfg.usio_emulation = v; break;
     case F_QR_CARD_READER:      g_cfg.qr_card_reader = v; break;
     case F_SAVED_CARD_PROMPT:   g_cfg.saved_card_prompt = v; break;
+    case F_INGAME_MOD_MENU:     g_cfg.ingame_mod_menu = v; break;
+    case F_DRUM_MENU_SHORTCUT:  g_cfg.drum_menu_shortcut = v; break;
+    case F_CUSTOM_SONG_INJECTOR:g_cfg.custom_song_injector = v; break;
     case F_CAMERA_DIAG_HOOKS:   g_cfg.camera_diag_hooks = v; break;
     case F_DATA00000_REDIRECT:  g_cfg.data00000_redirect = v; break;
     case F_ONLINE_DIAG:         g_cfg.online_diag = v; break;
@@ -188,6 +197,15 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "Saved-card menu",
       "Shows the card-reader row in the main menu while the game waits for a card. Stored cards still work without QR.",
       F_SAVED_CARD_PROMPT, 0 },
+    { ITEM_TOGGLE,  "In-game mod menu",
+      "Enables the live overlay menu. OFF disables F4, L3+R3, and the drum shortcut; the boot recovery menu remains available.",
+      F_INGAME_MOD_MENU, 0 },
+    { ITEM_TOGGLE,  "Drum menu shortcut",
+      "Allows the left/right rim-hit sequence to open the in-game mod menu. F4 and L3+R3 still work when this is OFF.",
+      F_DRUM_MENU_SHORTCUT, 0 },
+    { ITEM_TOGGLE,  "Custom song injector",
+      "Adds downloaded custom songs to the in-game song list. OFF leaves the stock song list and skips all song-selection hooks.",
+      F_CUSTOM_SONG_INJECTOR, 0 },
 
     { ITEM_SECTION, "Network", "", 0, 0 },
     { ITEM_TOGGLE,  "Online redirect",
@@ -1509,6 +1527,8 @@ static int main_row_selectable(int code) {
         return 0;
     if (code >= MAIN_CARD_BASE && !card_picker_available())
         return 0;
+    if (code == MAIN_SONGS && !g_cfg.custom_song_injector)
+        return 0;
     if (code == MAIN_SONGS && taiko_mgmt_operation_active())
         return 0;
     return 1;
@@ -1566,7 +1586,9 @@ static const char *main_row_desc(int code) {
     case MAIN_CARDS:
         return "Pick, create, or scan a saved card for the current card prompt.";
     case MAIN_SONGS:
-        return "Browse and download custom songs from the configured Connector service.";
+        return g_cfg.custom_song_injector
+            ? "Browse and download custom songs from the configured Connector service."
+            : "Disabled by the Custom song injector setting under Core.";
     case MAIN_OPS:
         return "Live status for managed song synchronization and title texture generation.";
     case MAIN_CLOSE:
@@ -1620,6 +1642,10 @@ static void main_render(const int *rows, int count, int sel) {
             kinds[i] = TAIKO_OVL_ROW_SECTION;
         else if (rows[i] >= MAIN_CARD_BASE && !card_picker_available()) {
             values[i] = "can't swipe BanaPass now";
+            kinds[i] = TAIKO_OVL_ROW_DISABLED;
+        }
+        else if (rows[i] == MAIN_SONGS && !g_cfg.custom_song_injector) {
+            values[i] = "disabled";
             kinds[i] = TAIKO_OVL_ROW_DISABLED;
         }
         else if (rows[i] == MAIN_SONGS && taiko_mgmt_operation_active()) {
@@ -1771,7 +1797,8 @@ static void ingame_menu_thread(uint64_t arg) {
          * match when the game state allows opening (else a song's kas arm it). */
         uint8_t drum[4];
         pad_input_consume_menu_drum(drum);
-        if (taiko_game_state_allows_mod_menu()) {
+        if (g_cfg.drum_menu_shortcut &&
+            taiko_game_state_allows_mod_menu()) {
             if (kat_step > 0 && --kat_window <= 0)
                 kat_step = 0;   /* too slow — restart */
 
@@ -1798,7 +1825,8 @@ static void ingame_menu_thread(uint64_t arg) {
             kat_window = 0;
         }
 
-        if (open && !g_main_menu_open && taiko_game_state_allows_mod_menu()) {
+        if (open && g_cfg.ingame_mod_menu && !g_main_menu_open &&
+            taiko_game_state_allows_mod_menu()) {
             menu_main_run();
             /* Resync: the trigger key/combo is likely still held from the
              * close action. Require a fresh release before the next open. */
@@ -1815,7 +1843,7 @@ static void ingame_menu_thread(uint64_t arg) {
 
 void menu_ingame_start(int self_poll_keyboard) {
     static int started;
-    if (started) return;
+    if (started || !g_cfg.ingame_mod_menu) return;
     started = 1;
 
     g_ig_self_poll_kb = self_poll_keyboard ? 1 : 0;

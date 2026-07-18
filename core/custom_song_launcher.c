@@ -23,8 +23,8 @@
 #define MENU_VISIBLE 16
 
 /* Song page (10) + Prev/Next/queue-category/clear-category/Back actions. */
-#define SONG_ROWS_MAX (ESE_SONG_PAGE_MAX + 5)
-#define CATEGORY_ROWS_MAX (ESE_CATEGORY_LIST_MAX + 5)
+#define SONG_ROWS_MAX (CUSTOM_SONG_PAGE_MAX + 5)
+#define CATEGORY_ROWS_MAX (CUSTOM_SONG_CATEGORY_LIST_MAX + 5)
 
 enum {
     CATEGORY_CLOSE = -1,
@@ -47,7 +47,7 @@ static int queue_init(song_download_queue_t *q) {
     if (!q)
         return 0;
     memset(q, 0, sizeof *q);
-    count = ese_song_library_count();
+    count = custom_song_library_count();
     if (count <= 0)
         return 0;
     q->selected = (unsigned char *)malloc((size_t)count);
@@ -91,17 +91,17 @@ static void queue_set(song_download_queue_t *q, int index, int selected) {
 
 static void queue_set_category(song_download_queue_t *q, int cat_idx,
                                int selected) {
-    ese_song_entry_t song;
+    custom_song_entry_t song;
     int song_cat;
 
     if (!q || !q->selected || cat_idx < -1)
         return;
     for (int i = 0; i < q->library_count; i++) {
-        if (!ese_song_library_get2(i, &song, &song_cat) ||
+        if (!custom_song_library_get2(i, &song, &song_cat) ||
             (cat_idx >= 0 && song_cat != cat_idx))
             continue;
-        if (selected && ese_song_library_is_cached_at(i) &&
-            !ese_song_library_is_stale_at(i))
+        if (selected && custom_song_library_is_cached_at(i) &&
+            !custom_song_library_is_stale_at(i))
             continue;
         queue_set(q, i, selected);
     }
@@ -203,7 +203,7 @@ static int menu_clamp(int sel, int count) {
     return sel;
 }
 
-static const char *song_overlay_title(const ese_song_entry_t *song) {
+static const char *song_overlay_title(const custom_song_entry_t *song) {
     if (!song)
         return "";
     if (song->display_title[0])
@@ -214,29 +214,29 @@ static const char *song_overlay_title(const ese_song_entry_t *song) {
 /* Download one whole song (all courses). Returns 1 for a new download, 2 when
  * already cached, and 0 on failure. The network client owns the detailed
  * conversion/asset progress card while this blocking call is active. */
-static int download_song(const ese_song_entry_t *song) {
-    ese_course_entry_t scratch[ESE_COURSE_LIST_MAX];
+static int download_song(const custom_song_entry_t *song) {
+    custom_song_course_entry_t scratch[CUSTOM_SONG_COURSE_LIST_MAX];
     int course_count = 0;
     int rc;
 
     if (!song || !song->id[0])
         return 0;
-    if (ese_song_is_cached(song->id)) {
-        int idx = ese_song_library_find_index(song->id);
+    if (custom_song_is_cached(song->id)) {
+        int idx = custom_song_library_find_index(song->id);
         /* Fresh cache -> nothing to do. A stale one falls through so
          * prepare_and_cache's own hash check re-converts and re-downloads. */
-        if (idx < 0 || !ese_song_library_is_stale_at(idx))
+        if (idx < 0 || !custom_song_library_is_stale_at(idx))
             return 2;
     }
 
-    /* ese_song_prepare_and_cache drives its own loading_screen for progress. */
-    rc = ese_song_prepare_and_cache(song->id,
+    /* custom_song_prepare_and_cache drives its own loading_screen for progress. */
+    rc = custom_song_prepare_and_cache(song->id,
                                     song_overlay_title(song),
-                                    scratch, ESE_COURSE_LIST_MAX, &course_count);
+                                    scratch, CUSTOM_SONG_COURSE_LIST_MAX, &course_count);
     return rc > 0 && course_count > 0 ? 1 : 0;
 }
 
-static void queue_progress(const ese_song_entry_t *song, int current,
+static void queue_progress(const custom_song_entry_t *song, int current,
                            int total) {
     char progress[48];
     const char *lines[2];
@@ -250,7 +250,7 @@ static void queue_progress(const ese_song_entry_t *song, int current,
 }
 
 static void download_queue(song_download_queue_t *q) {
-    ese_song_entry_t song;
+    custom_song_entry_t song;
     char summary[96];
     int *batch_indexes = NULL;
     int planned;
@@ -274,7 +274,7 @@ static void download_queue(song_download_queue_t *q) {
                 batch_indexes[batch_count++] = i;
         }
         if (batch_count > 0)
-            (void)ese_song_prepare_batch(batch_indexes, batch_count);
+            (void)custom_song_prepare_batch(batch_indexes, batch_count);
         free(batch_indexes);
     }
 
@@ -284,7 +284,7 @@ static void download_queue(song_download_queue_t *q) {
 
         if (!q->selected[i])
             continue;
-        if (!ese_song_library_get(i, &song)) {
+        if (!custom_song_library_get(i, &song)) {
             failed++;
             continue;
         }
@@ -324,7 +324,7 @@ static void download_queue(song_download_queue_t *q) {
 }
 
 /* --- categories screen ---------------------------------------------------- */
-static int categories_screen(const ese_category_entry_t *cats, int cat_count,
+static int categories_screen(const custom_song_category_entry_t *cats, int cat_count,
                              song_download_queue_t *queue, int *io_sel) {
     static char values[CATEGORY_ROWS_MAX][24];
     const char *lines[CATEGORY_ROWS_MAX];
@@ -361,7 +361,7 @@ static int categories_screen(const ese_category_entry_t *cats, int cat_count,
         kinds[n] = TAIKO_OVL_ROW_ACTION;
         n++;
         updates_row = n;
-        stale_count = ese_song_library_stale_count();
+        stale_count = custom_song_library_stale_count();
         lines[n] = "Queue song updates";
         snprintf(values[n], sizeof values[n], "%d songs", stale_count);
         vals[n] = values[n];
@@ -415,7 +415,7 @@ static int categories_screen(const ese_category_entry_t *cats, int cat_count,
 }
 
 static void search_busy_begin(const char *query) {
-    char detail[ESE_SONG_TITLE_MAX];
+    char detail[CUSTOM_SONG_TITLE_MAX];
     const char *lines[2];
 
     snprintf(detail, sizeof detail, "Searching for: %s", query ? query : "");
@@ -437,47 +437,47 @@ static void search_busy_end(void) {
     (void)menu_pad_pressed();
 }
 
-static int load_song_page(const ese_category_entry_t *cat, const char *query,
+static int load_song_page(const custom_song_category_entry_t *cat, const char *query,
                           int offset,
-                          ese_song_entry_t songs[ESE_SONG_PAGE_MAX],
-                          int indexes[ESE_SONG_PAGE_MAX],
-                          unsigned char cached[ESE_SONG_PAGE_MAX],
-                          unsigned char stale[ESE_SONG_PAGE_MAX],
+                          custom_song_entry_t songs[CUSTOM_SONG_PAGE_MAX],
+                          int indexes[CUSTOM_SONG_PAGE_MAX],
+                          unsigned char cached[CUSTOM_SONG_PAGE_MAX],
+                          unsigned char stale[CUSTOM_SONG_PAGE_MAX],
                           int *out_total) {
     int searching = query && query[0];
     if (searching)
         search_busy_begin(query);
 
     int count = searching ?
-        ese_song_search_page(query, offset, ESE_SONG_PAGE_MAX,
-                             songs, ESE_SONG_PAGE_MAX, out_total) :
-        ese_song_fetch_page(cat->id, offset, ESE_SONG_PAGE_MAX,
-                            songs, ESE_SONG_PAGE_MAX, out_total);
+        custom_song_search_page(query, offset, CUSTOM_SONG_PAGE_MAX,
+                             songs, CUSTOM_SONG_PAGE_MAX, out_total) :
+        custom_song_fetch_page(cat->id, offset, CUSTOM_SONG_PAGE_MAX,
+                            songs, CUSTOM_SONG_PAGE_MAX, out_total);
 
-    for (int i = 0; i < ESE_SONG_PAGE_MAX; i++) {
+    for (int i = 0; i < CUSTOM_SONG_PAGE_MAX; i++) {
         indexes[i] = -1;
         cached[i] = 0;
         stale[i] = 0;
     }
     for (int i = 0; i < count; i++) {
-        indexes[i] = ese_song_library_find_index(songs[i].id);
+        indexes[i] = custom_song_library_find_index(songs[i].id);
         cached[i] = indexes[i] >= 0 ?
-            (unsigned char)ese_song_library_is_cached_at(indexes[i]) :
-            (unsigned char)ese_song_is_cached(songs[i].id);
+            (unsigned char)custom_song_library_is_cached_at(indexes[i]) :
+            (unsigned char)custom_song_is_cached(songs[i].id);
         stale[i] = (cached[i] && indexes[i] >= 0) ?
-            (unsigned char)ese_song_library_is_stale_at(indexes[i]) : 0;
+            (unsigned char)custom_song_library_is_stale_at(indexes[i]) : 0;
     }
     if (searching)
         search_busy_end();
     return count;
 }
 
-static unsigned char song_source_kind(const ese_song_entry_t *song) {
+static unsigned char song_source_kind(const custom_song_entry_t *song) {
     if (!song)
         return 0;
-    if (song->source == ESE_SONG_SOURCE_OSU)
+    if (song->source == CUSTOM_SONG_SOURCE_OSU)
         return TAIKO_OVL_ROW_SOURCE_OSU;
-    if (song->source == ESE_SONG_SOURCE_TJA)
+    if (song->source == CUSTOM_SONG_SOURCE_TJA)
         return TAIKO_OVL_ROW_SOURCE_TJA;
     return 0;
 }
@@ -495,13 +495,13 @@ static int page_nav_selection(int count, int is_search, int has_prev,
 }
 
 /* --- songs screen (paged) ------------------------------------------------- */
-static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
+static void songs_screen(const custom_song_category_entry_t *cat, int cat_idx,
                          const char *query, song_download_queue_t *queue) {
-    ese_song_entry_t songs[ESE_SONG_PAGE_MAX];
-    int indexes[ESE_SONG_PAGE_MAX];
-    unsigned char cached[ESE_SONG_PAGE_MAX];
-    unsigned char stale[ESE_SONG_PAGE_MAX];
-    static char lbuf[SONG_ROWS_MAX][ESE_SONG_TITLE_MAX];
+    custom_song_entry_t songs[CUSTOM_SONG_PAGE_MAX];
+    int indexes[CUSTOM_SONG_PAGE_MAX];
+    unsigned char cached[CUSTOM_SONG_PAGE_MAX];
+    unsigned char stale[CUSTOM_SONG_PAGE_MAX];
+    static char lbuf[SONG_ROWS_MAX][CUSTOM_SONG_TITLE_MAX];
     const char *lines[SONG_ROWS_MAX];
     const char *vals[SONG_ROWS_MAX];
     unsigned char kinds[SONG_ROWS_MAX];
@@ -566,12 +566,12 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
         if (sel >= top + MENU_VISIBLE) top = sel - MENU_VISIBLE + 1;
 
         char footer[96];
-        int page  = offset / ESE_SONG_PAGE_MAX + 1;
-        int pages = (total + ESE_SONG_PAGE_MAX - 1) / ESE_SONG_PAGE_MAX;
+        int page  = offset / CUSTOM_SONG_PAGE_MAX + 1;
+        int pages = (total + CUSTOM_SONG_PAGE_MAX - 1) / CUSTOM_SONG_PAGE_MAX;
         snprintf(footer, sizeof footer,
                  "Page %d/%d  Queue:%d  X:toggle/open  O:back",
                  page, pages, queue->count);
-        char search_title[ESE_SONG_TITLE_MAX];
+        char search_title[CUSTOM_SONG_TITLE_MAX];
         if (is_search)
             snprintf(search_title, sizeof search_title, "Search: %s", query);
         taiko_overlay_menu_set(is_search ? search_title :
@@ -606,7 +606,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
                 snprintf(msg, sizeof msg, "Removed %d songs", before - queue->count);
                 taiko_overlay_show_prompt(msg);
             } else if (sel == prev_row) {
-                offset -= ESE_SONG_PAGE_MAX;
+                offset -= CUSTOM_SONG_PAGE_MAX;
                 if (offset < 0) offset = 0;
                 count = load_song_page(cat, query, offset, songs, indexes,
                                        cached, stale, &total);
@@ -615,7 +615,7 @@ static void songs_screen(const ese_category_entry_t *cat, int cat_idx,
                 if (sel < 0) sel = 0;
                 top = 0;
             } else if (sel == next_row) {
-                offset += ESE_SONG_PAGE_MAX;
+                offset += CUSTOM_SONG_PAGE_MAX;
                 count = load_song_page(cat, query, offset, songs, indexes,
                                        cached, stale, &total);
                 sel = page_nav_selection(count, is_search, offset > 0,
@@ -694,24 +694,24 @@ int taiko_custom_song_update_window_leave(const char *status) {
 }
 
 void custom_song_launcher_run(void) {
-    ese_category_entry_t cats[ESE_CATEGORY_LIST_MAX];
+    custom_song_category_entry_t cats[CUSTOM_SONG_CATEGORY_LIST_MAX];
     song_download_queue_t queue;
     int cat_sel = 0;
 
     memset(&queue, 0, sizeof queue);
 
-    if (!ese_song_service_ready()) {
+    if (!custom_song_service_ready()) {
         taiko_overlay_show_prompt("Set Connector host/token first");
         return;
     }
 
     /* The mgmt poll skips its song sync while the picker owns the
-     * download pipeline (both share the ese_* client state). */
-    g_ese_ui_busy = 1;
+     * download pipeline (both share the custom_song_* client state). */
+    g_custom_song_ui_busy = 1;
 
     /* Enter the paused, silent operator-test scene behind an opaque cover. */
     if (!taiko_custom_song_update_window_enter("Loading...")) {
-        g_ese_ui_busy = 0;
+        g_custom_song_ui_busy = 0;
         taiko_overlay_show_prompt("Could not enter test menu");
         return;
     }
@@ -719,8 +719,8 @@ void custom_song_launcher_run(void) {
     /* 3. Real menu. Re-sync the library on every open (hash-gated: one cheap
      * request when unchanged) so songs added to the server while the machine
      * runs show up without a reboot. */
-    ese_library_sync();
-    int cat_count = ese_song_fetch_categories(cats, ESE_CATEGORY_LIST_MAX);
+    custom_song_library_sync();
+    int cat_count = custom_song_fetch_categories(cats, CUSTOM_SONG_CATEGORY_LIST_MAX);
     if (cat_count > 0 && queue_init(&queue)) {
         for (;;) {
             int action = categories_screen(cats, cat_count, &queue, &cat_sel);
@@ -742,7 +742,7 @@ void custom_song_launcher_run(void) {
                 int before = queue.count;
                 char msg[64];
                 for (int i = 0; i < queue.library_count; i++) {
-                    if (ese_song_library_is_stale_at(i))
+                    if (custom_song_library_is_stale_at(i))
                         queue_set(&queue, i, 1);
                 }
                 snprintf(msg, sizeof msg, "Queued %d updates",
@@ -776,5 +776,5 @@ void custom_song_launcher_run(void) {
 
     /* Release TEST behind the cover and wait for the rebuilt attract scene. */
     (void)taiko_custom_song_update_window_leave("Closing...");
-    g_ese_ui_busy = 0;
+    g_custom_song_ui_busy = 0;
 }

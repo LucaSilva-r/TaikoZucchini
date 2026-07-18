@@ -18,19 +18,19 @@
 #include "overlay.h"
 #include "title_prerender.h"
 
-#define ESE_API_CATEGORIES_PATH "/api/connector/songs/categories"
-#define ESE_CUSTOM_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
+#define CUSTOM_SONG_API_CATEGORIES_PATH "/api/connector/songs/categories"
+#define CUSTOM_SONG_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
 /* Per-request length. Streams straight to disk over ONE keep-alive TLS
  * connection (http_download_ranged), so request the whole asset in one go;
  * the server returns at most the file size (or its asset_chunk_bytes cap). */
-#define ESE_DOWNLOAD_CHUNK     (32u * 1024 * 1024)
-#define ESE_ASSET_MAX         16
-#define ESE_ASSET_PATH_MAX    128
-#define ESE_MANIFEST_MAX      HTTP_CLIENT_BODY_MAX
+#define CUSTOM_SONG_DOWNLOAD_CHUNK     (32u * 1024 * 1024)
+#define CUSTOM_SONG_ASSET_MAX         16
+#define CUSTOM_SONG_ASSET_PATH_MAX    128
+#define CUSTOM_SONG_MANIFEST_MAX      HTTP_CLIENT_BODY_MAX
 
 typedef struct {
-    char path[ESE_ASSET_PATH_MAX];
-} ese_asset_path_t;
+    char path[CUSTOM_SONG_ASSET_PATH_MAX];
+} custom_song_asset_path_t;
 
 static int append_path(char *out, size_t cap, const char *a, const char *b);
 static int ensure_custom_song_dirs(const char *song_id, const char *asset_path);
@@ -57,26 +57,26 @@ static void copy_limited(char *out, size_t cap, const char *src,
  * progress. */
 /* Background (connector mgmt poll) downloads must not flash overlay cards
  * mid-gameplay; the in-game picker sets this back to 0 for its own runs. */
-static int g_ese_quiet;
-static volatile int g_ese_attract_only;
+static int g_custom_song_quiet;
+static volatile int g_custom_song_attract_only;
 
-void ese_song_client_set_quiet(int quiet) {
-    g_ese_quiet = quiet;
+void custom_song_client_set_quiet(int quiet) {
+    g_custom_song_quiet = quiet;
 }
 
-void ese_song_client_set_attract_only(int attract_only) {
-    g_ese_attract_only = attract_only != 0;
+void custom_song_client_set_attract_only(int attract_only) {
+    g_custom_song_attract_only = attract_only != 0;
 }
 
-static int ese_work_window_open(void) {
-    return !g_ese_attract_only ||
+static int custom_song_work_window_open(void) {
+    return !g_custom_song_attract_only ||
            taiko_game_state_current() == TAIKO_GAME_STATE_ATTRACT;
 }
 
 static void loading_screen(const char *message, int num, int den) {
     static unsigned spin;            /* advances each indeterminate frame */
     char bar[48];
-    if (g_ese_quiet) return;
+    if (g_custom_song_quiet) return;
     int determinate = (den > 0 && num >= 0);
     int filled = determinate ? num * 20 / den : -1;
     int sweep = determinate ? -1 : (int)(spin++ % 20u);
@@ -113,7 +113,7 @@ static const char *api_token(void) {
         : TAIKO_ZUCCHINI_API_TOKEN;
 }
 
-int ese_song_service_ready(void) {
+int custom_song_service_ready(void) {
     return g_cfg.connector_host[0] &&
            token_valid_for_header(api_token());
 }
@@ -131,7 +131,7 @@ static int api_request(const char *method, const char *path,
     char headers[256];
     int hn;
 
-    if (!ese_song_service_ready() || !ese_work_window_open())
+    if (!custom_song_service_ready() || !custom_song_work_window_open())
         return -1;
     hn = api_headers(headers, sizeof headers);
     if (hn < 0)
@@ -144,14 +144,14 @@ static int api_request(const char *method, const char *path,
 
 /* Text-body request with the same host/token plumbing; used by the
  * connector management poll (plain-text protocol, no JSON writer). */
-int ese_api_request_text(const char *method, const char *path,
+int custom_song_api_request_text(const char *method, const char *path,
                          const void *body, size_t body_len,
                          http_response_t *resp) {
     char headers[320];
     int hn;
     int extra;
 
-    if (!ese_song_service_ready())
+    if (!custom_song_service_ready())
         return -1;
     hn = api_headers(headers, sizeof headers);
     if (hn < 0)
@@ -174,7 +174,7 @@ static int api_request_json(const char *method, const char *path,
     int hn;
     int extra;
 
-    if (!ese_song_service_ready() || !ese_work_window_open())
+    if (!custom_song_service_ready() || !custom_song_work_window_open())
         return -1;
     hn = api_headers(headers, sizeof headers);
     if (hn < 0)
@@ -311,12 +311,12 @@ static int url_encode_append(char *out, size_t cap, size_t *n,
  * and cached to disk; we only re-download when the server's library hash
  * changes. Categories/song-pages are then served from RAM with no per-page
  * network round-trips, so navigation is instant. */
-#define ESE_LIB_JSON_PATH ESE_CUSTOM_ROOT "/library.json"
-#define ESE_LIB_HASH_MAX  48
+#define CUSTOM_SONG_LIB_JSON_PATH CUSTOM_SONG_ROOT "/library.json"
+#define CUSTOM_SONG_LIB_HASH_MAX  48
 
-static ese_category_entry_t g_lib_cats[ESE_CATEGORY_LIST_MAX];
+static custom_song_category_entry_t g_lib_cats[CUSTOM_SONG_CATEGORY_LIST_MAX];
 static int                  g_lib_cat_count;
-static ese_song_entry_t    *g_lib_songs;     /* malloc[g_lib_song_count] */
+static custom_song_entry_t    *g_lib_songs;     /* malloc[g_lib_song_count] */
 static short               *g_lib_song_cat;  /* malloc[]: index into g_lib_cats */
 static unsigned char       *g_lib_cached;    /* malloc[]: local manifest exists */
 static unsigned char       *g_lib_stale;     /* malloc[]: cached but rev differs */
@@ -324,7 +324,7 @@ static int                  g_lib_song_count;
 static int                  g_lib_loaded;
 static int                  g_lib_cache_scanned;
 static int                  g_lib_stale_scanned;
-static char                 g_lib_hash[ESE_LIB_HASH_MAX];
+static char                 g_lib_hash[CUSTOM_SONG_LIB_HASH_MAX];
 
 static int lib_cat_index(const char *id) {
     for (int i = 0; i < g_lib_cat_count; i++)
@@ -376,7 +376,7 @@ static void lib_free(void) {
  * Same two writes write_local_manifest does after a download; safe to
  * call from the mgmt poll thread (the scan itself runs lazily on the
  * game thread at the next accessor call). */
-void ese_library_mark_dirty(void) {
+void custom_song_library_mark_dirty(void) {
     g_lib_cache_scanned = 0;
     g_lib_stale_scanned = 0;
 }
@@ -398,7 +398,7 @@ static int cached_dir_has_manifest(const char *song_id) {
     uint64_t nread = 0;
     int found = 0;
 
-    if (!song_id || !append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id))
+    if (!song_id || !append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id))
         return 0;
     if (cellFsOpendir(root, &fd) != CELL_FS_SUCCEEDED)
         return 0;
@@ -436,7 +436,7 @@ static int local_manifest_rev_matches(const char *song_id, const char *rev) {
 
     if (!rev || !rev[0])
         return 1;
-    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
         !append_path(path, sizeof path, root, "manifest.json"))
         return 1;
     local = read_file_alloc(path, &mlen);
@@ -456,14 +456,13 @@ static void lib_refresh_cached_flags(void) {
     int fd = -1;
     CellFsDirent de;
     uint64_t nread = 0;
-    int cached = 0;
 
     if (!g_lib_loaded || !g_lib_cached)
         return;
     memset(g_lib_cached, 0, (size_t)g_lib_song_count);
     g_lib_cache_scanned = 1;
 
-    if (cellFsOpendir(ESE_CUSTOM_ROOT, &fd) != CELL_FS_SUCCEEDED)
+    if (cellFsOpendir(CUSTOM_SONG_ROOT, &fd) != CELL_FS_SUCCEEDED)
         return;
 
     while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
@@ -475,15 +474,10 @@ static void lib_refresh_cached_flags(void) {
             continue;
         if (!cached_dir_has_manifest(de.d_name))
             continue;
-        if (!g_lib_cached[idx]) {
+        if (!g_lib_cached[idx])
             g_lib_cached[idx] = 1;
-            cached++;
-        }
     }
     cellFsClosedir(fd);
-
-    dbg_print("[ese] cached library songs=");
-    dbg_print_hex32("", (uint32_t)cached);
 }
 
 /* Separate from the cached-flags scan on purpose: this reads one manifest per
@@ -491,8 +485,6 @@ static void lib_refresh_cached_flags(void) {
  * path only needs cached flags and must stay fast; only the downloader menu
  * (stale accessors below) ever pays for this pass. */
 static void lib_refresh_stale_flags(void) {
-    int stale = 0;
-
     if (!g_lib_loaded || !g_lib_stale)
         return;
     if (!g_lib_cache_scanned)
@@ -506,17 +498,13 @@ static void lib_refresh_stale_flags(void) {
         if (!local_manifest_rev_matches(g_lib_songs[i].id,
                                         g_lib_songs[i].rev)) {
             g_lib_stale[i] = 1;
-            stale++;
         }
     }
-
-    dbg_print("[ese] stale library songs=");
-    dbg_print_hex32("", (uint32_t)stale);
 }
 
 /* Parse a flat "e:5,n:7,h:9,m:10,x:10" diffs string into canonical star slots
  * (Easy,Normal,Hard,Oni,Ura). Absent difficulties stay at their caller default. */
-static void parse_diffs_str(const char *s, signed char stars[ESE_DIFF_SLOTS]) {
+static void parse_diffs_str(const char *s, signed char stars[CUSTOM_SONG_DIFF_SLOTS]) {
     while (*s) {
         int slot;
         switch (*s) {
@@ -573,10 +561,10 @@ static int parse_library(const unsigned char *body, size_t len) {
 
     /* categories live between the "categories" key and the "songs" key */
     const unsigned char *p = cats_key;
-    while (g_lib_cat_count < ESE_CATEGORY_LIST_MAX) {
+    while (g_lib_cat_count < CUSTOM_SONG_CATEGORY_LIST_MAX) {
         const unsigned char *idp = find_bytes(p, (size_t)(songs_key - p), "\"id\"");
         if (!idp) break;
-        ese_category_entry_t *c = &g_lib_cats[g_lib_cat_count];
+        custom_song_category_entry_t *c = &g_lib_cats[g_lib_cat_count];
         memset(c, 0, sizeof *c);
         if (!json_get_string_after(idp, songs_key, "\"id\"", c->id, sizeof c->id))
             break;
@@ -596,7 +584,7 @@ static int parse_library(const unsigned char *body, size_t len) {
         p = idp + 4;
     }
     if (nsong > 0) {
-        g_lib_songs = (ese_song_entry_t *)malloc(sizeof(ese_song_entry_t) * (size_t)nsong);
+        g_lib_songs = (custom_song_entry_t *)malloc(sizeof(custom_song_entry_t) * (size_t)nsong);
         g_lib_song_cat = (short *)malloc(sizeof(short) * (size_t)nsong);
         g_lib_cached = (unsigned char *)malloc((size_t)nsong);
         g_lib_stale = (unsigned char *)malloc((size_t)nsong);
@@ -617,11 +605,12 @@ static int parse_library(const unsigned char *body, size_t len) {
          * otherwise steal the following song's value. */
         const unsigned char *next_id = find_bytes(p, (size_t)(end - p), "\"id\"");
         const unsigned char *item_end = next_id ? next_id : end;
-        ese_song_entry_t *s = &g_lib_songs[g_lib_song_count];
+        custom_song_entry_t *s = &g_lib_songs[g_lib_song_count];
         memset(s, 0, sizeof *s);
         if (!json_get_string_after(idp, item_end, "\"id\"", s->id, sizeof s->id))
             break;
-        if (strncmp(s->id, "ese_", 4) != 0 &&
+        /* Source IDs use tja_ or osu_. Zucchini's injected IDs use zuc_. */
+        if (strncmp(s->id, "tja_", 4) != 0 &&
             strncmp(s->id, "osu_", 4) != 0)
             continue;
         if (!json_get_string_after(idp, item_end, "\"title\"", s->title, sizeof s->title))
@@ -631,13 +620,13 @@ static int parse_library(const unsigned char *body, size_t len) {
                                    sizeof s->display_title))
             snprintf(s->display_title, sizeof s->display_title, "%s", s->title);
         json_get_string_after(idp, item_end, "\"subtitle\"", s->subtitle, sizeof s->subtitle);
-        char catid[ESE_CATEGORY_ID_MAX];
+        char catid[CUSTOM_SONG_CATEGORY_ID_MAX];
         catid[0] = 0;
         json_get_string_after(idp, item_end, "\"category\"", catid, sizeof catid);
         g_lib_song_cat[g_lib_song_count] = (short)lib_cat_index(catid);
         char diffs[64];
         diffs[0] = 0;
-        for (int d = 0; d < ESE_DIFF_SLOTS; d++) s->stars[d] = -1;
+        for (int d = 0; d < CUSTOM_SONG_DIFF_SLOTS; d++) s->stars[d] = -1;
         if (json_get_string_after(idp, item_end, "\"diffs\"", diffs, sizeof diffs))
             parse_diffs_str(diffs, s->stars);
         json_get_string_after(idp, item_end, "\"rev\"", s->rev, sizeof s->rev);
@@ -646,13 +635,13 @@ static int parse_library(const unsigned char *body, size_t len) {
         if (json_get_string_after(idp, item_end, "\"source\"",
                                   source, sizeof source)) {
             if (streq_c(source, "osu"))
-                s->source = ESE_SONG_SOURCE_OSU;
+                s->source = CUSTOM_SONG_SOURCE_OSU;
             else if (streq_c(source, "tja"))
-                s->source = ESE_SONG_SOURCE_TJA;
+                s->source = CUSTOM_SONG_SOURCE_TJA;
         }
-        if (s->source == ESE_SONG_SOURCE_UNKNOWN) {
+        if (s->source == CUSTOM_SONG_SOURCE_UNKNOWN) {
             s->source = strncmp(s->id, "osu_", 4) == 0 ?
-                ESE_SONG_SOURCE_OSU : ESE_SONG_SOURCE_TJA;
+                CUSTOM_SONG_SOURCE_OSU : CUSTOM_SONG_SOURCE_TJA;
         }
         g_lib_song_count++;
     }
@@ -664,9 +653,9 @@ static int parse_library(const unsigned char *body, size_t len) {
 
 /* Ensure the in-memory library is current. Polls the cheap hash endpoint; only
  * re-downloads the full payload when the hash differs from the disk cache. */
-int ese_library_sync(void) {
+int custom_song_library_sync(void) {
     http_response_t resp;
-    char server_hash[ESE_LIB_HASH_MAX];
+    char server_hash[CUSTOM_SONG_LIB_HASH_MAX];
     int have_server = 0;
 
     memset(&resp, 0, sizeof resp);
@@ -687,9 +676,9 @@ int ese_library_sync(void) {
     if (!g_lib_loaded || (have_server &&
         strncmp(g_lib_hash, server_hash, sizeof g_lib_hash) != 0)) {
         size_t dlen = 0;
-        unsigned char *disk = read_file_alloc(ESE_LIB_JSON_PATH, &dlen);
+        unsigned char *disk = read_file_alloc(CUSTOM_SONG_LIB_JSON_PATH, &dlen);
         if (disk) {
-            char disk_hash[ESE_LIB_HASH_MAX];
+            char disk_hash[CUSTOM_SONG_LIB_HASH_MAX];
             disk_hash[0] = 0;
             json_get_string_after(disk, disk + dlen, "\"hash\"",
                                   disk_hash, sizeof disk_hash);
@@ -707,31 +696,31 @@ int ese_library_sync(void) {
         return g_lib_loaded; /* offline, no cache improvement possible */
 
     /* download the full library and refresh the disk cache */
-    if (!g_ese_quiet)
+    if (!g_custom_song_quiet)
         taiko_overlay_show_prompt("Syncing song library...");
     memset(&resp, 0, sizeof resp);
     int rc = api_request("GET", "/api/connector/library", &resp);
     if (rc != 0 || resp.status != 200 || !resp.body) {
-        dbg_print("[ese] library download failed\n");
+        dbg_print("[songs] library download failed\n");
         http_response_free(&resp);
         return g_lib_loaded;
     }
     int ok = parse_library(resp.body, resp.body_len);
     if (ok) {
-        ensure_dir(ESE_CUSTOM_ROOT);
-        write_file(ESE_LIB_JSON_PATH, resp.body, resp.body_len);
+        ensure_dir(CUSTOM_SONG_ROOT);
+        write_file(CUSTOM_SONG_LIB_JSON_PATH, resp.body, resp.body_len);
     }
     http_response_free(&resp);
     return ok;
 }
 
-int ese_song_fetch_categories(ese_category_entry_t *out, int cap) {
+int custom_song_fetch_categories(custom_song_category_entry_t *out, int cap) {
     if (!out || cap <= 0)
         return -1;
     /* Boot warms the library (version_check thread); only sync here if that
      * hasn't happened yet, so opening the overlay doesn't hit the network. */
     if (!g_lib_loaded)
-        ese_library_sync();
+        custom_song_library_sync();
     if (!g_lib_loaded)
         return -1;
     int n = g_lib_cat_count < cap ? g_lib_cat_count : cap;
@@ -741,8 +730,8 @@ int ese_song_fetch_categories(ese_category_entry_t *out, int cap) {
     return n;
 }
 
-int ese_song_fetch_page(const char *category_id, int offset, int limit,
-                        ese_song_entry_t *out, int cap, int *out_total) {
+int custom_song_fetch_page(const char *category_id, int offset, int limit,
+                        custom_song_entry_t *out, int cap, int *out_total) {
     if (!out || cap <= 0)
         return -1;
     if (limit <= 0 || limit > cap)
@@ -752,7 +741,7 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
     memset(out, 0, sizeof(out[0]) * (size_t)cap);
     if (out_total)
         *out_total = 0;
-    if (!g_lib_loaded && !ese_library_sync())
+    if (!g_lib_loaded && !custom_song_library_sync())
         return -1;
 
     int cat = (category_id && category_id[0]) ? lib_cat_index(category_id) : -1;
@@ -770,8 +759,8 @@ int ese_song_fetch_page(const char *category_id, int offset, int limit,
     return count;
 }
 
-int ese_song_search_page(const char *query, int offset, int limit,
-                         ese_song_entry_t *out, int cap, int *out_total) {
+int custom_song_search_page(const char *query, int offset, int limit,
+                         custom_song_entry_t *out, int cap, int *out_total) {
     if (!out || cap <= 0 || !query || !query[0])
         return -1;
     if (limit <= 0 || limit > cap)
@@ -781,12 +770,12 @@ int ese_song_search_page(const char *query, int offset, int limit,
     memset(out, 0, sizeof(out[0]) * (size_t)cap);
     if (out_total)
         *out_total = 0;
-    if (!g_lib_loaded && !ese_library_sync())
+    if (!g_lib_loaded && !custom_song_library_sync())
         return -1;
 
     int total = 0, count = 0;
     for (int i = 0; i < g_lib_song_count; i++) {
-        ese_song_entry_t *song = &g_lib_songs[i];
+        custom_song_entry_t *song = &g_lib_songs[i];
         if (!ascii_contains_ci(song->title, query) &&
             !ascii_contains_ci(song->display_title, query) &&
             !ascii_contains_ci(song->subtitle, query) &&
@@ -801,15 +790,15 @@ int ese_song_search_page(const char *query, int offset, int limit,
     return count;
 }
 
-int ese_song_library_count(void) {
+int custom_song_library_count(void) {
     return g_lib_loaded ? g_lib_song_count : 0;
 }
 
-int ese_song_library_get(int index, ese_song_entry_t *out) {
-    return ese_song_library_get2(index, out, NULL);
+int custom_song_library_get(int index, custom_song_entry_t *out) {
+    return custom_song_library_get2(index, out, NULL);
 }
 
-int ese_song_library_get2(int index, ese_song_entry_t *out,
+int custom_song_library_get2(int index, custom_song_entry_t *out,
                           int *out_cat_idx) {
     if (out_cat_idx)
         *out_cat_idx = -1;
@@ -821,11 +810,11 @@ int ese_song_library_get2(int index, ese_song_entry_t *out,
     return 1;
 }
 
-int ese_song_library_find_index(const char *song_id) {
+int custom_song_library_find_index(const char *song_id) {
     return lib_find_song_index(song_id);
 }
 
-int ese_song_library_is_cached_at(int library_index) {
+int custom_song_library_is_cached_at(int library_index) {
     if (!g_lib_loaded || library_index < 0 ||
         library_index >= g_lib_song_count)
         return 0;
@@ -834,7 +823,7 @@ int ese_song_library_is_cached_at(int library_index) {
     return g_lib_cached ? g_lib_cached[library_index] != 0 : 0;
 }
 
-int ese_song_library_is_stale_at(int library_index) {
+int custom_song_library_is_stale_at(int library_index) {
     if (!g_lib_loaded || library_index < 0 ||
         library_index >= g_lib_song_count)
         return 0;
@@ -843,7 +832,7 @@ int ese_song_library_is_stale_at(int library_index) {
     return g_lib_stale ? g_lib_stale[library_index] != 0 : 0;
 }
 
-int ese_song_library_stale_count(void) {
+int custom_song_library_stale_count(void) {
     int count = 0;
 
     if (!g_lib_loaded)
@@ -860,7 +849,7 @@ int ese_song_library_stale_count(void) {
     return count;
 }
 
-int ese_song_library_cached_count(void) {
+int custom_song_library_cached_count(void) {
     int count = 0;
 
     if (!g_lib_loaded)
@@ -877,13 +866,13 @@ int ese_song_library_cached_count(void) {
     return count;
 }
 
-int ese_song_library_get_cached(int cached_index, ese_song_entry_t *out) {
-    return ese_song_library_get_cached2(cached_index, out, NULL);
+int custom_song_library_get_cached(int cached_index, custom_song_entry_t *out) {
+    return custom_song_library_get_cached2(cached_index, out, NULL);
 }
 
-/* Like ese_song_library_get_cached but also yields the song's category index
+/* Like custom_song_library_get_cached but also yields the song's category index
  * (into g_lib_cats), -1 if unknown. Used to colour/route custom songs. */
-int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
+int custom_song_library_get_cached2(int cached_index, custom_song_entry_t *out,
                                  int *out_cat_idx) {
     int seen = 0;
 
@@ -910,7 +899,7 @@ int ese_song_library_get_cached2(int cached_index, ese_song_entry_t *out,
     return 0;
 }
 
-int ese_song_library_get_cached_at(int library_index, ese_song_entry_t *out,
+int custom_song_library_get_cached_at(int library_index, custom_song_entry_t *out,
                                    int *out_cat_idx) {
     if (out_cat_idx)
         *out_cat_idx = -1;
@@ -928,14 +917,14 @@ int ese_song_library_get_cached_at(int library_index, ese_song_entry_t *out,
     return 1;
 }
 
-int ese_category_get(int idx, ese_category_entry_t *out) {
+int custom_song_category_get(int idx, custom_song_category_entry_t *out) {
     if (!out || idx < 0 || idx >= g_lib_cat_count)
         return 0;
     *out = g_lib_cats[idx];
     return 1;
 }
 
-int ese_song_make_short_id(const char *song_id, char *out, int cap) {
+int custom_song_make_short_id(const char *song_id, char *out, int cap) {
     int len = 0;
     const char *tail;
 
@@ -952,9 +941,9 @@ int ese_song_make_short_id(const char *song_id, char *out, int cap) {
     if (cap < 11)
         return 0;
 
-    out[0] = 'e';
-    out[1] = 's';
-    out[2] = 'e';
+    out[0] = 'z';
+    out[1] = 'u';
+    out[2] = 'c';
     out[3] = '_';
     for (int i = 0; i < 6; i++)
         out[4 + i] = tail[i];
@@ -962,8 +951,8 @@ int ese_song_make_short_id(const char *song_id, char *out, int cap) {
     return 1;
 }
 
-int ese_song_resolve_short_id(const char *short_id, char *out, int cap) {
-    char tmp[ESE_SONG_SHORT_ID_MAX];
+int custom_song_resolve_short_id(const char *short_id, char *out, int cap) {
+    char tmp[CUSTOM_SONG_SHORT_ID_MAX];
 
     if (!short_id || !out || cap <= 0)
         return 0;
@@ -971,7 +960,7 @@ int ese_song_resolve_short_id(const char *short_id, char *out, int cap) {
 
     if (g_lib_loaded) {
         for (int i = 0; i < g_lib_song_count; i++) {
-            if (!ese_song_make_short_id(g_lib_songs[i].id, tmp, sizeof tmp))
+            if (!custom_song_make_short_id(g_lib_songs[i].id, tmp, sizeof tmp))
                 continue;
             if (strncmp(tmp, short_id, sizeof tmp) == 0) {
                 int n = snprintf(out, (size_t)cap, "%s", g_lib_songs[i].id);
@@ -980,20 +969,20 @@ int ese_song_resolve_short_id(const char *short_id, char *out, int cap) {
         }
     }
 
-    if (strncmp(short_id, "ese_", 4) != 0)
+    if (strncmp(short_id, "zuc_", 4) != 0)
         return 0;
 
     int fd = -1;
     CellFsDirent de;
     uint64_t nread = 0;
 
-    if (cellFsOpendir(ESE_CUSTOM_ROOT, &fd) != CELL_FS_SUCCEEDED)
+    if (cellFsOpendir(CUSTOM_SONG_ROOT, &fd) != CELL_FS_SUCCEEDED)
         return 0;
 
     while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
         if (de.d_type != CELL_FS_TYPE_DIRECTORY)
             continue;
-        if (!ese_song_make_short_id(de.d_name, tmp, sizeof tmp))
+        if (!custom_song_make_short_id(de.d_name, tmp, sizeof tmp))
             continue;
         if (strncmp(tmp, short_id, sizeof tmp) != 0)
             continue;
@@ -1023,15 +1012,15 @@ static int course_slot_from_char(char c) {
 }
 
 static char course_char_from_slot(int slot) {
-    static const char chars[ESE_DIFF_SLOTS] = { 'e', 'n', 'h', 'm', 'x' };
-    if (slot < 0 || slot >= ESE_DIFF_SLOTS)
+    static const char chars[CUSTOM_SONG_DIFF_SLOTS] = { 'e', 'n', 'h', 'm', 'x' };
+    if (slot < 0 || slot >= CUSTOM_SONG_DIFF_SLOTS)
         return '\0';
     return chars[slot];
 }
 
-int ese_song_map_course_for_short_id(const char *short_id, const char *requested,
+int custom_song_map_course_for_short_id(const char *short_id, const char *requested,
                                      char *out, int cap) {
-    char long_id[ESE_SONG_ID_MAX];
+    char long_id[CUSTOM_SONG_ID_MAX];
     int req_slot;
 
     if (!out || cap <= 1)
@@ -1039,7 +1028,7 @@ int ese_song_map_course_for_short_id(const char *short_id, const char *requested
     out[0] = '\0';
     if (!short_id || !requested || !requested[0])
         return 0;
-    if (!ese_song_resolve_short_id(short_id, long_id, sizeof long_id))
+    if (!custom_song_resolve_short_id(short_id, long_id, sizeof long_id))
         return 0;
 
     req_slot = course_slot_from_char(requested[0]);
@@ -1067,7 +1056,8 @@ int ese_song_map_course_for_short_id(const char *short_id, const char *requested
 }
 
 /* Song titles are now rendered on-device (see core/title_render.c); the
- * tjarepo title-image endpoint and its on-disk cache are no longer used. */
+ * The old server-rendered title-image endpoint and its on-disk cache are no
+ * longer used. */
 
 static int append_path(char *out, size_t cap, const char *a, const char *b) {
     int n = snprintf(out, cap, "%s/%s", a, b);
@@ -1086,9 +1076,9 @@ static int ensure_custom_song_dirs(const char *song_id, const char *asset_path) 
         return 0;
     if (!ensure_dir("/dev_hdd0/plugins/taiko"))
         return 0;
-    if (!ensure_dir(ESE_CUSTOM_ROOT))
+    if (!ensure_dir(CUSTOM_SONG_ROOT))
         return 0;
-    if (!append_path(dir, sizeof dir, ESE_CUSTOM_ROOT, song_id) ||
+    if (!append_path(dir, sizeof dir, CUSTOM_SONG_ROOT, song_id) ||
         !ensure_dir(dir))
         return 0;
 
@@ -1122,9 +1112,9 @@ static int read_local_manifest_matches(const char *song_id,
     unsigned char *buf;
     int ok = 0;
 
-    if (!manifest || manifest_len == 0 || manifest_len > ESE_MANIFEST_MAX)
+    if (!manifest || manifest_len == 0 || manifest_len > CUSTOM_SONG_MANIFEST_MAX)
         return 0;
-    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
         !append_path(path, sizeof path, root, "manifest.json"))
         return 0;
     if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
@@ -1144,7 +1134,7 @@ static int read_local_manifest_matches(const char *song_id,
 }
 
 static int collect_json_paths(const unsigned char *body, size_t len,
-                              const char *key, ese_asset_path_t *out,
+                              const char *key, custom_song_asset_path_t *out,
                               int count, int cap) {
     const unsigned char *p = body;
     const unsigned char *end = body + len;
@@ -1190,7 +1180,7 @@ static const unsigned char *find_object_end(const unsigned char *p,
 }
 
 static int parse_courses(const unsigned char *body, size_t len,
-                         ese_course_entry_t *out, int cap) {
+                         custom_song_course_entry_t *out, int cap) {
     const unsigned char *p = body;
     const unsigned char *end = body + len;
     int count = 0;
@@ -1233,7 +1223,7 @@ static int parse_courses(const unsigned char *body, size_t len,
 
 static int parse_status(const http_response_t *resp, char *status,
                         size_t status_cap, char *source_hash,
-                        size_t hash_cap, ese_asset_path_t *assets,
+                        size_t hash_cap, custom_song_asset_path_t *assets,
                         int *asset_count) {
     if (!resp || !resp->body || !status || !source_hash || !assets ||
         !asset_count)
@@ -1246,9 +1236,9 @@ static int parse_status(const http_response_t *resp, char *status,
     json_get_string_after(resp->body, end, "\"source_hash\"",
                           source_hash, hash_cap);
     *asset_count = collect_json_paths(resp->body, resp->body_len, "\"name\"",
-                                      assets, *asset_count, ESE_ASSET_MAX);
+                                      assets, *asset_count, CUSTOM_SONG_ASSET_MAX);
     *asset_count = collect_json_paths(resp->body, resp->body_len, "\"chart\"",
-                                      assets, *asset_count, ESE_ASSET_MAX);
+                                      assets, *asset_count, CUSTOM_SONG_ASSET_MAX);
     return status[0] != 0;
 }
 
@@ -1257,7 +1247,7 @@ typedef struct { int fd; int ok; } dl_sink_t;
 static int dl_file_sink(void *vctx, const void *data, size_t len) {
     dl_sink_t *c = (dl_sink_t *)vctx;
     uint64_t wrote = 0;
-    if (!ese_work_window_open()) {
+    if (!custom_song_work_window_open()) {
         c->ok = 0;
         return -1;
     }
@@ -1275,21 +1265,21 @@ static int download_asset_chunked(const char *song_id, const char *asset_path) {
 
     if (!ensure_custom_song_dirs(song_id, asset_path))
         return 0;
-    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
         !append_path(dest, sizeof dest, root, asset_path))
         return 0;
     int n = snprintf(path_base, sizeof path_base,
                      "/api/connector/conversions/%s/assets/%s", song_id, asset_path);
     if (n <= 0 || (size_t)n >= sizeof path_base)
         return 0;
-    if (!ese_song_service_ready())
+    if (!custom_song_service_ready())
         return 0;
     int hn = api_headers(headers, sizeof headers);
     if (hn < 0)
         return 0;
     if (cellFsOpen(dest, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
                    &fd, NULL, 0) != CELL_FS_SUCCEEDED) {
-        dbg_print("[ese] dest open failed\n");
+        dbg_print("[songs] dest open failed\n");
         return 0;
     }
 
@@ -1298,11 +1288,11 @@ static int download_asset_chunked(const char *song_id, const char *asset_path) {
     /* ONE keep-alive TLS connection streams every ranged chunk straight to disk
      * (no per-chunk handshake, no whole-file buffering). */
     int rc = http_download_ranged(g_cfg.connector_host, port, path_base,
-                                  headers, (size_t)hn, ESE_DOWNLOAD_CHUNK,
+                                  headers, (size_t)hn, CUSTOM_SONG_DOWNLOAD_CHUNK,
                                   dl_file_sink, &sc);
     cellFsClose(fd);
     if (rc != 0 || !sc.ok) {
-        dbg_print("[ese] asset download failed: ");
+        dbg_print("[songs] asset download failed: ");
         dbg_print(asset_path);
         dbg_print("\n");
         return 0;
@@ -1317,7 +1307,7 @@ static int write_local_manifest(const char *song_id,
 
     if (!ensure_custom_song_dirs(song_id, NULL))
         return 0;
-    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
         !append_path(path, sizeof path, root, "manifest.json"))
         return 0;
     ok = write_file(path, body, len);
@@ -1335,12 +1325,12 @@ static int write_local_manifest(const char *song_id,
     return ok;
 }
 
-int ese_song_is_cached(const char *song_id) {
+int custom_song_is_cached(const char *song_id) {
     char root[192], path[256];
     int fd = -1;
     if (!song_id || !song_id[0])
         return 0;
-    if (!append_path(root, sizeof root, ESE_CUSTOM_ROOT, song_id) ||
+    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
         !append_path(path, sizeof path, root, "manifest.json"))
         return 0;
     if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
@@ -1363,8 +1353,8 @@ static int batch_song_id_safe(const char *song_id) {
     return 1;
 }
 
-int ese_song_prepare_batch(const int *library_indexes, int count) {
-    ese_song_entry_t song;
+int custom_song_prepare_batch(const int *library_indexes, int count) {
+    custom_song_entry_t song;
     http_response_t resp;
     char *body;
     size_t cap;
@@ -1374,7 +1364,7 @@ int ese_song_prepare_batch(const int *library_indexes, int count) {
 
     if (!library_indexes || count <= 0 || count > 4096)
         return 0;
-    cap = 32u + (size_t)count * (ESE_SONG_ID_MAX + 3u);
+    cap = 32u + (size_t)count * (CUSTOM_SONG_ID_MAX + 3u);
     body = (char *)malloc(cap);
     if (!body)
         return 0;
@@ -1382,7 +1372,7 @@ int ese_song_prepare_batch(const int *library_indexes, int count) {
     len = (size_t)snprintf(body, cap, "{\"song_ids\":[");
     for (int i = 0; i < count; i++) {
         int n;
-        if (!ese_song_library_get(library_indexes[i], &song) ||
+        if (!custom_song_library_get(library_indexes[i], &song) ||
             !batch_song_id_safe(song.id))
             continue;
         n = snprintf(body + len, cap - len, "%s\"%s\"",
@@ -1407,26 +1397,24 @@ int ese_song_prepare_batch(const int *library_indexes, int count) {
     ok = api_request_json("POST", "/api/connector/songs/prepare-batch",
                           body, len, &resp) == 0 &&
          (resp.status == 200 || resp.status == 202);
-    if (!ok)
-        dbg_print("[ese] batch prepare unavailable; using serial prepare\n");
     http_response_free(&resp);
     free(body);
     return ok;
 }
 
-int ese_song_prepare_and_cache(const char *song_id, const char *title,
-                               ese_course_entry_t *courses, int course_cap,
+int custom_song_prepare_and_cache(const char *song_id, const char *title,
+                               custom_song_course_entry_t *courses, int course_cap,
                                int *out_course_count) {
     char path[128];
     char status[32];
     char source_hash[64];
-    ese_asset_path_t assets[ESE_ASSET_MAX];
+    custom_song_asset_path_t assets[CUSTOM_SONG_ASSET_MAX];
     int asset_count = 0;
     http_response_t resp;
     unsigned char *ready_body = NULL;
     size_t ready_len = 0;
 
-    if (!song_id || !song_id[0] || !ese_work_window_open())
+    if (!song_id || !song_id[0] || !custom_song_work_window_open())
         return -1;
     if (out_course_count)
         *out_course_count = 0;
@@ -1442,7 +1430,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
         char froot[192], fpath[256];
         size_t mlen = 0;
         unsigned char *local = NULL;
-        if (append_path(froot, sizeof froot, ESE_CUSTOM_ROOT, song_id) &&
+        if (append_path(froot, sizeof froot, CUSTOM_SONG_ROOT, song_id) &&
             append_path(fpath, sizeof fpath, froot, "manifest.json"))
             local = read_file_alloc(fpath, &mlen);
         if (local) {
@@ -1475,13 +1463,11 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
                 free(local);
                 if (pc > 0) {
                     *out_course_count = pc;
-                    dbg_print("[ese] local cache fresh; skipping prepare\n");
                     return 1;
                 }
                 memset(courses, 0, sizeof(courses[0]) * (size_t)course_cap);
             } else {
                 free(local);
-                dbg_print("[ese] cache stale; re-downloading\n");
             }
         }
     }
@@ -1495,7 +1481,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
     memset(&resp, 0, sizeof resp);
     int rc = api_request("POST", path, &resp);
     if (rc != 0) {
-        dbg_print("[ese] prepare request failed\n");
+        dbg_print("[songs] prepare request failed\n");
         return -2;
     }
 
@@ -1516,11 +1502,11 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
         }
         if (strcmp(status, "failed") == 0 ||
             strcmp(status, "not_found") == 0) {
-            dbg_print("[ese] prepare failed for ");
+            dbg_print("[songs] prepare failed for ");
             dbg_print(song_id);
             dbg_print("\n");
             http_response_free(&resp);
-            return ESE_PREPARE_ERR_SERVER_FAILED;
+            return CUSTOM_SONG_PREPARE_ERR_SERVER_FAILED;
         }
 
         http_response_free(&resp);
@@ -1533,7 +1519,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
         memset(&resp, 0, sizeof resp);
         rc = api_request("GET", path, &resp);
         if (rc != 0) {
-            dbg_print("[ese] status request failed\n");
+            dbg_print("[songs] status request failed\n");
             return -5;
         }
     }
@@ -1544,7 +1530,6 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
     }
 
     if (read_local_manifest_matches(song_id, ready_body, ready_len)) {
-        dbg_print("[ese] local cache hit\n");
         if (courses && course_cap > 0 && out_course_count) {
             *out_course_count = parse_courses(ready_body, ready_len,
                                               courses, course_cap);
@@ -1574,7 +1559,7 @@ int ese_song_prepare_and_cache(const char *song_id, const char *title,
         }
     }
 
-    if (!ese_work_window_open()) {
+    if (!custom_song_work_window_open()) {
         if (ready_body)
             free(ready_body);
         return -10;

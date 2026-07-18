@@ -1,10 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "debug.h"
 #include "game_state.h"
-
-#define TAIKO_GAMESTATE_LOGGING 1
 
 #define SONG_ID_MAX 32
 #define COURSE_MAX  8
@@ -329,56 +326,14 @@ static void observe_fumen(const char *path) {
     copy_token_lower(g_gameplay_chart_kind, sizeof g_gameplay_chart_kind, kind, '\0', '\0');
 }
 
-/* Walk the PPU stack backchain and log return addresses. Called from the
-   cellFsOpen hook the moment the game opens an enso_system path (= inside the real
-   enso constructor's call chain), so the chain reveals who constructs the enso
-   scene — the launch trigger static RE couldn't pin (runtime dispatch).
-   PS3 64-bit ABI: 8-byte slots, BE -> 32-bit address in the low word (+4).
-   backchain at *(sp); return addr saved by callee at caller_sp+0x10. */
-static void dump_ctor_chain(void) __attribute__((unused));
-static void dump_ctor_chain(void) {
-    uintptr_t sp;
-    __asm__ volatile ("mr %0, %%r1" : "=r"(sp));
-    for (int i = 0; i < 18; i++) {
-        if (sp < 0x10000u || sp >= 0xe0000000u)
-            break;
-        uintptr_t caller = *(volatile uint32_t *)(sp + 4u); /* backchain low word */
-        if (caller <= sp || caller < 0x10000u || caller >= 0xe0000000u)
-            break;
-        uint32_t lr = *(volatile uint32_t *)(caller + 0x14u); /* LR save low word */
-        dbg_print_hex32("[ctor] lr", lr);
-        sp = caller;
-    }
-}
-
 void taiko_game_state_observe_open(const char *path) {
     taiko_game_state_t state = classify_open_path(path);
-    if (state != TAIKO_GAME_STATE_UNKNOWN && state != g_game_state) {
+    if (state != TAIKO_GAME_STATE_UNKNOWN && state != g_game_state)
         g_game_state = state;
-#if TAIKO_GAMESTATE_LOGGING
-        dbg_print("[gamestate] ");
-        dbg_print(taiko_game_state_name(state));
-        dbg_print(" via ");
-        dbg_print(path ? path : "(null)");
-        dbg_print("\n");
-        if (state == TAIKO_GAME_STATE_GAMEPLAY)
-            dump_ctor_chain();  /* one-shot: log enso constructor call chain */
-#endif
-    }
 
     const char *asset = classify_asset_path(path);
     if (!asset)
         return;
-
-    if (str_equal(asset, "fumen") || str_equal(asset, "song_audio")) {
-#if TAIKO_GAMESTATE_LOGGING
-        dbg_print("[gamefile] ");
-        dbg_print(asset);
-        dbg_print(" ");
-        dbg_print(path ? path : "(null)");
-        dbg_print("\n");
-#endif
-    }
 
     if (str_equal(asset, "song_audio"))
         observe_song_audio(path);

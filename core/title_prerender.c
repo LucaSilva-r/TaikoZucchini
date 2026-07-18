@@ -25,29 +25,29 @@ static volatile unsigned g_generated;
 static volatile unsigned g_failed;
 
 static int song_metadata(int library_index, const char *fallback_title,
-                         char title[ESE_SONG_TITLE_MAX],
+                         char title[CUSTOM_SONG_TITLE_MAX],
                          uint32_t *genre_outline) {
-    ese_song_entry_t song;
-    ese_category_entry_t cat;
-    char short_id[ESE_SONG_SHORT_ID_MAX];
+    custom_song_entry_t song;
+    custom_song_category_entry_t cat;
+    char short_id[CUSTOM_SONG_SHORT_ID_MAX];
     int cat_idx = -1;
 
     memset(&song, 0, sizeof song);
-    if (!ese_song_library_get2(library_index, &song, &cat_idx))
+    if (!custom_song_library_get2(library_index, &song, &cat_idx))
         return 0;
 
     if (song.title[0]) {
-        snprintf(title, ESE_SONG_TITLE_MAX, "%s", song.title);
+        snprintf(title, CUSTOM_SONG_TITLE_MAX, "%s", song.title);
     } else if (fallback_title && fallback_title[0]) {
-        snprintf(title, ESE_SONG_TITLE_MAX, "%s", fallback_title);
-    } else if (ese_song_make_short_id(song.id, short_id, sizeof short_id)) {
-        snprintf(title, ESE_SONG_TITLE_MAX, "%s", short_id);
+        snprintf(title, CUSTOM_SONG_TITLE_MAX, "%s", fallback_title);
+    } else if (custom_song_make_short_id(song.id, short_id, sizeof short_id)) {
+        snprintf(title, CUSTOM_SONG_TITLE_MAX, "%s", short_id);
     } else {
         return 0;
     }
 
     *genre_outline = 0;
-    if (ese_category_get(cat_idx, &cat))
+    if (custom_song_category_get(cat_idx, &cat))
         *genre_outline = taiko_custom_category_outline_argb(
             cat.id, cat.title, cat_idx);
     return 1;
@@ -61,7 +61,7 @@ static int render_song_missing(int library_index, const char *fallback_title,
         TITLE_TEX_SONGLIST_LONG,
         TITLE_TEX_SONGLIST_SHORT,
     };
-    char title[ESE_SONG_TITLE_MAX];
+    char title[CUSTOM_SONG_TITLE_MAX];
     uint32_t genre_outline;
     int generated = 0;
     int failed = 0;
@@ -107,7 +107,7 @@ int taiko_title_prerender_after_download(const char *song_id,
 
     if (!song_id || !song_id[0])
         return -1;
-    index = ese_song_library_find_index(song_id);
+    index = custom_song_library_find_index(song_id);
     if (index < 0) {
         dbg_print("[title-pre] downloaded song absent from library\n");
         return -1;
@@ -142,12 +142,12 @@ static void prerender_all_thread(uint64_t arg) {
         sys_ppu_thread_exit(0);
     }
 
-    library_total = (unsigned)ese_song_library_count();
-    g_total = (unsigned)ese_song_library_cached_count();
+    library_total = (unsigned)custom_song_library_count();
+    g_total = (unsigned)custom_song_library_cached_count();
     for (unsigned i = 0; i < library_total; i++) {
         int rc;
 
-        if (!ese_song_library_is_cached_at((int)i))
+        if (!custom_song_library_is_cached_at((int)i))
             continue;
         while (taiko_game_state_current() != TAIKO_GAME_STATE_ATTRACT)
             sys_timer_usleep(250 * 1000);

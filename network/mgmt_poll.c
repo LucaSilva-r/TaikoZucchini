@@ -18,7 +18,6 @@
 #include <sys/memory.h>
 #include <sys/ppu_thread.h>
 #include <sys/timer.h>
-#include <netex/libnetctl.h>
 
 #include "config/runtime.h"
 #include "config/version.h"
@@ -49,9 +48,9 @@
 #define MGMT_HEARTBEAT_SIZE     (192 * 1024)
 #define MGMT_WORKSPACE_SIZE     (1024 * 1024)
 
-volatile int g_ese_ui_busy;
+volatile int g_custom_song_ui_busy;
 
-static volatile int g_first_poll_done;
+static volatile int g_boot_poll_pending;
 static int g_started_run;
 static int g_active_loaded;
 static volatile int g_synced_seq;
@@ -63,11 +62,11 @@ static int g_applied_count;
  * mapping toward Green's 0x021xxxxx game text and can overlap GameSongSetup. */
 static void *g_workspace;
 static char *g_heartbeat;
-static char (*g_poll_sel)[ESE_SONG_ID_MAX];
+static char (*g_poll_sel)[CUSTOM_SONG_ID_MAX];
 static int g_poll_sel_count;
 static int g_poll_sel_overflow;
 
-static char (*g_job_sel)[ESE_SONG_ID_MAX];
+static char (*g_job_sel)[CUSTOM_SONG_ID_MAX];
 static int g_job_sel_count;
 static int g_job_seq;
 static int *g_missing_index;
@@ -75,7 +74,7 @@ static int *g_missing_job_index;
 static unsigned char *g_job_broken;
 static volatile int g_job_running;
 
-static char (*g_active_sel)[ESE_SONG_ID_MAX];
+static char (*g_active_sel)[CUSTOM_SONG_ID_MAX];
 static volatile int g_active_count;
 static volatile int g_active_enabled;
 
@@ -96,12 +95,12 @@ static int ensure_workspace(void) {
     unsigned char *p = (unsigned char *)g_workspace;
     g_heartbeat = (char *)p;
     p += MGMT_HEARTBEAT_SIZE;
-    g_poll_sel = (char (*)[ESE_SONG_ID_MAX])p;
-    p += MGMT_SEL_MAX * ESE_SONG_ID_MAX;
-    g_job_sel = (char (*)[ESE_SONG_ID_MAX])p;
-    p += MGMT_SEL_MAX * ESE_SONG_ID_MAX;
-    g_active_sel = (char (*)[ESE_SONG_ID_MAX])p;
-    p += MGMT_SEL_MAX * ESE_SONG_ID_MAX;
+    g_poll_sel = (char (*)[CUSTOM_SONG_ID_MAX])p;
+    p += MGMT_SEL_MAX * CUSTOM_SONG_ID_MAX;
+    g_job_sel = (char (*)[CUSTOM_SONG_ID_MAX])p;
+    p += MGMT_SEL_MAX * CUSTOM_SONG_ID_MAX;
+    g_active_sel = (char (*)[CUSTOM_SONG_ID_MAX])p;
+    p += MGMT_SEL_MAX * CUSTOM_SONG_ID_MAX;
     g_missing_index = (int *)p;
     p += MGMT_SEL_MAX * sizeof(int);
     g_missing_job_index = (int *)p;
@@ -164,15 +163,11 @@ int taiko_mgmt_operation_active(void) {
     return g_job_running != 0;
 }
 
-int taiko_mgmt_first_poll_done(void) {
-    return g_first_poll_done;
-}
-
 static int id_compare(const void *va, const void *vb) {
     return strcmp((const char *)va, (const char *)vb);
 }
 
-static int sorted_contains(char ids[][ESE_SONG_ID_MAX], int count,
+static int sorted_contains(char ids[][CUSTOM_SONG_ID_MAX], int count,
                            const char *id) {
     int lo = 0, hi = count - 1;
     while (lo <= hi) {
@@ -211,9 +206,9 @@ static int write_all(int fd, const void *data, size_t len) {
 }
 
 static int persist_selection(int seq,
-                             char ids[][ESE_SONG_ID_MAX], int id_count) {
+                             char ids[][CUSTOM_SONG_ID_MAX], int id_count) {
     int fd = -1;
-    char line[ESE_SONG_ID_MAX + 4];
+    char line[CUSTOM_SONG_ID_MAX + 4];
     int ok = 1;
 
     (void)cellFsMkdir(MGMT_CUSTOM_ROOT, 0777);
@@ -316,7 +311,7 @@ static void load_active_selection(void) {
             p[--len] = 0;
         if (strncmp(p, "seq=", 4) == 0) {
             seq = atoi(p + 4);
-        } else if (len > 0 && len < ESE_SONG_ID_MAX && count < MGMT_SEL_MAX) {
+        } else if (len > 0 && len < CUSTOM_SONG_ID_MAX && count < MGMT_SEL_MAX) {
             memcpy(g_active_sel[count], p, len + 1);
             count++;
         }
@@ -378,11 +373,11 @@ static int build_heartbeat(void) {
         off = hb_append(off, "have_complete=0\n");
     } else {
         off = hb_append(off, "have_complete=1\n");
-        int count = ese_song_library_count();
+        int count = custom_song_library_count();
         for (int i = 0; i < count; i++) {
-            ese_song_entry_t entry;
-            if (!ese_song_library_is_cached_at(i) ||
-                !ese_song_library_get(i, &entry) ||
+            custom_song_entry_t entry;
+            if (!custom_song_library_is_cached_at(i) ||
+                !custom_song_library_get(i, &entry) ||
                 !taiko_mgmt_song_active(entry.id))
                 continue;
             snprintf(line, sizeof line, "have %s\n", entry.id);
@@ -465,7 +460,7 @@ static int parse_response(const char *body, size_t len, int *out_managed,
             for (int i = 4; i < ll && p[i] >= '0' && p[i] <= '9'; i++)
                 seq = seq * 10 + (p[i] - '0');
         } else if (ll > 4 && memcmp(p, "sel ", 4) == 0) {
-            if (ll - 4 < ESE_SONG_ID_MAX && g_poll_sel_count < MGMT_SEL_MAX) {
+            if (ll - 4 < CUSTOM_SONG_ID_MAX && g_poll_sel_count < MGMT_SEL_MAX) {
                 memcpy(g_poll_sel[g_poll_sel_count], p + 4, (size_t)(ll - 4));
                 g_poll_sel[g_poll_sel_count][ll - 4] = 0;
                 g_poll_sel_count++;
@@ -486,7 +481,8 @@ static int parse_response(const char *body, size_t len, int *out_managed,
 /* ---------------------- selection worker ---------------------------- */
 
 static int is_song_dir_name(const char *name) {
-    return strncmp(name, "ese_", 4) == 0 || strncmp(name, "osu_", 4) == 0;
+    return strncmp(name, "tja_", 4) == 0 ||
+           strncmp(name, "osu_", 4) == 0;
 }
 
 static int delete_tree(const char *path, int depth) {
@@ -546,7 +542,7 @@ static void wait_for_attract(const char *phase, unsigned done,
                              unsigned total, unsigned failed) {
     int announced = 0;
     while (taiko_game_state_current() != TAIKO_GAME_STATE_ATTRACT ||
-           g_ese_ui_busy || taiko_title_prerender_is_running()) {
+           g_custom_song_ui_busy || taiko_title_prerender_is_running()) {
         if (!announced) {
             operation_set(1, g_job_seq, phase, done, total, failed, "", "");
             announced = 1;
@@ -562,11 +558,11 @@ static void claim_apply_window(unsigned done, unsigned total,
                                unsigned failed) {
     for (;;) {
         wait_for_attract("waiting_attract", done, total, failed);
-        if (__sync_bool_compare_and_swap(&g_ese_ui_busy, 0, 1)) {
+        if (__sync_bool_compare_and_swap(&g_custom_song_ui_busy, 0, 1)) {
             if (taiko_game_state_current() == TAIKO_GAME_STATE_ATTRACT &&
                 !taiko_title_prerender_is_running())
                 return;
-            __sync_lock_release(&g_ese_ui_busy);
+            __sync_lock_release(&g_custom_song_ui_busy);
         }
         sys_timer_usleep(250 * 1000);
     }
@@ -577,8 +573,8 @@ static void selection_worker(uint64_t arg) {
     unsigned done = 0, failed = 0;
     unsigned attempts = 0;
 
-    ese_song_client_set_quiet(1);
-    ese_song_client_set_attract_only(1);
+    custom_song_client_set_quiet(1);
+    custom_song_client_set_attract_only(1);
     taiko_overlay_activity_set(TAIKO_OVL_ACTIVITY_SONG_SYNC, 1);
 
     for (;;) {
@@ -587,7 +583,7 @@ static void selection_worker(uint64_t arg) {
         operation_set(1, g_job_seq, "planning", done,
                       (unsigned)g_job_sel_count, 0, "", "");
 
-        if (!ese_library_sync()) {
+        if (!custom_song_library_sync()) {
             operation_set(1, g_job_seq, "retrying", done,
                           (unsigned)g_job_sel_count, 1, "",
                           "song library sync failed");
@@ -599,13 +595,13 @@ static void selection_worker(uint64_t arg) {
          * completed manifest would become visible during the first sync. */
         if (!g_active_enabled) {
             int baseline = 0;
-            int library_count = ese_song_library_count();
+            int library_count = custom_song_library_count();
             for (int i = 0; i < library_count && baseline < MGMT_SEL_MAX; i++) {
-                ese_song_entry_t song;
-                if (!ese_song_library_is_cached_at(i) ||
-                    !ese_song_library_get(i, &song))
+                custom_song_entry_t song;
+                if (!custom_song_library_is_cached_at(i) ||
+                    !custom_song_library_get(i, &song))
                     continue;
-                snprintf(g_active_sel[baseline], ESE_SONG_ID_MAX, "%s", song.id);
+                snprintf(g_active_sel[baseline], CUSTOM_SONG_ID_MAX, "%s", song.id);
                 baseline++;
             }
             qsort(g_active_sel, (size_t)baseline,
@@ -647,13 +643,13 @@ static void selection_worker(uint64_t arg) {
                 continue;
             }
 
-            int idx = ese_song_library_find_index(g_job_sel[i]);
+            int idx = custom_song_library_find_index(g_job_sel[i]);
             if (idx < 0) {
                 g_job_broken[i] = 1;
                 failed++;
                 last_error = "selected song is absent from the library";
-            } else if (ese_song_is_cached(g_job_sel[i]) &&
-                       !ese_song_library_is_stale_at(idx)) {
+            } else if (custom_song_is_cached(g_job_sel[i]) &&
+                       !custom_song_library_is_stale_at(idx)) {
                 /* Successful installs prerender their own title textures.
                  * Do not probe both cache files again on every selection
                  * change; legacy gaps are handled by the explicit bulk
@@ -669,28 +665,28 @@ static void selection_worker(uint64_t arg) {
         operation_set(1, g_job_seq, missing ? "converting" : "verifying",
                       done, (unsigned)g_job_sel_count, failed, "", last_error);
         if (missing > 0)
-            (void)ese_song_prepare_batch(g_missing_index, missing);
+            (void)custom_song_prepare_batch(g_missing_index, missing);
 
         int window_interrupted = 0;
         for (int i = 0; i < missing; i++) {
-            ese_song_entry_t song;
-            ese_course_entry_t courses[ESE_COURSE_LIST_MAX];
+            custom_song_entry_t song;
+            custom_song_course_entry_t courses[CUSTOM_SONG_COURSE_LIST_MAX];
             int course_count = 0;
             wait_for_attract("waiting_attract", done,
                              (unsigned)g_job_sel_count, failed);
-            if (!ese_song_library_get(g_missing_index[i], &song)) {
+            if (!custom_song_library_get(g_missing_index[i], &song)) {
                 failed++;
                 last_error = "library entry disappeared";
                 continue;
             }
             operation_set(1, g_job_seq, "downloading", done,
                           (unsigned)g_job_sel_count, failed, song.id, "");
-            int rc = ese_song_prepare_and_cache(song.id, song.title, courses,
-                                                ESE_COURSE_LIST_MAX,
+            int rc = custom_song_prepare_and_cache(song.id, song.title, courses,
+                                                CUSTOM_SONG_COURSE_LIST_MAX,
                                                 &course_count);
             if (rc > 0 && course_count > 0) {
                 done++;
-            } else if (rc == ESE_PREPARE_ERR_SERVER_FAILED ||
+            } else if (rc == CUSTOM_SONG_PREPARE_ERR_SERVER_FAILED ||
                        (rc > 0 && course_count <= 0)) {
                 g_job_broken[g_missing_job_index[i]] = 1;
                 failed++;
@@ -726,7 +722,7 @@ static void selection_worker(uint64_t arg) {
                           (unsigned)g_job_sel_count, failed, "", last_error);
             if (!taiko_custom_song_update_window_enter(
                     "Updating song library...")) {
-                __sync_lock_release(&g_ese_ui_busy);
+                __sync_lock_release(&g_custom_song_ui_busy);
                 operation_set(1, g_job_seq, "retrying", done,
                               (unsigned)g_job_sel_count, failed + 1, "",
                               "could not enter operator test menu");
@@ -738,7 +734,7 @@ static void selection_worker(uint64_t arg) {
             if (!persist_active_selection(g_job_seq)) {
                 (void)taiko_custom_song_update_window_leave(
                     "Leaving song update...");
-                __sync_lock_release(&g_ese_ui_busy);
+                __sync_lock_release(&g_custom_song_ui_busy);
                 operation_set(1, g_job_seq, "retrying", done, done, 1, "",
                               "could not persist active selection");
                 goto retry;
@@ -747,12 +743,12 @@ static void selection_worker(uint64_t arg) {
             /* Activation is complete before garbage collection. A GC failure
              * cannot expose a deselected song because injection now filters it. */
             delete_deselected();
-            ese_library_mark_dirty();
+            custom_song_library_mark_dirty();
             operation_set(1, g_job_seq, "reloading", done,
                           (unsigned)g_job_sel_count, failed, "", last_error);
             int reached_attract = taiko_custom_song_update_window_leave(
                 "Reloading song library...");
-            __sync_lock_release(&g_ese_ui_busy);
+            __sync_lock_release(&g_custom_song_ui_busy);
             if (!reached_attract) {
                 failed++;
                 last_error = "operator test menu exit was not observed";
@@ -774,8 +770,8 @@ retry:
             sys_timer_usleep(250 * 1000);
     }
 
-    ese_song_client_set_attract_only(0);
-    ese_song_client_set_quiet(0);
+    custom_song_client_set_attract_only(0);
+    custom_song_client_set_quiet(0);
     taiko_overlay_activity_set(TAIKO_OVL_ACTIVITY_SONG_SYNC, 0);
     g_job_running = 0;
     sys_ppu_thread_exit(0);
@@ -831,7 +827,7 @@ static int poll_once(int *out_managed, int *out_server_seq) {
 
     http_response_t resp;
     memset(&resp, 0, sizeof resp);
-    int rc = ese_api_request_text("POST", MGMT_POLL_PATH,
+    int rc = custom_song_api_request_text("POST", MGMT_POLL_PATH,
                                   g_heartbeat, (size_t)hb_len, &resp);
     if (rc != 0 || resp.status != 200 || !resp.body) {
         http_response_free(&resp);
@@ -866,40 +862,41 @@ static void poll_and_ack_config(void) {
 }
 
 static int mgmt_enabled(void) {
-    return ese_song_service_ready();
+    return custom_song_service_ready();
+}
+
+void taiko_mgmt_boot_poll_arm(void) {
+    __sync_synchronize();
+    g_boot_poll_pending = 1;
+}
+
+void taiko_mgmt_boot_poll_finish(void) {
+    /* Publish all config writes before chassisinfo observes completion. */
+    __sync_synchronize();
+    g_boot_poll_pending = 0;
+}
+
+int taiko_mgmt_boot_poll_pending(void) {
+    int pending = g_boot_poll_pending;
+    __sync_synchronize();
+    return pending;
 }
 
 void taiko_mgmt_boot_poll(void) {
     load_active_selection();
-    int wait_ms = (int)g_cfg.mgmt_boot_wait * 1000;
-    if (!mgmt_enabled() || wait_ms == 0) {
-        g_first_poll_done = 1;
+    if (!mgmt_enabled()) {
+        taiko_mgmt_boot_poll_finish();
         return;
     }
-
-    int waited = 0;
-    while (waited < wait_ms) {
-        int state = 0;
-        if (cellNetCtlGetState(&state) == 0 &&
-            state == CELL_NET_CTL_STATE_IPObtained)
-            break;
-        sys_timer_usleep(250 * 1000);
-        waited += 250;
-    }
-    if (waited < wait_ms) {
-        dbg_print("[mgmt] boot poll\n");
-        poll_and_ack_config();
-    } else {
-        dbg_print("[mgmt] no net within boot wait; deferring first poll\n");
-    }
-    g_first_poll_done = 1;
+    dbg_print("[mgmt] immediate boot poll\n");
+    poll_and_ack_config();
+    taiko_mgmt_boot_poll_finish();
 }
 
 void taiko_mgmt_poll_run(void) {
     if (g_started_run)
         return;
     g_started_run = 1;
-    g_first_poll_done = 1;
     load_active_selection();
     dbg_print("[mgmt] poll loop started\n");
     for (;;) {

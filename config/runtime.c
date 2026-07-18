@@ -13,7 +13,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 17  /* v17: tjarepo -> connector rename + cabinet identity + mgmt poll */
+#define TAIKO_CFG_VERSION 19  /* v19: non-blocking connector poll at boot */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file (TAIKO_GLOBAL_CONFIG_PATH, exported via runtime.h). A per-game
@@ -26,6 +26,9 @@ taiko_runtime_cfg_t g_cfg = {
     .usio_emulation       = TAIKO_FEATURE_BPREADER_HOOK,
     .qr_card_reader       = TAIKO_FEATURE_QR_CARD_READER,
     .saved_card_prompt    = 1,
+    .ingame_mod_menu      = 1,
+    .drum_menu_shortcut   = 1,
+    .custom_song_injector = 1,
     .camera_diag_hooks    = TAIKO_FEATURE_CAMERA_DIAG_HOOKS,
     .data00000_redirect   = TAIKO_FEATURE_DATA00000_REDIRECT,
     .online_diag          = TAIKO_FEATURE_ONLINE_DIAG,
@@ -50,7 +53,6 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_port   = 443,
     .connector_host           = {0},
     .connector_port           = 443,
-    .mgmt_boot_wait           = 8,
     .cabinet_id               = {0},
     .cabinet_name             = {0},
 
@@ -89,6 +91,9 @@ static void handle_features(const char *key, const char *value, void *u) {
     SET_BIT("usio_emulation",     usio_emulation);
     SET_BIT("qr_card_reader",     qr_card_reader);
     SET_BIT("saved_card_prompt",  saved_card_prompt);
+    SET_BIT("ingame_mod_menu",    ingame_mod_menu);
+    SET_BIT("drum_menu_shortcut", drum_menu_shortcut);
+    SET_BIT("custom_song_injector", custom_song_injector);
     SET_BIT("camera_diag_hooks",  camera_diag_hooks);
     SET_BIT("data00000_redirect", data00000_redirect);
     if (cfg_file_str_eq_ci(key, "http_hooks")) return; /* legacy v5 key */
@@ -251,17 +256,6 @@ static void handle_network(const char *key, const char *value, void *u) {
         }
         if (v == 0 || v > 65535u) v = 443;
         g_cfg.connector_port = (uint16_t)v;
-        return;
-    }
-    if (cfg_file_str_eq_ci(key, "mgmt_boot_wait")) {
-        while (*value == ' ' || *value == '\t') value++;
-        unsigned v = 0;
-        while (*value >= '0' && *value <= '9') {
-            v = v * 10u + (unsigned)(*value - '0');
-            value++;
-        }
-        if (v > 60) v = 60;
-        g_cfg.mgmt_boot_wait = (uint16_t)v;
         return;
     }
     if (cfg_file_str_eq_ci(key, "zucchini_api_token")) {
@@ -481,6 +475,18 @@ static void write_cfg_file(const char *path) {
         "Stored cards and manual entry stay available when QR scanning is off.",
         "saved_card_prompt", g_cfg.saved_card_prompt);
     emit_kv_bool(fd,
+        "Enables the live in-game mod menu. Off disables every in-game entry "
+        "method, but the early-boot recovery/config menu remains available.",
+        "ingame_mod_menu", g_cfg.ingame_mod_menu);
+    emit_kv_bool(fd,
+        "Allows the left/right rim-hit sequence to open the in-game mod menu. "
+        "F4 and L3+R3 remain available when this is off.",
+        "drum_menu_shortcut", g_cfg.drum_menu_shortcut);
+    emit_kv_bool(fd,
+        "Inject downloaded custom songs into the game's song-selection data. "
+        "Off leaves the stock song list and does not install custom-song hooks.",
+        "custom_song_injector", g_cfg.custom_song_injector);
+    emit_kv_bool(fd,
         "Hook camera_get_attribute + log diag probe attempts.",
         "camera_diag_hooks", g_cfg.camera_diag_hooks);
     emit_kv_bool(fd,
@@ -566,11 +572,6 @@ static void write_cfg_file(const char *path) {
     emit_kv_uint(fd,
         "TCP port for the Connector converter service.",
         "connector_port", (unsigned)g_cfg.connector_port);
-    emit_kv_uint(fd,
-        "Seconds boot waits for the first connector poll before the game "
-        "reads chassisinfo, so remotely queued settings apply immediately. "
-        "0 disables the wait.",
-        "mgmt_boot_wait", (unsigned)g_cfg.mgmt_boot_wait);
     emit_kv_str(fd,
         "Optional TaikOnline card issuer bearer token override. Leave blank "
         "for official builds with the token baked into zucchini.sprx.",

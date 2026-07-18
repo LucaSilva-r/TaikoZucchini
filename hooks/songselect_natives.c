@@ -5,7 +5,6 @@
 
 #include <cell/gcm.h>
 #include <sys/memory.h>
-#include <sys/sys_time.h>
 #include <sys/timer.h>
 
 #include "songselect_natives.h"
@@ -209,8 +208,8 @@ typedef uint32_t *(*record_erase_fn)(uint32_t *result, uint32_t owner,
                                     uint32_t first, uint32_t last);
 
 typedef struct ssn_inject_song {
-    ese_song_entry_t song;
-    char short_id[ESE_SONG_SHORT_ID_MAX];
+    custom_song_entry_t song;
+    char short_id[CUSTOM_SONG_SHORT_ID_MAX];
     unsigned int outline;   /* category title-outline ARGB (0 = use default) */
     unsigned int genre_id;  /* target in-game folder id (+0x78); 8 = Namco */
 } ssn_inject_song_t;
@@ -220,8 +219,8 @@ typedef struct ssn_inject_song {
  * full 256-byte song is materialized only while patching one record. */
 typedef struct ssn_inject_song_ref {
     uint32_t library_index;
-    char short_id[ESE_SONG_SHORT_ID_MAX];
-    char sort_title[ESE_SONG_TITLE_MAX];
+    char short_id[CUSTOM_SONG_SHORT_ID_MAX];
+    char sort_title[CUSTOM_SONG_TITLE_MAX];
     uint32_t outline;
     uint32_t genre_id;
 } ssn_inject_song_ref_t;
@@ -562,7 +561,7 @@ static int ssn_ref_title_compare(const void *ap, const void *bp) {
 
 static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
     uint16_t seen[SSN_SHORT_HASH_CAP];
-    int total = ese_song_library_count();
+    int total = custom_song_library_count();
     int count = 0;
 
     if (!out || cap <= 0 || total <= 0)
@@ -571,16 +570,16 @@ static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
     memset(out, 0, sizeof(out[0]) * (size_t)cap);
     memset(seen, 0, sizeof seen);
     for (int i = 0; i < total && count < cap; i++) {
-        ese_song_entry_t song;
-        char short_id[ESE_SONG_SHORT_ID_MAX];
+        custom_song_entry_t song;
+        char short_id[CUSTOM_SONG_SHORT_ID_MAX];
         int cat_idx = -1;
-        ese_category_entry_t cat;
+        custom_song_category_entry_t cat;
 
-        if (!ese_song_library_get_cached_at(i, &song, &cat_idx))
+        if (!custom_song_library_get_cached_at(i, &song, &cat_idx))
             continue;
         if (!taiko_mgmt_song_active(song.id))
             continue;
-        if (!ese_song_make_short_id(song.id, short_id, sizeof short_id))
+        if (!custom_song_make_short_id(song.id, short_id, sizeof short_id))
             continue;
         if (ssn_ref_hash_find(out, seen, short_id) >= 0)
             continue;
@@ -591,7 +590,7 @@ static int ssn_collect_cached_refs(ssn_inject_song_ref_t *out, int cap) {
         snprintf(out[count].sort_title, sizeof out[count].sort_title, "%s",
                  song.title[0] ? song.title : song.id);
         out[count].genre_id = 8u;
-        if (ese_category_get(cat_idx, &cat)) {
+        if (custom_song_category_get(cat_idx, &cat)) {
             out[count].outline =
                 taiko_custom_category_outline_argb(cat.id, cat.title, cat_idx);
             out[count].genre_id =
@@ -611,7 +610,7 @@ static int ssn_song_from_ref(const ssn_inject_song_ref_t *ref,
     if (!ref || !out)
         return 0;
     memset(out, 0, sizeof *out);
-    if (!ese_song_library_get((int)ref->library_index, &out->song))
+    if (!custom_song_library_get((int)ref->library_index, &out->song))
         return 0;
     snprintf(out->short_id, sizeof out->short_id, "%s", ref->short_id);
     out->outline = ref->outline;
@@ -630,7 +629,7 @@ static void ssn_patch_song_record_fields(uint32_t rec,
 
 typedef struct ssn_detail_star_patch {
     uint32_t entry[2];
-    unsigned char original[2][ESE_DIFF_SLOTS];
+    unsigned char original[2][CUSTOM_SONG_DIFF_SLOTS];
     int count;
 } ssn_detail_star_patch_t;
 
@@ -759,17 +758,17 @@ static uint32_t ssn_detail_entry_for_uniqueid(unsigned player, uint32_t uniqueid
     return ssn_detail_entry_for_course_uniqueid(player, uniqueid);
 }
 
-static void ssn_build_star_bytes(unsigned char out[ESE_DIFF_SLOTS],
-                                 const signed char stars[ESE_DIFF_SLOTS]) {
-    for (int i = 0; i < ESE_DIFF_SLOTS; i++) {
+static void ssn_build_star_bytes(unsigned char out[CUSTOM_SONG_DIFF_SLOTS],
+                                 const signed char stars[CUSTOM_SONG_DIFF_SLOTS]) {
+    for (int i = 0; i < CUSTOM_SONG_DIFF_SLOTS; i++) {
         signed char v = stars[i];
         out[i] = (v > 0) ? (unsigned char)v : 0;
     }
 }
 
 static int ssn_patch_detail_stars_for_uniqueid(uint32_t uniqueid,
-                                               const signed char stars[ESE_DIFF_SLOTS]) {
-    unsigned char star_bytes[ESE_DIFF_SLOTS];
+                                               const signed char stars[CUSTOM_SONG_DIFF_SLOTS]) {
+    unsigned char star_bytes[CUSTOM_SONG_DIFF_SLOTS];
     int patched = 0;
 
     ssn_build_star_bytes(star_bytes, stars);
@@ -778,7 +777,7 @@ static int ssn_patch_detail_stars_for_uniqueid(uint32_t uniqueid,
         if (!entry)
             continue;
         mem_write_data((void *)(uintptr_t)(entry + 0x50u),
-                            star_bytes, ESE_DIFF_SLOTS);
+                            star_bytes, CUSTOM_SONG_DIFF_SLOTS);
         patched++;
     }
     return patched;
@@ -808,10 +807,6 @@ static int ssn_apply_detail_star_patch(void *vm,
     patch->count = ssn_patch_detail_stars_for_uniqueid(
         uniqueid, g_ssn_virtual_songs[virtual_index].song.stars);
 
-    if (patch->count) {
-        dbg_print("[ssn] patched persistent detail stars for custom song\n");
-        dbg_print_hex32("  uniqueid", uniqueid);
-    }
     return patch->count != 0;
 }
 
@@ -833,15 +828,7 @@ static void ssn_replay_course_star_for_custom(uint32_t folder, uint32_t local,
                    g_last_notify_course_star_arg : 3u);
     if (course < 0 || course > 9)
         course = 3;
-
-    dbg_print("[ssn] replay NotifySetCourseStar internal for custom\n");
-    dbg_print("  from=");
-    dbg_print(label);
-    dbg_print("\n");
-    dbg_print_hex32("  folder", folder);
-    dbg_print_hex32("  local", local);
-    dbg_print_hex32("  state", state);
-    dbg_print_hex32("  course", (uint32_t)course);
+    (void)label;
 
     ((notify_course_star_internal_fn)(uintptr_t)g_notify_course_star_desc)(
         (void *)(uintptr_t)state, course);
@@ -947,7 +934,6 @@ static uint32_t ssn_custom_basic_metadata_for_record(uint32_t rec,
 
 int hk_basic_musicid_lookup(uint32_t *out, uint32_t map, uint32_t key_record);
 int hk_basic_musicid_lookup(uint32_t *out, uint32_t map, uint32_t key_record) {
-    static unsigned logged;
     uint32_t virtual_index = 0;
     uint32_t meta;
 
@@ -964,17 +950,6 @@ int hk_basic_musicid_lookup(uint32_t *out, uint32_t map, uint32_t key_record) {
     g_current_custom_song_valid = 1;
 
     *out = meta;
-    if (logged < 12u) {
-        logged++;
-        dbg_print("[ssn] custom basic metadata lookup\n");
-        dbg_print_hex32("  map", map);
-        dbg_print_hex32("  key.record", key_record);
-        dbg_print_hex32("  virtual.index", virtual_index);
-        dbg_print_hex32("  meta", meta);
-        dbg_print("  short=");
-        dbg_print(g_ssn_virtual_songs[virtual_index].short_id);
-        dbg_print("\n");
-    }
     return 1;
 }
 
@@ -1012,7 +987,6 @@ static int ssn_virtual_index_for_request(uint32_t folder, uint32_t local,
 
 static void ssn_score_meta_patch_begin(void *vm,
                                        ssn_score_meta_patch_t *patch) {
-    static unsigned logged;
     ssn_arg_raw folder = ssn_arg(vm, 1);
     ssn_arg_raw local = ssn_arg(vm, 2);
     uint32_t folder_value;
@@ -1066,21 +1040,6 @@ static void ssn_score_meta_patch_begin(void *vm,
     mem_write_data((void *)(uintptr_t)(meta + 0x30u),
                         stars, sizeof stars);
     ssn_write_inline_string(rec + SSN_SONG_MUSICID_OFF, "ynzlmn");
-
-    if (logged < 8u) {
-        logged++;
-        dbg_print("[ssn] custom GetScore metadata borrowed Lemon slot\n");
-        dbg_print_hex32("  folder", folder_value);
-        dbg_print_hex32("  local", local_value);
-        dbg_print_hex32("  absolute", absolute);
-        dbg_print_hex32("  virtual.index", virtual_index);
-        dbg_print_hex32("  rec", rec);
-        dbg_print_hex32("  meta", meta);
-        dbg_print_hex32("  star0", stars[0]);
-        dbg_print_hex32("  star1", stars[1]);
-        dbg_print_hex32("  star2", stars[2]);
-        dbg_print_hex32("  star3", stars[3]);
-    }
 }
 
 static void ssn_score_meta_patch_end(ssn_score_meta_patch_t *patch) {
@@ -1245,12 +1204,6 @@ static int ssn_detail_replay_begin(void *vm,
                         &new_count, sizeof new_count);
     patch->active = 1;
 
-    dbg_print("[ssn] replaying official GetMusicInfo_Detail for custom row\n");
-    dbg_print_hex32("  folder", folder.value);
-    dbg_print_hex32("  local", local.value);
-    dbg_print_hex32("  player", player);
-    dbg_print_hex32("  official.absolute", SSN_REPLAY_OFFICIAL_ABSOLUTE);
-    dbg_print_hex32("  temp.start", new_start);
     return 1;
 }
 
@@ -1267,7 +1220,6 @@ static void ssn_detail_replay_end(const ssn_detail_replay_patch_t *patch) {
             mem_write_data(
                 (void *)(uintptr_t)patch->detail_entry[player],
                 patch->old_detail[player], sizeof patch->old_detail[player]);
-    dbg_print("[ssn] restored custom board range after detail replay\n");
 }
 
 
@@ -1594,24 +1546,18 @@ static void ssn_prepare_custom_categories(void) {
     new_cap_count = (out_count + 7u) & ~7u;
     proxy_count = (new_cap_count * SSN_BOARD_RECORD_SIZE +
                    SSN_SONG_RECORD_SIZE - 1u) / SSN_SONG_RECORD_SIZE;
-    if (!ssn_ptr_sane(g_ssn_src_begin) || !proxy_count) {
-        dbg_print("[ssn] custom category proxy unavailable\n");
+    if (!ssn_ptr_sane(g_ssn_src_begin) || !proxy_count)
         return;
-    }
-    dbg_print("[ssn] custom category proxy grow begin\n");
     ((record_insert_fn)(uintptr_t)g_record_insert_desc)(
         (uint32_t)(uintptr_t)proxy_owner, 0u, (uint64_t)proxy_count,
         g_ssn_src_begin);
     new_begin = proxy_owner[1];
     proxy_end = proxy_owner[2];
     proxy_cap = proxy_owner[3];
-    dbg_print("[ssn] custom category proxy grow returned\n");
     if (!ssn_ptr_sane(new_begin) || proxy_end < new_begin ||
         proxy_cap < proxy_end ||
-        proxy_cap - new_begin < new_cap_count * SSN_BOARD_RECORD_SIZE) {
-        dbg_print("[ssn] custom category proxy allocation failed\n");
+        proxy_cap - new_begin < new_cap_count * SSN_BOARD_RECORD_SIZE)
         return;
-    }
     memcpy((void *)(uintptr_t)new_begin, records,
            out_count * sizeof records[0]);
     *(volatile uint32_t *)(uintptr_t)(vec + 0x04u) = new_begin;
@@ -1625,14 +1571,6 @@ static void ssn_prepare_custom_categories(void) {
     memcpy(g_ssn_category_toasts, toast_records,
            out_count * sizeof toast_records[0]);
     g_ssn_category_toast_count = out_count;
-
-    dbg_print("[ssn] custom categories prepared\n");
-    dbg_print_hex32("  bucket", SSN_CUSTOM_CATEGORY_BUCKET);
-    dbg_print_hex32("  old.count", count);
-    dbg_print_hex32("  old.capacity", (cap - begin) / SSN_BOARD_RECORD_SIZE);
-    dbg_print_hex32("  new.count", out_count);
-    dbg_print_hex32("  new.capacity", new_cap_count);
-    dbg_print_hex32("  new.begin", new_begin);
 }
 
 #define DEF_HOOK(index, name)                                                  \
@@ -1794,7 +1732,6 @@ static void install_basic_lookup_hook(void) {
     if (taiko_fpt_publish_ssn_basic_lookup(
             (uint32_t)(uintptr_t)ssn_basic_lookup_detour_code)) {
         g_basic_lookup_hook_installed = 1;
-        dbg_print("[ssn] basic lookup hook published via FPT\n");
         return;
     }
     cur = *(volatile uint32_t *)(uintptr_t)SSN_BASIC_LOOKUP_ENTRY;
@@ -1817,10 +1754,6 @@ static void install_basic_lookup_hook(void) {
     mem_write_and_flush((void *)(uintptr_t)SSN_BASIC_LOOKUP_ENTRY,
                         &br, sizeof br);
     g_basic_lookup_hook_installed = 1;
-    dbg_print("[ssn] basic metadata lookup hook installed\n");
-    dbg_print_hex32("  entry", SSN_BASIC_LOOKUP_ENTRY);
-    dbg_print_hex32("  thunk", thunk);
-    dbg_print_hex32("  branch", br);
 }
 
 /*
@@ -1973,7 +1906,6 @@ static void ssn_rt_reset_descriptors(void) {
  * the first title request, after the game has initialized GCM. */
 static int ssn_rt_pool_mem_allocate(void) {
     static unsigned fail_logs;
-    static int reserved_logged;
     sys_memory_info_t info;
     int all_ready = 1;
 
@@ -2002,14 +1934,6 @@ static int ssn_rt_pool_mem_allocate(void) {
         }
         g_rt_pool_slabs[i].addr = addr;
         memset((void *)(uintptr_t)addr, 0, SSN_RT_POOL_SLAB_SIZE);
-    }
-    if (all_ready && !reserved_logged) {
-        reserved_logged = 1;
-        dbg_print("[ssn] owned pool slabs reserved\n");
-        dbg_print_hex32("  count", SSN_RT_POOL_SLAB_COUNT);
-        dbg_print_hex32("  total", SSN_RT_POOL_MEM_SIZE);
-        for (unsigned i = 0; i < SSN_RT_POOL_SLAB_COUNT; i++)
-            dbg_print_hex32("  base", (uint32_t)g_rt_pool_slabs[i].addr);
     }
     return all_ready;
 }
@@ -2075,13 +1999,6 @@ static int ssn_rt_pool_mem_init(void) {
         return 0;
     }
     g_rt_pool_mem_ready = 1;
-    dbg_print("[ssn] owned pool slabs ready\n");
-    dbg_print_hex32("  count", SSN_RT_POOL_SLAB_COUNT);
-    dbg_print_hex32("  used", SSN_RT_POOL_MEM_USED);
-    for (unsigned i = 0; i < SSN_RT_POOL_SLAB_COUNT; i++) {
-        dbg_print_hex32("  base", (uint32_t)g_rt_pool_slabs[i].addr);
-        dbg_print_hex32("  io", g_rt_pool_slabs[i].io);
-    }
     return 1;
 }
 
@@ -2151,52 +2068,24 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t type,
     {
         /* Per-type rasterizer lives in title_textures.c; pass the song's
          * category outline (only the short songlist texture uses it). */
-        static unsigned cache_hit_logs;
-        static unsigned cache_miss_logs;
         uint32_t genre_outline = 0;
         uint32_t actual_outline = 0;
         int tint_osu_short = 0;
-        uint64_t t0;
-        uint64_t dt;
-        uint64_t render_key;
         if (index < g_ssn_virtual_song_count)
             genre_outline = g_ssn_virtual_songs[index].outline;
         if (type == TITLE_TEX_SONGLIST_SHORT) {
             actual_outline = taiko_title_cache_outline(type, genre_outline);
             tint_osu_short = index < g_ssn_virtual_song_count &&
-                g_ssn_virtual_songs[index].song.source == ESE_SONG_SOURCE_OSU;
+                g_ssn_virtual_songs[index].song.source == CUSTOM_SONG_SOURCE_OSU;
         }
-        render_key = taiko_title_cache_key(type, title, actual_outline, w, h);
-        t0 = (uint64_t)sys_time_get_system_time();
         if (!taiko_title_cache_load(type, title, actual_outline, w, h,
                                     g_rt_title_pixels)) {
-            dt = (uint64_t)sys_time_get_system_time() - t0;
             memset(g_rt_title_pixels, 0, w * h * 4u);
-            t0 = (uint64_t)sys_time_get_system_time();
             if (!title_tex_render(type, title, g_rt_title_pixels, w, h,
                                   genre_outline))
                 return 0;
             taiko_title_cache_store(type, title, actual_outline, w, h,
                                     g_rt_title_pixels);
-            dt = (uint64_t)sys_time_get_system_time() - t0;
-            if (cache_miss_logs < 24u) {
-                cache_miss_logs++;
-                dbg_print("[ssn] title cache miss render\n");
-                dbg_print_hex32("  type", type);
-                dbg_print_hex32("  key.hi", (uint32_t)(render_key >> 32));
-                dbg_print_hex32("  key.lo", (uint32_t)render_key);
-                dbg_print_hex32("  us", (uint32_t)dt);
-            }
-        } else {
-            dt = (uint64_t)sys_time_get_system_time() - t0;
-            if (cache_hit_logs < 24u) {
-                cache_hit_logs++;
-                dbg_print("[ssn] title cache hit load\n");
-                dbg_print_hex32("  type", type);
-                dbg_print_hex32("  key.hi", (uint32_t)(render_key >> 32));
-                dbg_print_hex32("  key.lo", (uint32_t)render_key);
-                dbg_print_hex32("  us", (uint32_t)dt);
-            }
         }
         if (tint_osu_short)
             taiko_title_cache_tint_fill(g_rt_title_pixels, w * h,
@@ -2409,7 +2298,6 @@ static uint32_t ssn_rt_stock_fallback(uint32_t map, uint32_t type,
 
 uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc);
 uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc) {
-    static unsigned fallback_logs;
     uint32_t index;
     uint32_t type;
     uint32_t resource;
@@ -2425,13 +2313,7 @@ uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc) {
      * without checking it (0x005130dc). Fall back to a known stock title so a
      * memory/render/upload failure degrades visually instead of crashing. */
     resource = ssn_rt_stock_fallback(map, type, game_toc, &fallback_key);
-    if (fallback_logs < 8u) {
-        fallback_logs++;
-        dbg_print("[ssn] custom title fallback\n");
-        dbg_print_hex32("  custom.key", key);
-        dbg_print_hex32("  fallback.key", fallback_key);
-        dbg_print_hex32("  resource", resource);
-    }
+    (void)fallback_key;
     return ssn_heap_ptr_sane(resource) ? resource : 0;
 }
 
@@ -2533,7 +2415,6 @@ static void install_texretr_hook(void) {
     if (taiko_fpt_publish_ssn_texretr(
             (uint32_t)(uintptr_t)ssn_texretr_detour_code)) {
         installed = 1;
-        dbg_print("[ssn] texretr hook published via FPT\n");
         return;
     }
     cur = *(volatile uint32_t *)(uintptr_t)SSN_TEXRETR_ENTRY;
@@ -2552,9 +2433,6 @@ static void install_texretr_hook(void) {
     g_ssn_texretr_resume = SSN_TEXRETR_RETURN;
     mem_write_and_flush((void *)(uintptr_t)SSN_TEXRETR_ENTRY, &br, sizeof br);
     installed = 1;
-    dbg_print("[ssn] texretr hook installed\n");
-    dbg_print_hex32("  thunk", thunk);
-    dbg_print_hex32("  branch", br);
 }
 
 static int ssn_inject_island_matches(void) {
@@ -2807,8 +2685,6 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     uint32_t tvec = temp + 0x04u;
     uint32_t svec = owner + SSN_SOURCE_VECTOR_OFF;
     uint32_t src_begin;
-    uint32_t added = 0;
-    uint32_t dropped = 0;
 
     /* owner AND temp are stack addresses (see g_ssn_src_begin note); the real
      * heap handles are the vector begin/end pointers read out of them, which
@@ -2836,10 +2712,8 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
         uint32_t old_count = g_ssn_virtual_song_count;
         uint32_t retained = 0;
 
-        if (source_custom != old_count || temp_custom != old_count) {
-            dbg_print("[ssn] custom vector count mismatch; skip reconcile\n");
+        if (source_custom != old_count || temp_custom != old_count)
             return;
-        }
         memset(desired, 0, sizeof desired);
         memset(keep, 0, sizeof keep);
         for (int i = 0; i < ref_count; i++)
@@ -2864,12 +2738,8 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
             tvec, keep, new_index, old_count);
         int source_removed = ssn_vec90_reconcile_custom(
             svec, keep, new_index, old_count);
-        if (temp_removed < 0 || source_removed < 0) {
-            dbg_print("[ssn] custom row reconciliation failed\n");
+        if (temp_removed < 0 || source_removed < 0)
             return;
-        }
-        dbg_print_hex32("[ssn] pruned custom rows",
-                        (uint32_t)source_removed);
         ssn_compact_virtual_songs(keep, old_count);
         g_ssn_src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
     }
@@ -2905,16 +2775,12 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
 
         tat = ssn_vec90_genre_block_end(tvec, gid);
         sat = ssn_vec90_genre_block_end(svec, gid);
-        if (!tat || !sat) {
-            dropped += group_count;
+        if (!tat || !sat)
             continue;
-        }
         tdst = ssn_vec90_insert_many(tvec, tat, group_count);
         sdst = ssn_vec90_insert_many(svec, sat, group_count);
-        if (!tdst || !sdst) {
-            dropped += group_count;
+        if (!tdst || !sdst)
             break;
-        }
 
         for (int s = 0; s < ref_count; s++) {
             ssn_inject_song_t song;
@@ -2928,10 +2794,8 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
                 continue;
             if (group_pos >= group_count)
                 break;
-            if (!ssn_song_from_ref(&refs[s], &song)) {
-                dropped++;
+            if (!ssn_song_from_ref(&refs[s], &song))
                 continue;
-            }
             v = g_ssn_virtual_song_count;
             if (v >= SSN_INJECT_MAX)
                 break;
@@ -2948,7 +2812,6 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
             g_ssn_virtual_song_count = v + 1;
             (void)ssn_short_hash_add(g_ssn_virtual_songs, existing, v);
             group_pos++;
-            added++;
         }
     }
 
@@ -2960,16 +2823,6 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
      * call on this same source vector does not reset caches and inject again. */
     g_ssn_src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
     g_ssn_injected_count = g_ssn_virtual_song_count;
-
-    if (added || dropped) {   /* one line per fresh build with new customs */
-        dbg_print("[ssn] inject summary\n");
-        dbg_print_hex32("  cached", (uint32_t)ese_song_library_cached_count());
-        dbg_print_hex32("  collected", (uint32_t)ref_count);
-        dbg_print_hex32("  added_now", added);
-        dbg_print_hex32("  dropped", dropped);
-        dbg_print_hex32("  virtual_total", g_ssn_virtual_song_count);
-        dbg_print_hex32("  cap", SSN_INJECT_MAX);
-    }
 }
 
 static void install_e46_listbuild_bridge(void) {
@@ -2987,7 +2840,6 @@ static void install_e46_listbuild_bridge(void) {
     if (taiko_fpt_publish_ssn_listbuild(
             (uint32_t)(uintptr_t)&hk_e46_listbuild_bridge)) {
         g_e46_listbuild_bridge_installed = 1;
-        dbg_print("[ssn] listbuild bridge published via FPT\n");
         return;
     }
     if (callsite != SSN_SCENE_TEMPVEC_EXPECT_NOP) {
@@ -3028,13 +2880,6 @@ static void install_e46_listbuild_bridge(void) {
     mem_write_and_flush((void *)(uintptr_t)SSN_E46_LISTBUILD_CALLSITE,
                         &branch_to_island, sizeof branch_to_island);
     g_e46_listbuild_bridge_installed = 1;
-
-    dbg_print("[ssn] list-build injection bridge installed\n");
-    dbg_print_hex32("  callsite", SSN_E46_LISTBUILD_CALLSITE);
-    dbg_print_hex32("  island", SSN_SCENE_TEMPVEC_ISLAND);
-    dbg_print_hex32("  hook.opd", hook_opd);
-    dbg_print_hex32("  branch", branch_to_island);
-    dbg_print_hex32("  back", branch_back);
 }
 
 static int g_installed;
@@ -3048,22 +2893,6 @@ static void install_one(uint32_t word_addr, native_fn my, native_fn *save) {
     mem_write_and_flush(slot, &myopd, sizeof(myopd));
 }
 
-static void log_install_one(uint32_t word_addr, const char *name, native_fn save)
-    __attribute__((unused));
-static void log_install_one(uint32_t word_addr, const char *name, native_fn save) {
-    uint32_t *desc = (uint32_t *)(uintptr_t)save;
-    dbg_print("[ssn] hook ");
-    dbg_print(name);
-    dbg_print("\n");
-    dbg_print_hex32("  slot", word_addr);
-    dbg_print_hex32("  opd", (uint32_t)(uintptr_t)save);
-    if (save) {
-        dbg_print_hex32("  code", desc[0]);
-        dbg_print_hex32("  toc", desc[1]);
-    }
-}
-
-
 void songselect_natives_install(void) {
     if (g_installed)
         return;
@@ -3075,7 +2904,6 @@ void songselect_natives_install(void) {
         return;
     }
     g_song_capabilities = g_song_manifest->capabilities;
-    dbg_print_hex32("[ssn] capabilities", g_song_capabilities);
 
     g_argrd_desc[0] = g_song_manifest->arg_reader_code;
     g_argrd_desc[1] = g_song_manifest->main_toc;
@@ -3093,7 +2921,6 @@ void songselect_natives_install(void) {
     if (g_song_capabilities & TAIKO_SONG_CAP_TEXTURES)
         ssn_rt_pool_mem_reserve();
 
-    dbg_print("[ssn] installing resolved songselect hooks\n");
     if (g_song_capabilities & TAIKO_SONG_CAP_NATIVE_TABLE) {
         /* v9-patched EBOOTs route each native row through a baked dispatch
          * stub: read the patcher-saved original OPD, then arm the hook cell
@@ -3107,12 +2934,9 @@ void songselect_natives_install(void) {
                 g_orig_##name = (native_fn)(uintptr_t)orig_opd_;              \
                 taiko_fpt_publish_ssn_native(index,                          \
                         (uint32_t)(uintptr_t)&hk_##name);                    \
-                dbg_print("[ssn] FPT native " #name "\n");                   \
             } else {                                                          \
                 install_one(g_song_manifest->native_slots[index],            \
                             (native_fn)&hk_##name, &g_orig_##name);          \
-                log_install_one(g_song_manifest->native_slots[index], #name, \
-                                g_orig_##name);                              \
             }                                                                 \
         } while (0);
         SONGSEL_NATIVES(INSTALL_RESOLVED_NATIVE)
@@ -3122,5 +2946,4 @@ void songselect_natives_install(void) {
         install_basic_lookup_hook();
     if (g_song_capabilities & TAIKO_SONG_CAP_INJECTION)
         install_e46_listbuild_bridge();
-    dbg_print("[ssn] resolved songselect hooks installed\n");
 }

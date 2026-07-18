@@ -26,6 +26,9 @@ typedef struct {
     unsigned usio_emulation     : 1;
     unsigned qr_card_reader     : 1;
     unsigned saved_card_prompt  : 1;
+    unsigned ingame_mod_menu    : 1;
+    unsigned drum_menu_shortcut : 1;
+    unsigned custom_song_injector : 1;
     unsigned camera_diag_hooks  : 1;
     unsigned data00000_redirect : 1;
     unsigned online_diag        : 1;
@@ -76,11 +79,6 @@ typedef struct {
      * live on different domains. */
     char     connector_host[TAIKO_REDIRECT_HOST_MAX];
     uint16_t connector_port;
-
-    /* Seconds the chassisinfo synth waits at boot for the first connector
-     * poll, so config queued while the cabinet was offline applies before
-     * the game reads its operator flags. 0 disables the wait. */
-    uint16_t mgmt_boot_wait;
 
     /* Stable cabinet identity for the connector. cabinet_id is generated
      * on first boot (dongle serials collide across cabinets: they all

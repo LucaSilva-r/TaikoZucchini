@@ -1120,8 +1120,6 @@ static int http_download_inner(const char *host, int port, const char *path_base
             goto done;
         }
     }
-    dbg_print("[dl] handshake ok\n");
-
     uint32_t offset = 0, total = 0;
     for (;;) {
         char head[1024];
@@ -1146,11 +1144,10 @@ static int http_download_inner(const char *host, int port, const char *path_base
 
         int status = 0; size_t clen = 0; uint32_t t2 = 0;
         int rr = read_resp_streamed(ssl, &status, &t2, &clen, sink, ctx);
-        dbg_print_hex32("[dl] read rc", (uint32_t)rr);
-        dbg_print_hex32("[dl] status", (uint32_t)status);
-        dbg_print_hex32("[dl] clen", (uint32_t)clen);
-        dbg_print_hex32("[dl] total", t2);
-        if (rr != 0) goto done;
+        if (rr != 0) {
+            dbg_print_hex32("[dl] read rc", (uint32_t)rr);
+            goto done;
+        }
         if (status != 200 && status != 206) goto done;
         if (t2) total = t2;
         offset += (uint32_t)clen;

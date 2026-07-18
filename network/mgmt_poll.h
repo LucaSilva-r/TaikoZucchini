@@ -9,15 +9,14 @@
  * in the connector web UI: config key changes and the desired custom-song
  * selection. No listening socket on the PS3. */
 
-/* Bounded boot-priority poll. Waits up to g_cfg.mgmt_boot_wait seconds
- * for the network, fires one poll so remotely queued config applies
- * before the game reads chassisinfo, and always sets the first-poll-done
- * flag on exit. Call from the version_check worker thread only. */
+/* Arm before starting the version-check worker, then fire one immediate boot
+ * poll. The chassisinfo synth waits only while this request (and an optional
+ * config acknowledgement request) is in flight. Finish also covers startup
+ * failures and the connector-disabled case. */
+void taiko_mgmt_boot_poll_arm(void);
+void taiko_mgmt_boot_poll_finish(void);
+int taiko_mgmt_boot_poll_pending(void);
 void taiko_mgmt_boot_poll(void);
-
-/* 1 once the boot poll finished (successfully or not). The chassisinfo
- * synth gates on this so queued operator flags land in the same boot. */
-int taiko_mgmt_first_poll_done(void);
 
 /* Endless poll loop; never returns. Tail-call from the version_check
  * thread after the update check. */
@@ -45,6 +44,6 @@ int taiko_mgmt_song_active(const char *song_id);
 
 /* Set while the in-game custom-song picker owns the download pipeline;
  * the mgmt poll skips song sync (still heartbeats) meanwhile. */
-extern volatile int g_ese_ui_busy;
+extern volatile int g_custom_song_ui_busy;
 
 #endif
