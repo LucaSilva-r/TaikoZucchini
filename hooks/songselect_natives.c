@@ -149,6 +149,7 @@ SONGSEL_NATIVES(DECL_ORIG)
 #define SSN_SONG_TITLE_OFF          (g_song_manifest->song_title_off)
 #define SSN_SONG_SUBTITLE_OFF       (g_song_manifest->song_subtitle_off)
 #define SSN_SONG_TAIL_OFF           (g_song_manifest->song_tail_off)
+#define SSN_SONG_HAS_URA_OFF        0x23u
 #define SSN_INLINE_STRING_BUF_OFF   (g_song_manifest->inline_string_buf_off)
 #define SSN_INLINE_STRING_LEN_OFF   (g_song_manifest->inline_string_len_off)
 #define SSN_INLINE_STRING_CAP_OFF   (g_song_manifest->inline_string_cap_off)
@@ -622,9 +623,16 @@ static void ssn_patch_song_record_fields(uint32_t rec,
                                          const ssn_inject_song_t *song) {
     const char *subtitle = song->song.subtitle[0] ?
         song->song.subtitle : song->song.title;
+    unsigned char has_ura = song->song.stars[4] > 0 ? 1u : 0u;
 
     ssn_write_inline_string(rec + SSN_SONG_MUSICID_OFF, song->short_id);
     ssn_write_inline_string(rec + SSN_SONG_SUBTITLE_OFF, subtitle);
+    /* GetScore gates its hidden-course path on BasicSong+0x23. Records are
+     * cloned from a nearby stock song, so inheriting this byte makes Ura
+     * availability depend on the arbitrary donor rather than the custom x
+     * chart. Keep it in lockstep with the canonical fifth star slot. */
+    mem_write_data((void *)(uintptr_t)(rec + SSN_SONG_HAS_URA_OFF),
+                   &has_ura, sizeof has_ura);
 }
 
 typedef struct ssn_detail_star_patch {
@@ -636,7 +644,7 @@ typedef struct ssn_detail_star_patch {
 typedef struct ssn_score_meta_patch {
     uint32_t rec;
     uint32_t meta;
-    uint32_t original[8];
+    uint32_t original[10];
     uint32_t virtual_index;
     int active;
 } ssn_score_meta_patch_t;
@@ -894,7 +902,8 @@ static uint32_t ssn_custom_basic_metadata_for_record(uint32_t rec,
     uint32_t donor_rec;
     uint32_t donor_meta;
     uint32_t *meta;
-    uint32_t stars[4];
+    uint32_t stars[CUSTOM_SONG_DIFF_SLOTS];
+    uint32_t has_ura;
 
     if (virtual_index >= g_ssn_virtual_song_count || virtual_index >= SSN_INJECT_MAX)
         return 0;
@@ -915,18 +924,25 @@ static uint32_t ssn_custom_basic_metadata_for_record(uint32_t rec,
 
     ssn_write_inline_string((uint32_t)(uintptr_t)meta,
                             g_ssn_virtual_songs[virtual_index].short_id);
-    for (unsigned i = 0; i < 4u; i++) {
+    for (unsigned i = 0; i < CUSTOM_SONG_DIFF_SLOTS; i++) {
         int v = g_ssn_virtual_songs[virtual_index].song.stars[i];
-        if (v < 1)
+        if (i == 4u && v < 1)
+            v = 0;
+        else if (v < 1)
             v = 1;
         if (v > 10)
             v = 10;
         stars[i] = (uint32_t)v;
     }
+    has_ura = stars[4] != 0u;
     mem_write_data((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x1cu),
                         stars, sizeof stars);
     mem_write_data((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x30u),
-                        stars, sizeof stars);
+                        stars, 4u * sizeof stars[0]);
+    /* GetScore reads the Ura rating at +0x2c, and separately requires +0x54
+     * to be nonzero before it publishes the hidden-course availability bit. */
+    mem_write_data((void *)(uintptr_t)((uint32_t)(uintptr_t)meta + 0x54u),
+                   &has_ura, sizeof has_ura);
 
     (void)rec;
     return (uint32_t)(uintptr_t)meta;
@@ -996,7 +1012,8 @@ static void ssn_score_meta_patch_begin(void *vm,
     uint32_t rec;
     uint32_t lemon_rec;
     uint32_t meta;
-    uint32_t stars[4];
+    uint32_t stars[CUSTOM_SONG_DIFF_SLOTS];
+    uint32_t has_ura;
 
     memset(patch, 0, sizeof *patch);
     if (!ssn_arg_u32(folder, &folder_value) ||
@@ -1017,18 +1034,23 @@ static void ssn_score_meta_patch_begin(void *vm,
     if (!meta)
         return;
 
-    for (unsigned i = 0; i < 4u; i++) {
+    for (unsigned i = 0; i < CUSTOM_SONG_DIFF_SLOTS; i++) {
         int v = g_ssn_virtual_songs[virtual_index].song.stars[i];
-        if (v < 1)
+        if (i == 4u && v < 1)
+            v = 0;
+        else if (v < 1)
             v = 1;
         if (v > 10)
             v = 10;
         stars[i] = (uint32_t)v;
         patch->original[i] = *(volatile uint32_t *)(uintptr_t)
             (meta + 0x1cu + i * 4u);
-        patch->original[4u + i] = *(volatile uint32_t *)(uintptr_t)
-            (meta + 0x30u + i * 4u);
+        if (i < 4u)
+            patch->original[5u + i] = *(volatile uint32_t *)(uintptr_t)
+                (meta + 0x30u + i * 4u);
     }
+    has_ura = stars[4] != 0u;
+    patch->original[9] = *(volatile uint32_t *)(uintptr_t)(meta + 0x54u);
 
     patch->rec = rec;
     patch->meta = meta;
@@ -1038,25 +1060,30 @@ static void ssn_score_meta_patch_begin(void *vm,
     mem_write_data((void *)(uintptr_t)(meta + 0x1cu),
                         stars, sizeof stars);
     mem_write_data((void *)(uintptr_t)(meta + 0x30u),
-                        stars, sizeof stars);
+                        stars, 4u * sizeof stars[0]);
+    mem_write_data((void *)(uintptr_t)(meta + 0x54u),
+                        &has_ura, sizeof has_ura);
     ssn_write_inline_string(rec + SSN_SONG_MUSICID_OFF, "ynzlmn");
 }
 
 static void ssn_score_meta_patch_end(ssn_score_meta_patch_t *patch) {
-    uint32_t restore_a[4];
+    uint32_t restore_a[CUSTOM_SONG_DIFF_SLOTS];
     uint32_t restore_b[4];
 
     if (!patch->active)
         return;
 
-    for (unsigned i = 0; i < 4u; i++) {
+    for (unsigned i = 0; i < CUSTOM_SONG_DIFF_SLOTS; i++) {
         restore_a[i] = patch->original[i];
-        restore_b[i] = patch->original[4u + i];
+        if (i < 4u)
+            restore_b[i] = patch->original[5u + i];
     }
     mem_write_data((void *)(uintptr_t)(patch->meta + 0x1cu),
                         restore_a, sizeof restore_a);
     mem_write_data((void *)(uintptr_t)(patch->meta + 0x30u),
                         restore_b, sizeof restore_b);
+    mem_write_data((void *)(uintptr_t)(patch->meta + 0x54u),
+                        &patch->original[9], sizeof patch->original[9]);
     ssn_write_inline_string(patch->rec + SSN_SONG_MUSICID_OFF,
                             g_ssn_virtual_songs[patch->virtual_index].short_id);
     patch->active = 0;
