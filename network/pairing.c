@@ -13,6 +13,7 @@
 #include "config.h"
 #include "debug.h"
 #include "game_state.h"
+#include "game_online.h"
 #include "http_client.h"
 #include "overlay.h"
 #include "runtime.h"
@@ -173,6 +174,10 @@ static void clear_session(void) {
 }
 
 static void close_session(const char *state) {
+    /* Hide the code before the close request. The direct HTTP call can take
+     * time when connectivity is exactly what failed. */
+    taiko_overlay_pairing_clear();
+    g_code_deadline_us = 0;
     if (g_session[0]) {
         pairing_response_t response;
         (void)pairing_request(0, state, &response);
@@ -234,10 +239,12 @@ static void apply_response(const pairing_response_t *response) {
 
 static int pairing_window_open(void) {
     taiko_game_state_t state = taiko_game_state_current();
-    return g_cfg.usio_emulation &&
+    return g_cfg.six_pin_login &&
+           g_cfg.usio_emulation &&
            bpreader_serial_reader_enabled() &&
            bpreader_hook_reader_accepting_card() &&
-           (state == TAIKO_GAME_STATE_ATTRACT || state == TAIKO_GAME_STATE_SHOP);
+           (state == TAIKO_GAME_STATE_ATTRACT || state == TAIKO_GAME_STATE_SHOP) &&
+           taiko_game_online_allows_card_input();
 }
 
 static void pairing_thread_entry(uint64_t arg) {

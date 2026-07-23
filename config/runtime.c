@@ -13,7 +13,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 19  /* v19: non-blocking connector poll at boot */
+#define TAIKO_CFG_VERSION 20  /* v20: six-pin login toggle */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file (TAIKO_GLOBAL_CONFIG_PATH, exported via runtime.h). A per-game
@@ -26,6 +26,7 @@ taiko_runtime_cfg_t g_cfg = {
     .usio_emulation       = TAIKO_FEATURE_BPREADER_HOOK,
     .qr_card_reader       = TAIKO_FEATURE_QR_CARD_READER,
     .saved_card_prompt    = 1,
+    .six_pin_login        = 1,
     .ingame_mod_menu      = 1,
     .drum_menu_shortcut   = 1,
     .custom_song_injector = 1,
@@ -91,6 +92,7 @@ static void handle_features(const char *key, const char *value, void *u) {
     SET_BIT("usio_emulation",     usio_emulation);
     SET_BIT("qr_card_reader",     qr_card_reader);
     SET_BIT("saved_card_prompt",  saved_card_prompt);
+    SET_BIT("six_pin_login",      six_pin_login);
     SET_BIT("ingame_mod_menu",    ingame_mod_menu);
     SET_BIT("drum_menu_shortcut", drum_menu_shortcut);
     SET_BIT("custom_song_injector", custom_song_injector);
@@ -474,6 +476,10 @@ static void write_cfg_file(const char *path) {
         "Shows the saved-card overlay prompt while the game waits for a card. "
         "Stored cards and manual entry stay available when QR scanning is off.",
         "saved_card_prompt", g_cfg.saved_card_prompt);
+    emit_kv_bool(fd,
+        "Shows the remote six-digit login code while the game can accept "
+        "online card input. QR scanning and saved cards are unaffected.",
+        "six_pin_login", g_cfg.six_pin_login);
     emit_kv_bool(fd,
         "Enables the live in-game mod menu. Off disables every in-game entry "
         "method, but the early-boot recovery/config menu remains available.",

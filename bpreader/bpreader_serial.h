@@ -24,6 +24,7 @@ enum {
     BPREADER_PRESENT_BUSY = -2,
     BPREADER_PRESENT_INVALID = -3,
     BPREADER_PRESENT_NOT_ENCODABLE = -4,
+    BPREADER_PRESENT_OFFLINE = -5,
 };
 
 /* Validate, encode and present one 20-digit access code as a single operation.

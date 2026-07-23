@@ -23,6 +23,7 @@
 #include "camera_diag.h"
 #include "config.h"
 #include "debug.h"
+#include "game_online.h"
 #include "qr_spu_host.h"
 #include "qr_spu_shared.h"
 
@@ -318,6 +319,10 @@ static void worker_self_open_loop(void) {
     g_qr_scan_active = 1;
     int kicked = 0;
     while (g_qr_worker_run && g_qr_scan_requested) {
+        if (!g_capture_sink && !taiko_game_online_allows_card_input()) {
+            g_qr_scan_requested = 0;
+            break;
+        }
         /* Collect previous SPU result (non-blocking) first. */
         if (kicked) {
             uint8_t payload[QR_SPU_PAYLOAD_MAX];
@@ -375,6 +380,10 @@ static void qr_worker_main(uint64_t arg) {
     while (g_qr_worker_run) {
         if (!g_qr_scan_requested) {
             sys_timer_usleep(100 * 1000);
+            continue;
+        }
+        if (!g_capture_sink && !taiko_game_online_allows_card_input()) {
+            g_qr_scan_requested = 0;
             continue;
         }
         uint32_t seq = camera_diag_frame_seq();
@@ -454,6 +463,8 @@ void camera_qr_init(void) {
 
 void camera_qr_request_scan(void) {
     if (g_qr_scan_requested)
+        return;
+    if (!g_capture_sink && !taiko_game_online_allows_card_input())
         return;
     g_have_access_code = 0;
     g_qr_scan_requested = 1;

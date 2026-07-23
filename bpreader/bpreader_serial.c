@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "debug.h"
+#include "game_online.h"
 #include "overlay.h"
 
 #ifndef BPREADER_ACCESS_CODE_HEX
@@ -779,6 +780,8 @@ int bpreader_serial_present_access_code(const char access_code[21]) {
         return BPREADER_PRESENT_DISABLED;
     if (bpreader.card_present)
         return BPREADER_PRESENT_BUSY;
+    if (!taiko_game_online_allows_card_input())
+        return BPREADER_PRESENT_OFFLINE;
     if (!parse_access_code(access_code, parsed))
         return BPREADER_PRESENT_INVALID;
 

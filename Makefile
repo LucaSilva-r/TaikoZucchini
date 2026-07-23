@@ -119,7 +119,7 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            qr/camera_qr.c qr/qr_spu_host.c \
            bpreader/bpreader_serial.c \
            cards/card_store.c cards/card_picker.c cards/card_issuer.c \
-           network/online_diag.c \
+           network/online_diag.c network/game_online.c \
            hooks/http_hook.c hooks/cell_http_shim.c \
            hooks/dns_hook.c hooks/socket_hook.c \
            hooks/video_out_hook.c \

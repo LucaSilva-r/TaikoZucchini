@@ -6,7 +6,7 @@
 #include "song_loader_manifest.h"
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 9u           /* v9: songselect hook dispatch cells */
+#define TAIKO_FPT_VERSION 10u          /* v10: game online-ready predicate OPD */
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
 
 /* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the
@@ -111,6 +111,10 @@ typedef struct {
      * its baked dispatch stub (0 = row not baked in this EBOOT). */
     uint32_t ssn_native_hook_opd[TAIKO_SONG_NATIVE_COUNT];
     uint32_t ssn_native_orig_opd[TAIKO_SONG_NATIVE_COUNT];
+    /* v10: original game OPD for the composite online-ready predicate.
+     * The patcher resolves this structurally per EBOOT; zero means the
+     * predicate shape was not recognized and runtime keeps the legacy gate. */
+    uint32_t game_online_ready_opd;
 } taiko_fpt_t;
 
 /* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
@@ -138,5 +142,6 @@ int taiko_fpt_publish_ssn_listbuild(uint32_t hook_opd);
  * dispatched call can never see a hook without its original. */
 uint32_t taiko_fpt_ssn_native_orig(uint32_t index);
 int taiko_fpt_publish_ssn_native(uint32_t index, uint32_t hook_opd);
+uintptr_t taiko_fpt_game_online_ready_opd(void);
 
 #endif
