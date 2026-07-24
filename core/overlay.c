@@ -14,6 +14,7 @@
 #include "game_state.h"
 #include "menu_font_20.h"
 #include "overlay_quad_shaders.h"
+#include "pairing_pill_rgba.h"
 #include "qr_encode.h"
 #include "title_render.h"
 #include "video_out_hook.h"
@@ -46,6 +47,14 @@
  * 57 modules), nearest-neighbour scaled up on blit so it stays crisp. */
 #define OVERLAY_QR_TEX_DIM     64
 #define OVERLAY_CARD_LINES     8
+#define OVERLAY_PAIRING_TEX_W  272
+#define OVERLAY_PAIRING_TEX_H  64
+#define OVERLAY_PAIRING_SLOTS  2
+#define OVERLAY_PAIRING_CODE_W 216
+#define OVERLAY_PAIRING_CODE_H 42
+#define OVERLAY_PAIRING_COUNT_W 50
+#define OVERLAY_PAIRING_COUNT_H 30
+#define OVERLAY_PAIRING_CODE_CENTER_X 158
 
 #define UI_COLOR_BG       0xDC101010u
 #define UI_COLOR_PANEL    0xF0181818u
@@ -145,6 +154,8 @@ static uint32_t g_font_tex_io;
 static uint32_t g_swatch_io[SWATCH_COUNT];
 static uint32_t g_qr_tex_io;
 static uint32_t *g_qr_tex;
+static uint32_t g_pairing_tex_io[OVERLAY_PAIRING_SLOTS];
+static uint32_t *g_pairing_tex[OVERLAY_PAIRING_SLOTS];
 static overlay_vertex_t *g_text_vtx;
 static uint32_t g_text_vtx_io;
 static uint32_t g_text_vtx_next;
@@ -176,6 +187,15 @@ static volatile int g_card_cur = -1;
 static volatile int g_card_reading = -1;
 static overlay_card_state_t g_card_state[2];
 static volatile uint32_t g_activity_flags;
+static volatile int g_pairing_active;
+static volatile int g_pairing_cur;
+static char g_pairing_code[2][7];
+static volatile uint64_t g_pairing_deadline_us;
+static int g_pairing_texture_cur;
+static char g_pairing_texture_code[7];
+static int g_pairing_texture_seconds = -1;
+static uint32_t g_pairing_text_scratch[OVERLAY_PAIRING_CODE_W *
+                                       OVERLAY_PAIRING_CODE_H];
 
 static void cache_display_info(void) {
     const CellGcmDisplayInfo *info = cellGcmGetDisplayInfo();
@@ -289,6 +309,13 @@ static int ensure_overlay_mapped(void) {
     g_qr_tex_io = off + cursor;
     g_qr_tex = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
     cursor += OVERLAY_QR_TEX_DIM * OVERLAY_QR_TEX_DIM * 4;
+
+    for (int i = 0; i < OVERLAY_PAIRING_SLOTS; i++) {
+        cursor = align_up_u32(cursor, 128);
+        g_pairing_tex_io[i] = off + cursor;
+        g_pairing_tex[i] = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
+        cursor += OVERLAY_PAIRING_TEX_W * OVERLAY_PAIRING_TEX_H * 4;
+    }
 
     cursor = align_up_u32(cursor, 128);
     CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
@@ -415,6 +442,26 @@ static int append_text_vertices(overlay_vertex_t *v, int *count, int max_vtx,
         }
         pen += g->advance;
     }
+    return 1;
+}
+
+static int append_image_vertices(overlay_vertex_t *v, int *count, int max_vtx,
+                                 uint32_t fb_w, uint32_t fb_h,
+                                 int x, int y, int w, int h) {
+    if (!v || !count || *count + 6 > max_vtx || w <= 0 || h <= 0)
+        return 0;
+
+    float x0 = (float)x;
+    float y0 = (float)y;
+    float x1 = (float)(x + w);
+    float y1 = (float)(y + h);
+    uint32_t color = 0xFFFFFFFFu;
+    text_push_vertex(v, count, x0, y0, 0.0f, 0.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y0, 1.0f, 0.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y0, 1.0f, 0.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x1, y1, 1.0f, 1.0f, color, fb_w, fb_h);
+    text_push_vertex(v, count, x0, y1, 0.0f, 1.0f, color, fb_w, fb_h);
     return 1;
 }
 
@@ -552,8 +599,13 @@ static int finish_and_call(CellGcmContextData *game,
     return 1;
 }
 
-static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b,
-                              uint32_t vtx_io, int vtx_count) {
+static void append_texture_batch(CellGcmContextData *cmd,
+                                 const overlay_buffer_t *b,
+                                 uint32_t vtx_io, int vtx_count,
+                                 uint8_t format, uint32_t remap,
+                                 uint16_t width, uint16_t height,
+                                 uint32_t pitch, uint32_t texture_offset,
+                                 uint8_t filter, int preserve_texture_color) {
     if (!cmd || !b || vtx_count <= 0)
         return;
 
@@ -590,37 +642,35 @@ static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b
     cellGcmSetVertexProgram(cmd, (CGprogram)overlay_quad_vp_cgb,
                             (const uint8_t *)overlay_quad_vp_cgb +
                             ((CgBinaryProgram *)overlay_quad_vp_cgb)->ucode);
-    cellGcmSetFragmentProgramOffset(cmd, (CGprogram)overlay_quad_fp_cgb,
-                                    g_fp_ucode_io, CELL_GCM_LOCATION_MAIN);
-    cellGcmSetFragmentProgramControl(cmd, (CGprogram)overlay_quad_fp_cgb, 0, 1, 0);
+    const uint8_t *fragment_program = preserve_texture_color
+        ? overlay_color_fp_cgb
+        : overlay_quad_fp_cgb;
+    uint32_t fragment_program_io = preserve_texture_color
+        ? g_color_fp_ucode_io
+        : g_fp_ucode_io;
+    cellGcmSetFragmentProgramOffset(cmd, (CGprogram)fragment_program,
+                                    fragment_program_io, CELL_GCM_LOCATION_MAIN);
+    cellGcmSetFragmentProgramControl(cmd, (CGprogram)fragment_program, 0, 1, 0);
 
     CellGcmTexture tex;
     memset(&tex, 0, sizeof tex);
-    tex.format = CELL_GCM_TEXTURE_B8 | CELL_GCM_TEXTURE_LN;
+    tex.format = format | CELL_GCM_TEXTURE_LN;
     tex.mipmap = 1;
     tex.dimension = CELL_GCM_TEXTURE_DIMENSION_2;
     tex.cubemap = CELL_GCM_FALSE;
-    tex.remap = CELL_GCM_REMAP_MODE(CELL_GCM_TEXTURE_REMAP_ORDER_XYXY,
-                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
-                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
-                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
-                                    CELL_GCM_TEXTURE_REMAP_FROM_B,
-                                    CELL_GCM_TEXTURE_REMAP_REMAP,
-                                    CELL_GCM_TEXTURE_REMAP_REMAP,
-                                    CELL_GCM_TEXTURE_REMAP_REMAP,
-                                    CELL_GCM_TEXTURE_REMAP_REMAP);
-    tex.width = menu_font_20_font.atlas_w;
-    tex.height = menu_font_20_font.atlas_h;
+    tex.remap = remap;
+    tex.width = width;
+    tex.height = height;
     tex.depth = 1;
     tex.location = CELL_GCM_LOCATION_MAIN;
-    tex.pitch = OVERLAY_ATLAS_PITCH;
-    tex.offset = g_font_tex_io;
+    tex.pitch = pitch;
+    tex.offset = texture_offset;
     cellGcmSetTexture(cmd, (uint8_t)g_tex_unit, &tex);
     cellGcmSetTextureControl(cmd, (uint8_t)g_tex_unit, CELL_GCM_TRUE,
                              0 << 8, 12 << 8, CELL_GCM_TEXTURE_MAX_ANISO_1);
     cellGcmSetTextureFilter(cmd, (uint8_t)g_tex_unit, 0,
-                            CELL_GCM_TEXTURE_NEAREST,
-                            CELL_GCM_TEXTURE_NEAREST,
+                            filter,
+                            filter,
                             CELL_GCM_TEXTURE_CONVOLUTION_QUINCUNX);
     cellGcmSetTextureAddress(cmd, (uint8_t)g_tex_unit,
                              CELL_GCM_TEXTURE_CLAMP_TO_EDGE,
@@ -643,6 +693,26 @@ static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b
     cellGcmSetDrawArrays(cmd, CELL_GCM_PRIMITIVE_TRIANGLES, 0, (uint32_t)vtx_count);
     append_blend_state(cmd, 0);
     cellGcmSetDepthMask(cmd, CELL_GCM_TRUE);
+}
+
+static void append_text_batch(CellGcmContextData *cmd, const overlay_buffer_t *b,
+                              uint32_t vtx_io, int vtx_count) {
+    uint32_t remap = CELL_GCM_REMAP_MODE(
+        CELL_GCM_TEXTURE_REMAP_ORDER_XYXY,
+        CELL_GCM_TEXTURE_REMAP_FROM_B,
+        CELL_GCM_TEXTURE_REMAP_FROM_B,
+        CELL_GCM_TEXTURE_REMAP_FROM_B,
+        CELL_GCM_TEXTURE_REMAP_FROM_B,
+        CELL_GCM_TEXTURE_REMAP_REMAP,
+        CELL_GCM_TEXTURE_REMAP_REMAP,
+        CELL_GCM_TEXTURE_REMAP_REMAP,
+        CELL_GCM_TEXTURE_REMAP_REMAP);
+    append_texture_batch(cmd, b, vtx_io, vtx_count,
+                         CELL_GCM_TEXTURE_B8, remap,
+                         menu_font_20_font.atlas_w,
+                         menu_font_20_font.atlas_h,
+                         OVERLAY_ATLAS_PITCH, g_font_tex_io,
+                         CELL_GCM_TEXTURE_NEAREST, 0);
 }
 
 static void maybe_draw_toast(void *ctx, uint8_t id) {
@@ -1172,6 +1242,189 @@ static void maybe_draw_activity(void *ctx, uint8_t id) {
     (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
 }
 
+static int pairing_remaining_seconds(void) {
+    uint64_t deadline = g_pairing_deadline_us;
+    uint64_t now = (uint64_t)sys_time_get_system_time();
+    if (!deadline || now >= deadline)
+        return 0;
+    uint64_t remaining_us = deadline - now;
+    int seconds = (int)((remaining_us + 999999ULL) / 1000000ULL);
+    return seconds > 99 ? 99 : seconds;
+}
+
+static void pairing_copy_pill(uint32_t *out) {
+    if (!out || taiko_pairing_pill_rgba_len !=
+                    OVERLAY_PAIRING_TEX_W * OVERLAY_PAIRING_TEX_H * 4)
+        return;
+
+    for (int i = 0; i < OVERLAY_PAIRING_TEX_W * OVERLAY_PAIRING_TEX_H; i++) {
+        const unsigned char *src = &taiko_pairing_pill_rgba[i * 4];
+        out[i] = ((uint32_t)src[3] << 24) |
+                 ((uint32_t)src[0] << 16) |
+                 ((uint32_t)src[1] << 8) |
+                 (uint32_t)src[2];
+    }
+}
+
+static void pairing_blend_text(uint32_t *dst, int dst_x, int dst_y,
+                               const uint32_t *src, int src_pitch,
+                               int src_w, int src_h) {
+    for (int y = 0; y < src_h; y++) {
+        for (int x = 0; x < src_w; x++) {
+            uint32_t source = src[y * src_pitch + x];
+            unsigned int source_alpha = source >> 24;
+            if (!source_alpha)
+                continue;
+
+            uint32_t *target = &dst[(dst_y + y) * OVERLAY_PAIRING_TEX_W +
+                                    dst_x + x];
+            uint32_t destination = *target;
+            unsigned int destination_alpha = destination >> 24;
+            unsigned int inverse_alpha = 255 - source_alpha;
+            unsigned int destination_weight =
+                (destination_alpha * inverse_alpha + 127) / 255;
+            unsigned int output_alpha = source_alpha + destination_weight;
+            if (!output_alpha)
+                continue;
+
+            unsigned int red =
+                (((source >> 16) & 0xFF) * source_alpha +
+                 ((destination >> 16) & 0xFF) * destination_weight +
+                 output_alpha / 2) / output_alpha;
+            unsigned int green =
+                (((source >> 8) & 0xFF) * source_alpha +
+                 ((destination >> 8) & 0xFF) * destination_weight +
+                 output_alpha / 2) / output_alpha;
+            unsigned int blue =
+                ((source & 0xFF) * source_alpha +
+                 (destination & 0xFF) * destination_weight +
+                 output_alpha / 2) / output_alpha;
+            *target = (output_alpha << 24) | (red << 16) |
+                      (green << 8) | blue;
+        }
+    }
+}
+
+static int pairing_render_texture(const char code[7], int seconds) {
+    int next = g_pairing_texture_cur ^ 1;
+    uint32_t *texture = g_pairing_tex[next];
+    if (!texture)
+        return 0;
+
+    pairing_copy_pill(texture);
+
+    char displayed_code[8] = {
+        code[0], code[1], code[2], '-',
+        code[3], code[4], code[5], 0
+    };
+    int code_width = taiko_text_render_argb(
+        displayed_code, g_pairing_text_scratch,
+        OVERLAY_PAIRING_CODE_W, OVERLAY_PAIRING_CODE_H, 0x000000u);
+    if (code_width <= 0)
+        return 0;
+    int code_x = OVERLAY_PAIRING_CODE_CENTER_X - code_width / 2;
+    int code_y = (OVERLAY_PAIRING_TEX_H - OVERLAY_PAIRING_CODE_H) / 2;
+    pairing_blend_text(texture, code_x, code_y, g_pairing_text_scratch,
+                       OVERLAY_PAIRING_CODE_W, code_width,
+                       OVERLAY_PAIRING_CODE_H);
+
+    char countdown[3];
+    if (seconds >= 10) {
+        countdown[0] = (char)('0' + seconds / 10);
+        countdown[1] = (char)('0' + seconds % 10);
+        countdown[2] = 0;
+    } else {
+        countdown[0] = (char)('0' + seconds);
+        countdown[1] = 0;
+        countdown[2] = 0;
+    }
+    int countdown_width = taiko_text_render_argb(
+        countdown, g_pairing_text_scratch,
+        OVERLAY_PAIRING_COUNT_W, OVERLAY_PAIRING_COUNT_H, 0x000000u);
+    if (countdown_width <= 0)
+        return 0;
+    int countdown_x = (64 - countdown_width) / 2;
+    int countdown_y = (OVERLAY_PAIRING_TEX_H - OVERLAY_PAIRING_COUNT_H) / 2;
+    pairing_blend_text(texture, countdown_x, countdown_y,
+                       g_pairing_text_scratch, OVERLAY_PAIRING_COUNT_W,
+                       countdown_width, OVERLAY_PAIRING_COUNT_H);
+
+    flush_dcache(texture, OVERLAY_PAIRING_TEX_W * OVERLAY_PAIRING_TEX_H * 4);
+    memcpy(g_pairing_texture_code, code, sizeof g_pairing_texture_code);
+    g_pairing_texture_seconds = seconds;
+    __sync_synchronize();
+    g_pairing_texture_cur = next;
+    return 1;
+}
+
+static void maybe_draw_pairing(void *ctx, uint8_t id) {
+    taiko_game_state_t state = taiko_game_state_current();
+    if (!g_pairing_active ||
+        (state != TAIKO_GAME_STATE_ATTRACT && state != TAIKO_GAME_STATE_SHOP) ||
+        !ensure_overlay_mapped())
+        return;
+
+    int seconds = pairing_remaining_seconds();
+    if (seconds <= 0)
+        return;
+
+    char code[7];
+    int cur = g_pairing_cur;
+    memcpy(code, g_pairing_code[cur], sizeof code);
+    code[6] = 0;
+    if (strcmp(g_pairing_texture_code, code) != 0 ||
+        g_pairing_texture_seconds != seconds) {
+        if (!pairing_render_texture(code, seconds))
+            return;
+    }
+
+    overlay_buffer_t b;
+    if (!get_flip_buffer(id, &b))
+        return;
+    CellGcmContextData *game = (CellGcmContextData *)ctx;
+    if (!game || !game->current || !game->end)
+        return;
+
+    uint32_t cmd_io = 0;
+    uint32_t *cmd_buf = cmd_begin(&cmd_io);
+    CellGcmContextData cmd;
+    memset(&cmd, 0, sizeof cmd);
+    cmd.begin = cmd_buf;
+    cmd.current = cmd_buf;
+    cmd.end = cmd_buf + OVERLAY_CMD_WORDS;
+
+    uint32_t vtx_io = 0;
+    int max_vtx = 0;
+    int vtx_count = 0;
+    overlay_vertex_t *vertices = text_begin(&vtx_io, &max_vtx);
+    int x = ((int)b.width - OVERLAY_PAIRING_TEX_W) / 2;
+    const int y = 18;
+    if (!vertices ||
+        !append_image_vertices(vertices, &vtx_count, max_vtx,
+                               b.width, b.height, x, y,
+                               OVERLAY_PAIRING_TEX_W, OVERLAY_PAIRING_TEX_H))
+        return;
+    flush_dcache(vertices, (size_t)vtx_count * sizeof(*vertices));
+
+    uint32_t remap = CELL_GCM_REMAP_MODE(
+        CELL_GCM_TEXTURE_REMAP_ORDER_XYXY,
+        CELL_GCM_TEXTURE_REMAP_FROM_A,
+        CELL_GCM_TEXTURE_REMAP_FROM_R,
+        CELL_GCM_TEXTURE_REMAP_FROM_G,
+        CELL_GCM_TEXTURE_REMAP_FROM_B,
+        CELL_GCM_TEXTURE_REMAP_REMAP,
+        CELL_GCM_TEXTURE_REMAP_REMAP,
+        CELL_GCM_TEXTURE_REMAP_REMAP,
+        CELL_GCM_TEXTURE_REMAP_REMAP);
+    append_texture_batch(&cmd, &b, vtx_io, vtx_count,
+                         CELL_GCM_TEXTURE_A8R8G8B8, remap,
+                         OVERLAY_PAIRING_TEX_W, OVERLAY_PAIRING_TEX_H,
+                         OVERLAY_PAIRING_TEX_W * 4,
+                         g_pairing_tex_io[g_pairing_texture_cur],
+                         CELL_GCM_TEXTURE_LINEAR, 1);
+    (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
     if (!g_local_base) {
         CellGcmConfig cfg;
@@ -1187,6 +1440,8 @@ static int hk_flip_command(void *ctx, uint8_t id) {
         maybe_draw_message_box(ctx, id);
     else if (g_toast_frames > 0)
         maybe_draw_toast(ctx, id);
+    if (!g_card_active && !g_menu_active && g_message_box_frames <= 0)
+        maybe_draw_pairing(ctx, id);
     maybe_draw_activity(ctx, id);
     if (taiko_video_upscale_active())
         (void)taiko_video_upscale_inject_blit(ctx, id);
@@ -1200,6 +1455,29 @@ void taiko_overlay_activity_set(unsigned activity_bit, int active) {
         __sync_fetch_and_or(&g_activity_flags, (uint32_t)activity_bit);
     else
         __sync_fetch_and_and(&g_activity_flags, ~(uint32_t)activity_bit);
+}
+
+void taiko_overlay_pairing_set(const char code[7], int expires_in) {
+    if (!code || expires_in <= 0)
+        return;
+    for (int i = 0; i < 6; i++)
+        if (code[i] < '0' || code[i] > '9')
+            return;
+    if (code[6] != 0)
+        return;
+
+    int next = g_pairing_cur ^ 1;
+    memcpy(g_pairing_code[next], code, 7);
+    g_pairing_deadline_us = (uint64_t)sys_time_get_system_time() +
+                            (uint64_t)expires_in * 1000000ULL;
+    __sync_synchronize();
+    g_pairing_cur = next;
+    g_pairing_active = 1;
+}
+
+void taiko_overlay_pairing_clear(void) {
+    g_pairing_active = 0;
+    g_pairing_deadline_us = 0;
 }
 
 static int hk_set_display_buffer(uint8_t id, uint32_t offset, uint32_t pitch,

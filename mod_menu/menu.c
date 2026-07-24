@@ -64,6 +64,7 @@ typedef enum {
     F_USIO_EMULATION,
     F_QR_CARD_READER,
     F_SAVED_CARD_PROMPT,
+    F_SIX_PIN_LOGIN,
     F_INGAME_MOD_MENU,
     F_DRUM_MENU_SHORTCUT,
     F_CUSTOM_SONG_INJECTOR,
@@ -100,6 +101,7 @@ static int field_get(field_id_t id) {
     case F_USIO_EMULATION:      return g_cfg.usio_emulation;
     case F_QR_CARD_READER:      return g_cfg.qr_card_reader;
     case F_SAVED_CARD_PROMPT:   return g_cfg.saved_card_prompt;
+    case F_SIX_PIN_LOGIN:       return g_cfg.six_pin_login;
     case F_INGAME_MOD_MENU:     return g_cfg.ingame_mod_menu;
     case F_DRUM_MENU_SHORTCUT:  return g_cfg.drum_menu_shortcut;
     case F_CUSTOM_SONG_INJECTOR:return g_cfg.custom_song_injector;
@@ -134,6 +136,7 @@ static void field_set(field_id_t id, int v) {
     case F_USIO_EMULATION:      g_cfg.usio_emulation = v; break;
     case F_QR_CARD_READER:      g_cfg.qr_card_reader = v; break;
     case F_SAVED_CARD_PROMPT:   g_cfg.saved_card_prompt = v; break;
+    case F_SIX_PIN_LOGIN:       g_cfg.six_pin_login = v; break;
     case F_INGAME_MOD_MENU:     g_cfg.ingame_mod_menu = v; break;
     case F_DRUM_MENU_SHORTCUT:  g_cfg.drum_menu_shortcut = v; break;
     case F_CUSTOM_SONG_INJECTOR:g_cfg.custom_song_injector = v; break;
@@ -211,6 +214,9 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "Online redirect",
       "Routes game HTTP/DNS/socket traffic to the configured private server. OFF restores stock net hooks.",
       F_ONLINE_REDIRECT_ENABLE, 0 },
+    { ITEM_TOGGLE,  "Six-pin login",
+      "Shows the remote six-digit login code while online card input is available. QR and saved cards are unaffected.",
+      F_SIX_PIN_LOGIN, 0 },
     { ITEM_HOST_EDIT, "Redirect host",
       "Private server hostname. Used for DNS target, HTTP Host, and TLS SNI.",
       0, 0 },
@@ -467,6 +473,10 @@ static void toggle_field(field_id_t id) {
         g_status = new_value
             ? "Online redirect enabled: HTTP/DNS/socket hooks will activate next boot"
             : "Online redirect disabled: stock network hooks restored next boot";
+    } else if (id == F_SIX_PIN_LOGIN) {
+        g_status = new_value
+            ? "Six-pin login enabled"
+            : "Six-pin login disabled: active code will close";
     }
 }
 
@@ -1525,7 +1535,7 @@ static int main_build_rows(int *rows, int cap) {
 static int main_row_selectable(int code) {
     if (code == MAIN_SEC_QUICK || code == MAIN_SEC_SETTINGS)
         return 0;
-    if (code >= MAIN_CARD_BASE && !card_picker_available())
+    if (code >= MAIN_CARD_BASE && !card_picker_can_present())
         return 0;
     if (code == MAIN_SONGS && !g_cfg.custom_song_injector)
         return 0;
@@ -1572,7 +1582,7 @@ static const char *main_row_label(int code) {
 }
 
 static const char *main_row_desc(int code) {
-    if (code >= MAIN_CARD_BASE && card_picker_available())
+    if (code >= MAIN_CARD_BASE && card_picker_can_present())
         return "Replay this saved BanaPass card now.";
     if (code >= MAIN_CARD_BASE)
         return "The game is not accepting BanaPass swipes right now.";
@@ -1640,7 +1650,7 @@ static void main_render(const int *rows, int count, int sel) {
         values[i] = "";
         if (rows[i] == MAIN_SEC_QUICK || rows[i] == MAIN_SEC_SETTINGS)
             kinds[i] = TAIKO_OVL_ROW_SECTION;
-        else if (rows[i] >= MAIN_CARD_BASE && !card_picker_available()) {
+        else if (rows[i] >= MAIN_CARD_BASE && !card_picker_can_present()) {
             values[i] = "can't swipe BanaPass now";
             kinds[i] = TAIKO_OVL_ROW_DISABLED;
         }

@@ -20,6 +20,7 @@
 #include "menu_pad.h"
 #include "menu_osk.h"
 #include "debug.h"
+#include "game_online.h"
 
 #define TICK_US               (4 * 1000)    /* ~250 Hz; catches quick taps */
 #define QR_WAIT_TICKS         150           /* ~15s @ 100ms to capture a scan */
@@ -38,19 +39,20 @@ static void capture_cb(const char code[21]) {
     g_capture_pending = 1;
 }
 
-static void replay_card(const char *code20) {
-    if (!bpreader_serial_reader_enabled()) {
+static int replay_card(const char *code20) {
+    int rc = bpreader_serial_present_access_code(code20);
+    if (rc == BPREADER_PRESENT_DISABLED) {
         taiko_overlay_show_prompt("Card reader disabled");
-        return;
+    } else if (rc == BPREADER_PRESENT_BUSY) {
+        taiko_overlay_show_prompt("Card reader is busy");
+    } else if (rc == BPREADER_PRESENT_INVALID) {
+        taiko_overlay_show_prompt("Invalid card code");
+    } else if (rc == BPREADER_PRESENT_NOT_ENCODABLE) {
+        taiko_overlay_show_prompt("Card code is not MIFARE-encodable");
+    } else if (rc == BPREADER_PRESENT_OFFLINE) {
+        taiko_overlay_show_prompt("Game online services unavailable");
     }
-
-    char ac[21];
-    /* Stored codes are 20 decimal digits; bpreader treats them as hex
-     * (digits are valid hex), matching the QR decode path exactly. */
-    memcpy(ac, code20, 20);
-    ac[20] = '\0';
-    bpreader_serial_set_access_code(ac);
-    bpreader_serial_set_card_present(true);
+    return rc == BPREADER_PRESENT_OK;
 }
 
 static void action_add_keyboard(void) {
@@ -271,8 +273,9 @@ static int card_action_menu(int idx) {
         if (edge & MENU_BTN_CROSS) {
             if (sel == r_use) {
                 const char *code = card_store_code(idx);
-                if (code) replay_card(code);
-                return 1;
+                if (code && replay_card(code))
+                    return 1;
+                (void)menu_pad_pressed();
             } else if (sel == r_code) {
                 const char *code = card_store_code(idx);
                 if (code) show_card_screen(code, 0);
@@ -305,6 +308,11 @@ int card_picker_available(void) {
            bpreader_hook_reader_accepting_card() &&
            bpreader_serial_reader_enabled() &&
            !bpreader_serial_card_present();
+}
+
+int card_picker_can_present(void) {
+    return card_picker_available() &&
+           taiko_game_online_allows_card_input();
 }
 
 void card_picker_run(void) {

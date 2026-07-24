@@ -12,6 +12,10 @@ void taiko_overlay_show_update_available(const char *latest_version);
 #define TAIKO_OVL_ACTIVITY_TITLE_PRERENDER (1u << 1)
 void taiko_overlay_activity_set(unsigned activity_bit, int active);
 
+/* Compact cabinet-login badge drawn while a six-digit code is active. */
+void taiko_overlay_pairing_set(const char code[7], int expires_in);
+void taiko_overlay_pairing_clear(void);
+
 /* Like taiko_overlay_show_message but renders even after the 60s boot
  * window has closed (used for the mid-game "hold L3+R3" card prompt). */
 void taiko_overlay_show_prompt(const char *message);

@@ -55,6 +55,8 @@ static uintptr_t fpt_total_size(uint32_t version, uint32_t slots) {
         size += sizeof(taiko_song_loader_manifest_t);
     if (version >= 9u)
         size += (3u + 2u * TAIKO_SONG_NATIVE_COUNT) * sizeof(uint32_t);
+    if (version >= 10u)
+        size += sizeof(uint32_t);
     return size;
 }
 
@@ -167,6 +169,13 @@ int taiko_fpt_publish_ssn_native(uint32_t index, uint32_t hook_opd) {
     *(volatile uint32_t *)&t->ssn_native_hook_opd[index] = hook_opd;
     __asm__ volatile("sync" ::: "memory");
     return 1;
+}
+
+uintptr_t taiko_fpt_game_online_ready_opd(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 10u)
+        return 0;
+    return (uintptr_t)t->game_online_ready_opd;
 }
 
 int taiko_fpt_publish(uint32_t slot, const void *opd) {

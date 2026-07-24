@@ -26,6 +26,7 @@ typedef struct {
     unsigned usio_emulation     : 1;
     unsigned qr_card_reader     : 1;
     unsigned saved_card_prompt  : 1;
+    unsigned six_pin_login      : 1;
     unsigned ingame_mod_menu    : 1;
     unsigned drum_menu_shortcut : 1;
     unsigned custom_song_injector : 1;

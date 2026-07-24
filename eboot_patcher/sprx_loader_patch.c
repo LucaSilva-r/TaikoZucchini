@@ -354,6 +354,109 @@ static int find_opd_for_entry(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     return -1;
 }
 
+static int online_ready_toc_restore(uint32_t insn) {
+    return insn == 0x60000000u || insn == 0xE8410028u;
+}
+
+/* Composite game-online predicate recovered from Green and confirmed in
+ * Yellow/Blue:
+ *
+ *   if (!AllNetAuthStatus_IsPowerOnOk()) return false;
+ *   if (!GameNet_HasServiceContext())    return false;
+ *   if (!NetworkIndicator_IsOnline())    return false;
+ *   return OnlineCheck_IsReady();
+ *
+ * Match the control-flow/compiler shape, not any absolute call target. The
+ * optional `ld r2,0x28(r1)` after a call accounts for functions that cross a
+ * compilation-unit TOC. The paired stack offsets and branch-back instructions
+ * make this substantially stricter than a short byte signature. */
+static int game_online_ready_matches(const uint8_t *b) {
+    uint32_t w0 = load_be32(b + 0x00);
+    uint32_t w2 = load_be32(b + 0x08);
+    /* stdu uses the DS form: the low two instruction bits are the opcode
+     * extension, not displacement bits. Mask them before recovering -frame. */
+    uint32_t frame =
+        (uint32_t)(-(int32_t)(int16_t)(w0 & 0xfffcu)) & 0xffffu;
+    uint32_t restore = 0x38210000u | frame;
+
+    return (w0 & 0xffff0000u) == 0xF8210000u &&
+           frame != 0u &&
+           load_be32(b + 0x04) == 0x7C0802A6u &&
+           (w2 & 0xffff0000u) == 0xF8010000u &&
+           is_relative_bl(load_be32(b + 0x0C)) &&
+           online_ready_toc_restore(load_be32(b + 0x10)) &&
+           load_be32(b + 0x14) == 0x5463063Eu &&
+           load_be32(b + 0x18) == 0x2F830000u &&
+           load_be32(b + 0x1C) == 0x409E001Cu &&
+           load_be32(b + 0x20) == (0xE8010000u | (w2 & 0xffffu)) &&
+           load_be32(b + 0x24) == 0x38600000u &&
+           load_be32(b + 0x28) == restore &&
+           load_be32(b + 0x2C) == 0x7C6307B4u &&
+           load_be32(b + 0x30) == 0x7C0803A6u &&
+           load_be32(b + 0x34) == 0x4E800020u &&
+           is_relative_bl(load_be32(b + 0x38)) &&
+           online_ready_toc_restore(load_be32(b + 0x3C)) &&
+           load_be32(b + 0x40) == 0x5463063Eu &&
+           load_be32(b + 0x44) == 0x2F830000u &&
+           load_be32(b + 0x48) == 0x419EFFD8u &&
+           is_relative_bl(load_be32(b + 0x4C)) &&
+           online_ready_toc_restore(load_be32(b + 0x50)) &&
+           load_be32(b + 0x54) == 0x5463063Eu &&
+           load_be32(b + 0x58) == 0x2F830000u &&
+           load_be32(b + 0x5C) == 0x419EFFC4u &&
+           is_relative_bl(load_be32(b + 0x60)) &&
+           online_ready_toc_restore(load_be32(b + 0x64)) &&
+           load_be32(b + 0x68) == (0xE8010000u | (w2 & 0xffffu)) &&
+           load_be32(b + 0x6C) == 0x78630620u &&
+           load_be32(b + 0x70) == 0x7C0803A6u &&
+           load_be32(b + 0x74) == restore &&
+           load_be32(b + 0x78) == 0x7C6300D0u &&
+           load_be32(b + 0x7C) == 0x78630FE0u &&
+           load_be32(b + 0x80) == 0x7C6307B4u &&
+           load_be32(b + 0x84) == 0x4E800020u;
+}
+
+static int find_game_online_ready_opd(self_ctx_t *ctx,
+                                      elf64_phdr_t *phdrs, uint16_t phnum,
+                                      uint32_t *out_opd) {
+    int prefer_elf = use_elf_file_offsets(ctx);
+    uint32_t found_entry = 0;
+    uint32_t found_opd = 0;
+    uint32_t matches = 0;
+
+    for (uint16_t i = 0; i < phnum; i++) {
+        elf64_phdr_t *p = &phdrs[i];
+        if (p->p_type != PT_LOAD || !(p->p_flags & PF_X) || p->p_filesz == 0)
+            continue;
+        uint64_t base = prefer_elf ? p->p_offset : ctx->si[i].offset;
+        uint64_t size = prefer_elf ? p->p_filesz : ctx->si[i].size;
+        if (base + size > ctx->buf_len || size < 0x88u)
+            continue;
+
+        for (uint64_t pos = 0; pos + 0x88u <= size; pos += 4u) {
+            if (!game_online_ready_matches(ctx->buf + base + pos))
+                continue;
+            uint32_t entry = (uint32_t)(p->p_vaddr + pos);
+            uint32_t opd = 0;
+            if (find_opd_for_entry(ctx, phdrs, phnum, entry, &opd) != 0)
+                continue;
+            found_entry = entry;
+            found_opd = opd;
+            matches++;
+        }
+    }
+
+    if (matches != 1u) {
+        dbg_print_hex32("[patch] game online-ready matches", matches);
+        return matches ? -2 : -1;
+    }
+
+    dbg_print_hex32("[patch] game online-ready entry", found_entry);
+    dbg_print_hex32("[patch] game online-ready opd", found_opd);
+    *out_opd = found_opd;
+    return 0;
+}
+
 static uint32_t count_direct_calls_to(self_ctx_t *ctx, elf64_phdr_t *phdrs,
                                       uint16_t phnum, uint32_t target) {
     int prefer_elf = use_elf_file_offsets(ctx);
@@ -1266,6 +1369,21 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     } else {
         dbg_print_hex32("[patch] game local allocator rc", (uint32_t)alloc_rc);
         dbg_print("[patch] game local allocator OPD not found\n");
+    }
+
+    {
+        uint32_t online_ready_opd = 0;
+        int online_rc = find_game_online_ready_opd(ctx, phdrs, phnum,
+                                                   &online_ready_opd);
+        if (online_rc == 0) {
+            store_be32(ctx->buf + fpt_off +
+                       offsetof(taiko_fpt_t, game_online_ready_opd),
+                       online_ready_opd);
+        } else {
+            dbg_print_hex32("[patch] game online-ready rc",
+                            (uint32_t)online_rc);
+            dbg_print("[patch] game online-ready OPD not found; legacy card gate\n");
+        }
     }
 
     for (size_t i = 0; i < sizeof(FPT_STUB_FNIDS) / sizeof(FPT_STUB_FNIDS[0]); i++) {

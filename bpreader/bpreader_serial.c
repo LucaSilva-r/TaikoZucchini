@@ -5,6 +5,7 @@
 
 #include "config.h"
 #include "debug.h"
+#include "game_online.h"
 #include "overlay.h"
 
 #ifndef BPREADER_ACCESS_CODE_HEX
@@ -771,6 +772,34 @@ void bpreader_serial_set_card_present(bool present) {
 
 bool bpreader_serial_card_present(void) {
     return bpreader.reader_enabled && bpreader.card_present;
+}
+
+int bpreader_serial_present_access_code(const char access_code[21]) {
+    uint8_t parsed[BPREADER_CARD_BYTES];
+    if (!bpreader.reader_enabled)
+        return BPREADER_PRESENT_DISABLED;
+    if (bpreader.card_present)
+        return BPREADER_PRESENT_BUSY;
+    if (!taiko_game_online_allows_card_input())
+        return BPREADER_PRESENT_OFFLINE;
+    if (!parse_access_code(access_code, parsed))
+        return BPREADER_PRESENT_INVALID;
+
+    bpreader_state_t previous = bpreader;
+    memcpy(bpreader.access_code, parsed, sizeof(bpreader.access_code));
+    populate_card(false);
+    if (!bpreader.mifare_valid) {
+        bpreader = previous;
+        return BPREADER_PRESENT_NOT_ENCODABLE;
+    }
+
+    bpreader.card_present = true;
+    bpreader.card_consumed = false;
+#if BPREADER_CARD_TRACE
+    dbg_print_bytes_n("[bp-card] presented access_code bcd=", bpreader.access_code,
+                      BPREADER_CARD_BYTES);
+#endif
+    return BPREADER_PRESENT_OK;
 }
 
 void bpreader_serial_set_access_code(const char access_code[21]) {
