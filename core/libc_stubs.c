@@ -19,6 +19,7 @@
 #include <stdlib.h>
 
 #include <sys/ppu_thread.h>
+#include <sys/timer.h>
 
 void _exit(int status);
 void _exit(int status) {
@@ -64,21 +65,42 @@ typedef struct HeapBlock {
     size_t size;
     struct HeapBlock *next;
     int free;
+    /*
+     * Keep the header itself 16 bytes on the 32-bit PPU ABI.  The old
+     * 12-byte header made every pointer returned by malloc misaligned even
+     * though payload sizes were rounded to 16 bytes.  mbedTLS contains data
+     * with 8/16-byte alignment requirements, and concurrent TLS requests
+     * eventually exposed the resulting heap metadata corruption.
+     *
+     * The tag also lets every list traversal reject a damaged link instead
+     * of following a cycle forever and freezing the game.
+     */
+    uint32_t tag;
 } HeapBlock;
 
 static HeapBlock *g_heap_head;
 static volatile int g_heap_lock;
+
+#define HEAP_BLOCK_TAG 0x544b4842u /* "TKHB" */
+#define HEAP_MAX_BLOCKS (HEAP_SIZE / sizeof(HeapBlock))
 
 static size_t align_up(size_t v, size_t a) {
     return (v + a - 1) & ~(a - 1);
 }
 
 static void heap_lock(void) {
-    /* Yield on contention. A pure spin here trips lv2's "busy loop
-     * detected" warning under load and starves the lock holder when
-     * we're on the same HW thread. */
+    /*
+     * Do not use sys_ppu_thread_yield() here.  The game main thread runs at
+     * priority 1001 while HTTP workers run at 1500 (lower priority).  If a
+     * worker owns the heap lock and the main thread contends for it, yielding
+     * leaves the higher-priority main thread runnable; LV2 immediately
+     * schedules it again and the worker never gets CPU time to unlock.
+     *
+     * A short sleep makes the contender non-runnable and breaks that priority
+     * inversion.  There is no cost on the uncontended path.
+     */
     while (__sync_lock_test_and_set(&g_heap_lock, 1)) {
-        sys_ppu_thread_yield();
+        sys_timer_usleep(1000);
     }
 }
 
@@ -92,6 +114,28 @@ static void heap_init(void) {
     g_heap_head->size = sizeof(g_heap) - sizeof(HeapBlock);
     g_heap_head->next = NULL;
     g_heap_head->free = 1;
+    g_heap_head->tag = HEAP_BLOCK_TAG;
+}
+
+static int heap_block_valid(const HeapBlock *b) {
+    const unsigned char *p = (const unsigned char *)b;
+    if (!b || p < g_heap ||
+        p > g_heap + sizeof(g_heap) - sizeof(HeapBlock) ||
+        (((uintptr_t)p - (uintptr_t)g_heap) & 15u) != 0 ||
+        b->tag != HEAP_BLOCK_TAG ||
+        b->size > (size_t)(g_heap + sizeof(g_heap) -
+                           (const unsigned char *)(b + 1)))
+        return 0;
+    if (b->next) {
+        const unsigned char *n = (const unsigned char *)b->next;
+        const unsigned char *payload_end =
+            (const unsigned char *)(b + 1) + b->size;
+        if (n < payload_end || n <= p ||
+            n > g_heap + sizeof(g_heap) - sizeof(HeapBlock) ||
+            (((uintptr_t)n - (uintptr_t)g_heap) & 15u) != 0)
+            return 0;
+    }
+    return 1;
 }
 
 static void heap_split(HeapBlock *b, size_t size) {
@@ -102,6 +146,7 @@ static void heap_split(HeapBlock *b, size_t size) {
     n->size = b->size - need - sizeof(HeapBlock);
     n->next = b->next;
     n->free = 1;
+    n->tag = HEAP_BLOCK_TAG;
 
     b->size = need;
     b->next = n;
@@ -109,7 +154,10 @@ static void heap_split(HeapBlock *b, size_t size) {
 
 static void heap_coalesce(void) {
     HeapBlock *b = g_heap_head;
-    while (b && b->next) {
+    size_t visited = 0;
+    while (heap_block_valid(b) && b->next && visited++ < HEAP_MAX_BLOCKS) {
+        if (!heap_block_valid(b->next))
+            return;
         if (b->free && b->next->free) {
             b->size += sizeof(HeapBlock) + b->next->size;
             b->next = b->next->next;
@@ -122,7 +170,9 @@ static void heap_coalesce(void) {
 static HeapBlock *heap_block_from_ptr(void *ptr) {
     if (!ptr) return NULL;
     unsigned char *p = (unsigned char *)ptr;
-    if (p < g_heap + sizeof(HeapBlock) || p >= g_heap + sizeof(g_heap)) return NULL;
+    if (p < g_heap + sizeof(HeapBlock) || p >= g_heap + sizeof(g_heap) ||
+        ((uintptr_t)p & 15u) != 0)
+        return NULL;
     return ((HeapBlock *)ptr) - 1;
 }
 
@@ -134,7 +184,12 @@ void *malloc(size_t size) {
     heap_init();
 
     HeapBlock *b = g_heap_head;
-    while (b) {
+    size_t visited = 0;
+    while (b && visited++ < HEAP_MAX_BLOCKS) {
+        if (!heap_block_valid(b)) {
+            heap_unlock();
+            return NULL;
+        }
         if (b->free && b->size >= size) {
             heap_split(b, size);
             b->free = 0;
@@ -153,6 +208,10 @@ void free(void *ptr) {
     if (!b) return;
 
     heap_lock();
+    if (!heap_block_valid(b) || b->free) {
+        heap_unlock();
+        return;
+    }
     b->free = 1;
     heap_coalesce();
     heap_unlock();
@@ -174,17 +233,20 @@ void *realloc(void *ptr, size_t size) {
         return NULL;
     }
 
+    heap_lock();
     HeapBlock *b = heap_block_from_ptr(ptr);
-    if (!b) return NULL;
-
+    if (!heap_block_valid(b) || b->free) {
+        heap_unlock();
+        return NULL;
+    }
     size_t old_size = b->size;
     size_t new_size = align_up(size, 16);
     if (old_size >= new_size) {
-        heap_lock();
         heap_split(b, new_size);
         heap_unlock();
         return ptr;
     }
+    heap_unlock();
 
     void *p = malloc(size);
     if (!p) return NULL;

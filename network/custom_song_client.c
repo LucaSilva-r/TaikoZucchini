@@ -8,7 +8,9 @@
 
 #include <cell/fs/cell_fs_file_api.h>
 #include <cell/fs/cell_fs_errno.h>
+#include <sys/sys_time.h>
 #include <sys/timer.h>
+#include <mbedtls/sha1.h>
 
 #include "config.h"
 #include "config/runtime.h"
@@ -20,6 +22,10 @@
 
 #define CUSTOM_SONG_API_CATEGORIES_PATH "/api/connector/songs/categories"
 #define CUSTOM_SONG_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
+#define CUSTOM_SONG_STAGING_ROOT CUSTOM_SONG_ROOT "/.staging"
+#define CUSTOM_SONG_BACKUP_ROOT  CUSTOM_SONG_ROOT "/.rollback"
+#define CUSTOM_SONG_INDEX_PATH   CUSTOM_SONG_ROOT "/.installed_packages.v1"
+#define CUSTOM_SONG_INDEX_TMP    CUSTOM_SONG_ROOT "/.installed_packages.tmp"
 /* Per-request length. Streams straight to disk over ONE keep-alive TLS
  * connection (http_download_ranged), so request the whole asset in one go;
  * the server returns at most the file size (or its asset_chunk_bytes cap). */
@@ -30,12 +36,24 @@
 
 typedef struct {
     char path[CUSTOM_SONG_ASSET_PATH_MAX];
+    char sha1[41];
+    unsigned int size;
 } custom_song_asset_path_t;
 
 static int append_path(char *out, size_t cap, const char *a, const char *b);
-static int ensure_custom_song_dirs(const char *song_id, const char *asset_path);
+static int ensure_song_dirs_at(const char *base, const char *song_id,
+                               const char *asset_path);
 static int ensure_dir(const char *path);
 static int write_file(const char *path, const unsigned char *buf, size_t len);
+static int delete_tree_local(const char *path, int depth);
+static const unsigned char *find_object_start(const unsigned char *body,
+                                              const unsigned char *p);
+static const unsigned char *find_object_end(const unsigned char *p,
+                                            const unsigned char *end);
+static int lib_find_song_index(const char *song_id);
+static int verify_staged_asset(const char *song_id,
+                               const custom_song_asset_path_t *asset);
+static void recover_activation_transactions(void);
 
 static void copy_limited(char *out, size_t cap, const char *src,
                          size_t max_chars) {
@@ -59,6 +77,42 @@ static void copy_limited(char *out, size_t cap, const char *src,
  * mid-gameplay; the in-game picker sets this back to 0 for its own runs. */
 static int g_custom_song_quiet;
 static volatile int g_custom_song_attract_only;
+static volatile int g_custom_song_force_verify;
+static volatile int g_transfer_lock;
+static custom_song_transfer_t g_transfer;
+
+static void transfer_lock(void) {
+    while (__sync_lock_test_and_set(&g_transfer_lock, 1))
+        sys_timer_usleep(1000);
+}
+
+static void transfer_unlock(void) {
+    __sync_lock_release(&g_transfer_lock);
+}
+
+void custom_song_transfer_snapshot(custom_song_transfer_t *out) {
+    if (!out)
+        return;
+    transfer_lock();
+    *out = g_transfer;
+    transfer_unlock();
+}
+
+static void transfer_update(int active, const char *song_id,
+                            const char *asset_path, uint64_t done,
+                            uint64_t total, uint64_t bps) {
+    transfer_lock();
+    memset(&g_transfer, 0, sizeof g_transfer);
+    g_transfer.active = active;
+    g_transfer.done = done > 0xffffffffu ? 0xffffffffu : (unsigned)done;
+    g_transfer.total = total > 0xffffffffu ? 0xffffffffu : (unsigned)total;
+    g_transfer.bytes_per_second =
+        bps > 0xffffffffu ? 0xffffffffu : (unsigned)bps;
+    if (active)
+        snprintf(g_transfer.asset, sizeof g_transfer.asset, "%s/%s",
+                 song_id ? song_id : "", asset_path ? asset_path : "");
+    transfer_unlock();
+}
 
 void custom_song_client_set_quiet(int quiet) {
     g_custom_song_quiet = quiet;
@@ -66,6 +120,10 @@ void custom_song_client_set_quiet(int quiet) {
 
 void custom_song_client_set_attract_only(int attract_only) {
     g_custom_song_attract_only = attract_only != 0;
+}
+
+void custom_song_client_set_force_verify(int force_verify) {
+    g_custom_song_force_verify = force_verify != 0;
 }
 
 static int custom_song_work_window_open(void) {
@@ -107,7 +165,7 @@ static int token_valid_for_header(const char *token) {
     return 1;
 }
 
-static const char *api_token(void) {
+const char *custom_song_api_token(void) {
     return g_cfg.zucchini_api_token[0]
         ? g_cfg.zucchini_api_token
         : TAIKO_ZUCCHINI_API_TOKEN;
@@ -115,14 +173,14 @@ static const char *api_token(void) {
 
 int custom_song_service_ready(void) {
     return g_cfg.connector_host[0] &&
-           token_valid_for_header(api_token());
+           token_valid_for_header(custom_song_api_token());
 }
 
 static int api_headers(char *out, size_t cap) {
     int n = snprintf(out, cap,
                      "Authorization: Bearer %s\r\n"
                      "Accept: application/json\r\n",
-                     api_token());
+                     custom_song_api_token());
     return (n > 0 && (size_t)n < cap) ? n : -1;
 }
 
@@ -320,6 +378,7 @@ static custom_song_entry_t    *g_lib_songs;     /* malloc[g_lib_song_count] */
 static short               *g_lib_song_cat;  /* malloc[]: index into g_lib_cats */
 static unsigned char       *g_lib_cached;    /* malloc[]: local manifest exists */
 static unsigned char       *g_lib_stale;     /* malloc[]: cached but rev differs */
+static char                (*g_lib_installed_rev)[CUSTOM_SONG_REV_MAX];
 static int                  g_lib_song_count;
 static int                  g_lib_loaded;
 static int                  g_lib_cache_scanned;
@@ -364,6 +423,7 @@ static void lib_free(void) {
     free(g_lib_song_cat);  g_lib_song_cat = NULL;
     free(g_lib_cached);    g_lib_cached = NULL;
     free(g_lib_stale);     g_lib_stale = NULL;
+    free(g_lib_installed_rev); g_lib_installed_rev = NULL;
     g_lib_song_count = 0;
     g_lib_cat_count = 0;
     g_lib_loaded = 0;
@@ -373,12 +433,13 @@ static void lib_free(void) {
 }
 
 /* Force the next cached/stale query to rescan the custom_songs dirs.
- * Same two writes write_local_manifest does after a download; safe to
+ * Safe to
  * call from the mgmt poll thread (the scan itself runs lazily on the
  * game thread at the next accessor call). */
 void custom_song_library_mark_dirty(void) {
     g_lib_cache_scanned = 0;
     g_lib_stale_scanned = 0;
+    (void)cellFsUnlink(CUSTOM_SONG_INDEX_PATH);
 }
 
 static int streq_c(const char *a, const char *b) {
@@ -414,6 +475,84 @@ static int cached_dir_has_manifest(const char *song_id) {
     return found;
 }
 
+static int local_manifest_revision(const char *song_id, char *out, size_t cap) {
+    char root[192], path[256];
+    size_t len = 0;
+    unsigned char *body;
+    if (!out || cap == 0)
+        return 0;
+    out[0] = 0;
+    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
+        !append_path(path, sizeof path, root, "manifest.json"))
+        return 0;
+    body = read_file_alloc(path, &len);
+    if (!body)
+        return 0;
+    if (!json_get_string_after(body, body + len, "\"package_revision\"",
+                               out, cap))
+        json_get_string_after(body, body + len, "\"source_hash\"", out, cap);
+    free(body);
+    return strlen(out) == 40;
+}
+
+static int load_installed_index(void) {
+    size_t len = 0;
+    unsigned char *body = read_file_alloc(CUSTOM_SONG_INDEX_PATH, &len);
+    char *p, *end;
+    int loaded = 0;
+    if (!body || len < 6 || memcmp(body, "TZPI1\n", 6) != 0) {
+        free(body);
+        return 0;
+    }
+    p = (char *)body + 6;
+    end = (char *)body + len;
+    while (p < end && *p) {
+        char *nl = strchr(p, '\n');
+        char *space = strchr(p, ' ');
+        if (!nl)
+            nl = end;
+        if (space && space < nl && nl - space == 41) {
+            *space = 0;
+            int idx = lib_find_song_index(p);
+            if (idx >= 0 && cached_dir_has_manifest(p)) {
+                memcpy(g_lib_installed_rev[idx], space + 1, 40);
+                g_lib_installed_rev[idx][40] = 0;
+                g_lib_cached[idx] = 1;
+                loaded++;
+            }
+        }
+        p = nl < end ? nl + 1 : end;
+    }
+    free(body);
+    return loaded > 0;
+}
+
+static void persist_installed_index(void) {
+    size_t cap = 8u + (size_t)g_lib_song_count *
+                 (CUSTOM_SONG_ID_MAX + CUSTOM_SONG_REV_MAX + 2u);
+    char *body = (char *)malloc(cap);
+    size_t off = 6;
+    if (!body)
+        return;
+    memcpy(body, "TZPI1\n", 6);
+    for (int i = 0; i < g_lib_song_count; i++) {
+        int n;
+        if (!g_lib_cached[i] || !g_lib_installed_rev[i][0])
+            continue;
+        n = snprintf(body + off, cap - off, "%s %s\n",
+                     g_lib_songs[i].id, g_lib_installed_rev[i]);
+        if (n <= 0 || (size_t)n >= cap - off)
+            break;
+        off += (size_t)n;
+    }
+    if (write_file(CUSTOM_SONG_INDEX_TMP,
+                   (const unsigned char *)body, off)) {
+        (void)cellFsUnlink(CUSTOM_SONG_INDEX_PATH);
+        (void)cellFsRename(CUSTOM_SONG_INDEX_TMP, CUSTOM_SONG_INDEX_PATH);
+    }
+    free(body);
+}
+
 static int lib_find_song_index(const char *song_id) {
     if (!song_id || !g_lib_loaded)
         return -1;
@@ -425,33 +564,6 @@ static int lib_find_song_index(const char *song_id) {
     return -1;
 }
 
-/* 1 when the cached manifest's source_hash starts with the library rev.
- * Unknown (no rev, unreadable manifest) counts as a match so old indexes or
- * odd local state never trigger spurious mass re-downloads. */
-static int local_manifest_rev_matches(const char *song_id, const char *rev) {
-    char root[192], path[256], lhash[64];
-    size_t mlen = 0;
-    unsigned char *local;
-    size_t rlen;
-
-    if (!rev || !rev[0])
-        return 1;
-    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
-        !append_path(path, sizeof path, root, "manifest.json"))
-        return 1;
-    local = read_file_alloc(path, &mlen);
-    if (!local)
-        return 1;
-    lhash[0] = 0;
-    json_get_string_after(local, local + mlen, "\"source_hash\"",
-                          lhash, sizeof lhash);
-    free(local);
-    if (!lhash[0])
-        return 1;
-    rlen = strlen(rev);
-    return strncmp(lhash, rev, rlen) == 0;
-}
-
 static void lib_refresh_cached_flags(void) {
     int fd = -1;
     CellFsDirent de;
@@ -460,7 +572,13 @@ static void lib_refresh_cached_flags(void) {
     if (!g_lib_loaded || !g_lib_cached)
         return;
     memset(g_lib_cached, 0, (size_t)g_lib_song_count);
+    memset(g_lib_installed_rev, 0,
+           (size_t)g_lib_song_count * CUSTOM_SONG_REV_MAX);
     g_lib_cache_scanned = 1;
+
+    recover_activation_transactions();
+    if (load_installed_index())
+        return;
 
     if (cellFsOpendir(CUSTOM_SONG_ROOT, &fd) != CELL_FS_SUCCEEDED)
         return;
@@ -472,12 +590,15 @@ static void lib_refresh_cached_flags(void) {
         idx = lib_find_song_index(de.d_name);
         if (idx < 0)
             continue;
-        if (!cached_dir_has_manifest(de.d_name))
+        if (!cached_dir_has_manifest(de.d_name) ||
+            !local_manifest_revision(de.d_name, g_lib_installed_rev[idx],
+                                     CUSTOM_SONG_REV_MAX))
             continue;
         if (!g_lib_cached[idx])
             g_lib_cached[idx] = 1;
     }
     cellFsClosedir(fd);
+    persist_installed_index();
 }
 
 /* Separate from the cached-flags scan on purpose: this reads one manifest per
@@ -495,8 +616,8 @@ static void lib_refresh_stale_flags(void) {
     for (int i = 0; i < g_lib_song_count; i++) {
         if (!g_lib_cached[i] || !g_lib_songs[i].rev[0])
             continue;
-        if (!local_manifest_rev_matches(g_lib_songs[i].id,
-                                        g_lib_songs[i].rev)) {
+        if (strncmp(g_lib_installed_rev[i], g_lib_songs[i].rev,
+                    CUSTOM_SONG_REV_MAX) != 0) {
             g_lib_stale[i] = 1;
         }
     }
@@ -588,7 +709,10 @@ static int parse_library(const unsigned char *body, size_t len) {
         g_lib_song_cat = (short *)malloc(sizeof(short) * (size_t)nsong);
         g_lib_cached = (unsigned char *)malloc((size_t)nsong);
         g_lib_stale = (unsigned char *)malloc((size_t)nsong);
-        if (!g_lib_songs || !g_lib_song_cat || !g_lib_cached || !g_lib_stale) {
+        g_lib_installed_rev = malloc(
+            (size_t)nsong * sizeof(g_lib_installed_rev[0]));
+        if (!g_lib_songs || !g_lib_song_cat || !g_lib_cached || !g_lib_stale ||
+            !g_lib_installed_rev) {
             lib_free();
             return 0;
         }
@@ -629,7 +753,10 @@ static int parse_library(const unsigned char *body, size_t len) {
         for (int d = 0; d < CUSTOM_SONG_DIFF_SLOTS; d++) s->stars[d] = -1;
         if (json_get_string_after(idp, item_end, "\"diffs\"", diffs, sizeof diffs))
             parse_diffs_str(diffs, s->stars);
-        json_get_string_after(idp, item_end, "\"rev\"", s->rev, sizeof s->rev);
+        if (!json_get_string_after(idp, item_end, "\"package_revision\"",
+                                   s->rev, sizeof s->rev))
+            json_get_string_after(idp, item_end, "\"rev\"",
+                                  s->rev, sizeof s->rev);
         char source[8];
         source[0] = 0;
         if (json_get_string_after(idp, item_end, "\"source\"",
@@ -821,6 +948,25 @@ int custom_song_library_is_cached_at(int library_index) {
     if (!g_lib_cache_scanned)
         lib_refresh_cached_flags();
     return g_lib_cached ? g_lib_cached[library_index] != 0 : 0;
+}
+
+int custom_song_library_installed_revision_at(int library_index, char *out,
+                                              size_t out_cap) {
+    if (!out || out_cap == 0)
+        return 0;
+    out[0] = 0;
+    if (!g_lib_loaded || library_index < 0 ||
+        library_index >= g_lib_song_count)
+        return 0;
+    if (!g_lib_cache_scanned)
+        lib_refresh_cached_flags();
+    if (!g_lib_cached || !g_lib_installed_rev ||
+        !g_lib_cached[library_index] ||
+        !g_lib_installed_rev[library_index][0])
+        return 0;
+    copy_limited(out, out_cap, g_lib_installed_rev[library_index],
+                 CUSTOM_SONG_REV_MAX - 1);
+    return 1;
 }
 
 int custom_song_library_is_stale_at(int library_index) {
@@ -1069,7 +1215,8 @@ static int ensure_dir(const char *path) {
     return rc == CELL_FS_SUCCEEDED || rc == CELL_FS_EEXIST;
 }
 
-static int ensure_custom_song_dirs(const char *song_id, const char *asset_path) {
+static int ensure_song_dirs_at(const char *base, const char *song_id,
+                               const char *asset_path) {
     char dir[256];
 
     if (!ensure_dir("/dev_hdd0/plugins"))
@@ -1078,7 +1225,9 @@ static int ensure_custom_song_dirs(const char *song_id, const char *asset_path) 
         return 0;
     if (!ensure_dir(CUSTOM_SONG_ROOT))
         return 0;
-    if (!append_path(dir, sizeof dir, CUSTOM_SONG_ROOT, song_id) ||
+    if (strcmp(base, CUSTOM_SONG_ROOT) != 0 && !ensure_dir(base))
+        return 0;
+    if (!append_path(dir, sizeof dir, base, song_id) ||
         !ensure_dir(dir))
         return 0;
 
@@ -1092,45 +1241,47 @@ static int ensure_custom_song_dirs(const char *song_id, const char *asset_path) 
 
 static int write_file(const char *path, const unsigned char *buf, size_t len) {
     int fd = -1;
-    uint64_t wrote = 0;
     int rc = cellFsOpen(path, CELL_FS_O_CREAT | CELL_FS_O_WRONLY |
                               CELL_FS_O_TRUNC, &fd, NULL, 0);
     if (rc != CELL_FS_SUCCEEDED)
         return 0;
-    rc = cellFsWrite(fd, buf, len, &wrote);
+    size_t off = 0;
+    while (off < len) {
+        uint64_t wrote = 0;
+        rc = cellFsWrite(fd, buf + off, len - off, &wrote);
+        if (rc != CELL_FS_SUCCEEDED || wrote == 0)
+            break;
+        off += (size_t)wrote;
+    }
     cellFsClose(fd);
-    return rc == CELL_FS_SUCCEEDED && wrote == len;
+    return rc == CELL_FS_SUCCEEDED && off == len;
 }
 
+
+static int manifest_at_matches(const char *base, const char *song_id,
+                               const char *name,
+                               const unsigned char *manifest,
+                               size_t manifest_len) {
+    char root[192], path[256];
+    size_t got = 0;
+    unsigned char *buf;
+    if (!manifest || manifest_len == 0 || manifest_len > CUSTOM_SONG_MANIFEST_MAX)
+        return 0;
+    if (!append_path(root, sizeof root, base, song_id) ||
+        !append_path(path, sizeof path, root, name))
+        return 0;
+    buf = read_file_alloc(path, &got);
+    int ok = buf && got == manifest_len &&
+             memcmp(buf, manifest, manifest_len) == 0;
+    free(buf);
+    return ok;
+}
 
 static int read_local_manifest_matches(const char *song_id,
                                        const unsigned char *manifest,
                                        size_t manifest_len) {
-    char root[192], path[256];
-    int fd = -1;
-    uint64_t got = 0;
-    unsigned char *buf;
-    int ok = 0;
-
-    if (!manifest || manifest_len == 0 || manifest_len > CUSTOM_SONG_MANIFEST_MAX)
-        return 0;
-    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
-        !append_path(path, sizeof path, root, "manifest.json"))
-        return 0;
-    if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
-        return 0;
-
-    buf = (unsigned char *)malloc(manifest_len);
-    if (!buf) {
-        cellFsClose(fd);
-        return 0;
-    }
-
-    cellFsRead(fd, buf, manifest_len, &got);
-    cellFsClose(fd);
-    ok = got == manifest_len && memcmp(buf, manifest, manifest_len) == 0;
-    free(buf);
-    return ok;
+    return manifest_at_matches(CUSTOM_SONG_ROOT, song_id, "manifest.json",
+                               manifest, manifest_len);
 }
 
 static int collect_json_paths(const unsigned char *body, size_t len,
@@ -1144,13 +1295,27 @@ static int collect_json_paths(const unsigned char *body, size_t len,
             break;
         if (json_get_string_after(kp, end, key, out[count].path,
                                   sizeof out[count].path)) {
+            const unsigned char *obj = find_object_start(body, kp);
+            const unsigned char *obj_end = find_object_end(kp, end);
             int dup = 0;
             for (int i = 0; i < count; i++) {
                 if (strcmp(out[i].path, out[count].path) == 0)
                     dup = 1;
             }
-            if (!dup)
+            if (!dup) {
+                out[count].sha1[0] = 0;
+                out[count].size = 0;
+                if (obj && obj_end) {
+                    int size = 0;
+                    json_get_string_after(obj, obj_end, "\"sha1\"",
+                                          out[count].sha1,
+                                          sizeof out[count].sha1);
+                    if (json_get_int_after(obj, obj_end, "\"size\"", &size) &&
+                        size > 0)
+                        out[count].size = (unsigned int)size;
+                }
                 count++;
+            }
         }
         p = kp + strlen(key);
     }
@@ -1243,33 +1408,56 @@ static int parse_status(const http_response_t *resp, char *status,
 }
 
 /* Sink for http_download_ranged: append each streamed chunk to the open file. */
-typedef struct { int fd; int ok; } dl_sink_t;
+typedef struct {
+    int fd;
+    int ok;
+    const char *song_id;
+    const custom_song_asset_path_t *asset;
+    uint64_t initial_offset;
+    uint64_t transferred;
+    uint64_t started_us;
+} dl_sink_t;
 static int dl_file_sink(void *vctx, const void *data, size_t len) {
     dl_sink_t *c = (dl_sink_t *)vctx;
-    uint64_t wrote = 0;
+    const unsigned char *p = (const unsigned char *)data;
     if (!custom_song_work_window_open()) {
         c->ok = 0;
         return -1;
     }
-    if (cellFsWrite(c->fd, data, len, &wrote) != CELL_FS_SUCCEEDED ||
-        wrote != len) {
-        c->ok = 0;
-        return -1;
+    while (len > 0) {
+        uint64_t wrote = 0;
+        if (cellFsWrite(c->fd, p, len, &wrote) != CELL_FS_SUCCEEDED ||
+            wrote == 0) {
+            c->ok = 0;
+            return -1;
+        }
+        p += (size_t)wrote;
+        len -= (size_t)wrote;
+        c->transferred += wrote;
+        uint64_t elapsed = sys_time_get_system_time() - c->started_us;
+        uint64_t bps = elapsed > 0
+            ? c->transferred * 1000000u / elapsed : 0;
+        transfer_update(1, c->song_id, c->asset->path,
+                        c->initial_offset + c->transferred,
+                        c->asset->size, bps);
     }
     return 0;
 }
 
-static int download_asset_chunked(const char *song_id, const char *asset_path) {
+static int download_asset_chunked(const char *song_id,
+                                  const custom_song_asset_path_t *asset) {
     char root[192], dest[256], path_base[256], headers[256];
-    int fd = -1;
+    CellFsStat st;
 
-    if (!ensure_custom_song_dirs(song_id, asset_path))
+    if (!asset || !ensure_song_dirs_at(CUSTOM_SONG_STAGING_ROOT, song_id,
+                                       asset->path))
         return 0;
-    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
-        !append_path(dest, sizeof dest, root, asset_path))
+    if (!append_path(root, sizeof root, CUSTOM_SONG_STAGING_ROOT, song_id) ||
+        !append_path(dest, sizeof dest, root, asset->path))
         return 0;
     int n = snprintf(path_base, sizeof path_base,
-                     "/api/connector/conversions/%s/assets/%s", song_id, asset_path);
+                     "/api/connector/conversions/%s/assets/%s",
+                     song_id, asset->path);
     if (n <= 0 || (size_t)n >= sizeof path_base)
         return 0;
     if (!custom_song_service_ready())
@@ -1277,52 +1465,279 @@ static int download_asset_chunked(const char *song_id, const char *asset_path) {
     int hn = api_headers(headers, sizeof headers);
     if (hn < 0)
         return 0;
-    if (cellFsOpen(dest, CELL_FS_O_CREAT | CELL_FS_O_WRONLY | CELL_FS_O_TRUNC,
-                   &fd, NULL, 0) != CELL_FS_SUCCEEDED) {
-        dbg_print("[songs] dest open failed\n");
-        return 0;
-    }
-
-    dl_sink_t sc = { fd, 1 };
     int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
-    /* ONE keep-alive TLS connection streams every ranged chunk straight to disk
-     * (no per-chunk handshake, no whole-file buffering). */
-    int rc = http_download_ranged(g_cfg.connector_host, port, path_base,
-                                  headers, (size_t)hn, CUSTOM_SONG_DOWNLOAD_CHUNK,
-                                  dl_file_sink, &sc);
-    cellFsClose(fd);
-    if (rc != 0 || !sc.ok) {
-        dbg_print("[songs] asset download failed: ");
-        dbg_print(asset_path);
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int fd = -1;
+        uint64_t offset = 0, pos = 0;
+        if (cellFsStat(dest, &st) == CELL_FS_SUCCEEDED) {
+            offset = st.st_size;
+            if (asset->size && offset > asset->size) {
+                (void)cellFsUnlink(dest);
+                offset = 0;
+            } else if ((!asset->size || offset == asset->size) &&
+                       verify_staged_asset(song_id, asset)) {
+                return 1;
+            }
+        }
+        if (offset > 0xffffffffu)
+            return 0;
+        if (cellFsOpen(dest, CELL_FS_O_CREAT | CELL_FS_O_WRONLY,
+                       &fd, NULL, 0) != CELL_FS_SUCCEEDED ||
+            cellFsLseek(fd, (int64_t)offset, CELL_FS_SEEK_SET,
+                        &pos) != CELL_FS_SUCCEEDED ||
+            pos != offset) {
+            if (fd >= 0)
+                cellFsClose(fd);
+            dbg_print("[songs] resume open failed\n");
+            return 0;
+        }
+
+        dl_sink_t sc;
+        memset(&sc, 0, sizeof sc);
+        sc.fd = fd;
+        sc.ok = 1;
+        sc.song_id = song_id;
+        sc.asset = asset;
+        sc.initial_offset = offset;
+        sc.started_us = sys_time_get_system_time();
+        transfer_update(1, song_id, asset->path, offset, asset->size, 0);
+        int rc = http_download_ranged_from(
+            g_cfg.connector_host, port, path_base, headers, (size_t)hn,
+            CUSTOM_SONG_DOWNLOAD_CHUNK, (unsigned int)offset,
+            dl_file_sink, &sc);
+        cellFsClose(fd);
+        if (rc == 0 && sc.ok && verify_staged_asset(song_id, asset)) {
+            transfer_update(0, NULL, NULL, 0, 0, 0);
+            return 1;
+        }
+        transfer_update(0, NULL, NULL, 0, 0, 0);
+        dbg_print("[songs] asset transfer retry: ");
+        dbg_print(asset->path);
         dbg_print("\n");
+    }
+    transfer_update(0, NULL, NULL, 0, 0, 0);
+    return 0;
+}
+
+static int sha1_hex_equal(const unsigned char hash[20], const char *hex) {
+    static const char digits[] = "0123456789abcdef";
+    if (!hex || strlen(hex) != 40)
         return 0;
+    for (int i = 0; i < 20; i++) {
+        if (hex[i * 2] != digits[hash[i] >> 4] ||
+            hex[i * 2 + 1] != digits[hash[i] & 15])
+            return 0;
     }
     return 1;
 }
 
-static int write_local_manifest(const char *song_id,
-                                const unsigned char *body, size_t len) {
+static int verify_asset_at(const char *base, const char *song_id,
+                           const custom_song_asset_path_t *asset) {
     char root[192], path[256];
-    int ok;
+    CellFsStat st;
+    int fd = -1;
+    unsigned char buf[16384], digest[20];
+    mbedtls_sha1_context sha;
 
-    if (!ensure_custom_song_dirs(song_id, NULL))
+    if (!asset || !append_path(root, sizeof root, base, song_id) ||
+        !append_path(path, sizeof path, root, asset->path) ||
+        cellFsStat(path, &st) != CELL_FS_SUCCEEDED)
         return 0;
-    if (!append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
-        !append_path(path, sizeof path, root, "manifest.json"))
+    if (asset->size && st.st_size != asset->size)
         return 0;
-    ok = write_file(path, body, len);
-    if (ok) {
-        int idx = lib_find_song_index(song_id);
-        if (g_lib_cache_scanned && g_lib_cached && idx >= 0) {
-            g_lib_cached[idx] = 1;
-            if (g_lib_stale)
-                g_lib_stale[idx] = 0;
-        } else {
-            g_lib_cache_scanned = 0;
-            g_lib_stale_scanned = 0;
+    if (!asset->sha1[0])
+        return 1; /* schema-2 compatibility */
+    if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
+        return 0;
+    mbedtls_sha1_init(&sha);
+    if (mbedtls_sha1_starts(&sha) != 0) {
+        cellFsClose(fd);
+        mbedtls_sha1_free(&sha);
+        return 0;
+    }
+    for (;;) {
+        uint64_t got = 0;
+        if (cellFsRead(fd, buf, sizeof buf, &got) != CELL_FS_SUCCEEDED) {
+            cellFsClose(fd);
+            mbedtls_sha1_free(&sha);
+            return 0;
+        }
+        if (!got)
+            break;
+        if (mbedtls_sha1_update(&sha, buf, (size_t)got) != 0) {
+            cellFsClose(fd);
+            mbedtls_sha1_free(&sha);
+            return 0;
         }
     }
+    cellFsClose(fd);
+    if (mbedtls_sha1_finish(&sha, digest) != 0) {
+        mbedtls_sha1_free(&sha);
+        return 0;
+    }
+    mbedtls_sha1_free(&sha);
+    return sha1_hex_equal(digest, asset->sha1);
+}
+
+static int verify_staged_asset(const char *song_id,
+                               const custom_song_asset_path_t *asset) {
+    return verify_asset_at(CUSTOM_SONG_STAGING_ROOT, song_id, asset);
+}
+
+static int write_staged_manifest(const char *song_id,
+                                 const unsigned char *body, size_t len) {
+    char root[192], path[256], tmp[256], download[256];
+    if (!ensure_song_dirs_at(CUSTOM_SONG_STAGING_ROOT, song_id, NULL) ||
+        !append_path(root, sizeof root, CUSTOM_SONG_STAGING_ROOT, song_id) ||
+        !append_path(path, sizeof path, root, "manifest.json") ||
+        !append_path(tmp, sizeof tmp, root, "manifest.tmp") ||
+        !append_path(download, sizeof download, root, "download.json"))
+        return 0;
+    if (!write_file(tmp, body, len))
+        return 0;
+    (void)cellFsUnlink(download);
+    (void)cellFsUnlink(path);
+    return cellFsRename(tmp, path) == CELL_FS_SUCCEEDED;
+}
+
+static int write_active_manifest(const char *song_id,
+                                 const unsigned char *body, size_t len) {
+    char root[192], path[256], tmp[256];
+    if (!ensure_song_dirs_at(CUSTOM_SONG_ROOT, song_id, NULL) ||
+        !append_path(root, sizeof root, CUSTOM_SONG_ROOT, song_id) ||
+        !append_path(path, sizeof path, root, "manifest.json") ||
+        !append_path(tmp, sizeof tmp, root, "manifest.tmp"))
+        return 0;
+    if (!write_file(tmp, body, len))
+        return 0;
+    (void)cellFsUnlink(path);
+    if (cellFsRename(tmp, path) != CELL_FS_SUCCEEDED)
+        return 0;
+    custom_song_library_mark_dirty();
+    return 1;
+}
+
+static int prepare_staging_revision(const char *song_id,
+                                    const unsigned char *body, size_t len) {
+    char root[192], marker[256];
+    CellFsStat st;
+    if (!append_path(root, sizeof root, CUSTOM_SONG_STAGING_ROOT, song_id))
+        return 0;
+    if (manifest_at_matches(CUSTOM_SONG_STAGING_ROOT, song_id,
+                            "download.json", body, len))
+        return 1;
+    if (cellFsStat(root, &st) == CELL_FS_SUCCEEDED &&
+        !delete_tree_local(root, 3))
+        return 0;
+    if (!ensure_song_dirs_at(CUSTOM_SONG_STAGING_ROOT, song_id, NULL) ||
+        !append_path(marker, sizeof marker, root, "download.json"))
+        return 0;
+    return write_file(marker, body, len);
+}
+
+static int delete_tree_local(const char *path, int depth) {
+    int fd = -1;
+    CellFsDirent de;
+    uint64_t nread = 0;
+    int ok = 1;
+    if (cellFsOpendir(path, &fd) != CELL_FS_SUCCEEDED)
+        return cellFsRmdir(path) == CELL_FS_SUCCEEDED;
+    while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
+        char sub[320];
+        if (de.d_name[0] == '.' &&
+            (de.d_name[1] == 0 ||
+             (de.d_name[1] == '.' && de.d_name[2] == 0)))
+            continue;
+        if (snprintf(sub, sizeof sub, "%s/%s", path, de.d_name) >=
+            (int)sizeof sub) {
+            ok = 0;
+            continue;
+        }
+        if (de.d_type == CELL_FS_TYPE_DIRECTORY) {
+            if (depth <= 0 || !delete_tree_local(sub, depth - 1))
+                ok = 0;
+        } else if (cellFsUnlink(sub) != CELL_FS_SUCCEEDED) {
+            ok = 0;
+        }
+    }
+    cellFsClosedir(fd);
+    if (cellFsRmdir(path) != CELL_FS_SUCCEEDED)
+        ok = 0;
     return ok;
+}
+
+static void recover_activation_transactions(void) {
+    int fd = -1;
+    CellFsDirent de;
+    uint64_t nread = 0;
+    int changed = 0;
+    if (cellFsOpendir(CUSTOM_SONG_BACKUP_ROOT, &fd) != CELL_FS_SUCCEEDED)
+        return;
+    while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
+        char backup[256], current[256];
+        CellFsStat st;
+        if (de.d_type != CELL_FS_TYPE_DIRECTORY ||
+            (de.d_name[0] == '.' &&
+             (de.d_name[1] == 0 ||
+              (de.d_name[1] == '.' && de.d_name[2] == 0))))
+            continue;
+        if (!append_path(backup, sizeof backup,
+                         CUSTOM_SONG_BACKUP_ROOT, de.d_name) ||
+            !append_path(current, sizeof current,
+                         CUSTOM_SONG_ROOT, de.d_name))
+            continue;
+        if (cellFsStat(current, &st) == CELL_FS_SUCCEEDED) {
+            (void)delete_tree_local(backup, 3);
+            changed = 1;
+        } else if (cellFsRename(backup, current) == CELL_FS_SUCCEEDED) {
+            changed = 1;
+        }
+    }
+    cellFsClosedir(fd);
+    if (changed)
+        (void)cellFsUnlink(CUSTOM_SONG_INDEX_PATH);
+}
+
+int custom_song_has_staged(const char *song_id) {
+    char root[192], path[256];
+    CellFsStat st;
+    return song_id && song_id[0] &&
+           append_path(root, sizeof root, CUSTOM_SONG_STAGING_ROOT, song_id) &&
+           append_path(path, sizeof path, root, "manifest.json") &&
+           cellFsStat(path, &st) == CELL_FS_SUCCEEDED &&
+           st.st_size > 0;
+}
+
+int custom_song_activate_staged(const char *song_id, const char *title) {
+    char staged[256], current[256], backup[256];
+    CellFsStat st;
+    int moved_old = 0;
+    if (!custom_song_has_staged(song_id))
+        return 0;
+    if (!ensure_dir(CUSTOM_SONG_BACKUP_ROOT) ||
+        !append_path(staged, sizeof staged, CUSTOM_SONG_STAGING_ROOT, song_id) ||
+        !append_path(current, sizeof current, CUSTOM_SONG_ROOT, song_id) ||
+        !append_path(backup, sizeof backup, CUSTOM_SONG_BACKUP_ROOT, song_id))
+        return -1;
+
+    if (cellFsStat(backup, &st) == CELL_FS_SUCCEEDED)
+        (void)delete_tree_local(backup, 3);
+    if (cellFsStat(current, &st) == CELL_FS_SUCCEEDED) {
+        if (cellFsRename(current, backup) != CELL_FS_SUCCEEDED)
+            return -2;
+        moved_old = 1;
+    }
+    if (cellFsRename(staged, current) != CELL_FS_SUCCEEDED) {
+        if (moved_old)
+            (void)cellFsRename(backup, current);
+        return -3;
+    }
+    if (moved_old)
+        (void)delete_tree_local(backup, 3);
+    custom_song_library_mark_dirty();
+    if (taiko_title_prerender_after_download(song_id, title) < 0)
+        dbg_print("[songs] activated; title render remains pending\n");
+    return 1;
 }
 
 int custom_song_is_cached(const char *song_id) {
@@ -1426,7 +1841,8 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
      * source changed — so cached launches skip /prepare + status polling and are
      * near-instant, while edited songs still re-download. Offline (hash request
      * fails) keeps the local cache. */
-    if (courses && course_cap > 0 && out_course_count) {
+    if (!g_custom_song_force_verify &&
+        courses && course_cap > 0 && out_course_count) {
         char froot[192], fpath[256];
         size_t mlen = 0;
         unsigned char *local = NULL;
@@ -1530,6 +1946,17 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
     }
 
     if (read_local_manifest_matches(song_id, ready_body, ready_len)) {
+        int verified = 1;
+        if (g_custom_song_force_verify) {
+            for (int i = 0; i < asset_count; i++) {
+                if (!verify_asset_at(CUSTOM_SONG_ROOT, song_id, &assets[i])) {
+                    verified = 0;
+                    break;
+                }
+            }
+        }
+        if (!verified)
+            goto download_assets;
         if (courses && course_cap > 0 && out_course_count) {
             *out_course_count = parse_courses(ready_body, ready_len,
                                               courses, course_cap);
@@ -1539,10 +1966,56 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
         return 1;
     }
 
+    /* A recipe/schema bump does not necessarily change generated bytes.
+     * Validate the existing package against the new manifest and adopt the
+     * metadata in place, avoiding a cabinet-wide re-download on rollout. */
+    if (asset_count > 0) {
+        int current_valid = 1;
+        for (int i = 0; i < asset_count; i++) {
+            if (!verify_asset_at(CUSTOM_SONG_ROOT, song_id, &assets[i])) {
+                current_valid = 0;
+                break;
+            }
+        }
+        if (current_valid &&
+            write_active_manifest(song_id, ready_body, ready_len)) {
+            if (courses && course_cap > 0 && out_course_count)
+                *out_course_count = parse_courses(ready_body, ready_len,
+                                                  courses, course_cap);
+            free(ready_body);
+            return 1;
+        }
+
+        /* A complete package may already be staged and merely waiting for the
+         * next attract/service activation window. */
+        if (manifest_at_matches(CUSTOM_SONG_STAGING_ROOT, song_id,
+                                "manifest.json", ready_body, ready_len)) {
+            int staged_valid = 1;
+            for (int i = 0; i < asset_count; i++) {
+                if (!verify_staged_asset(song_id, &assets[i])) {
+                    staged_valid = 0;
+                    break;
+                }
+            }
+            if (staged_valid) {
+                if (courses && course_cap > 0 && out_course_count)
+                    *out_course_count = parse_courses(
+                        ready_body, ready_len, courses, course_cap);
+                free(ready_body);
+                return 1;
+            }
+        }
+    }
+
+download_assets:
     if (asset_count <= 0) {
         if (ready_body)
             free(ready_body);
         return -7;
+    }
+    if (!prepare_staging_revision(song_id, ready_body, ready_len)) {
+        free(ready_body);
+        return -11;
     }
 
     for (int i = 0; i < asset_count; i++) {
@@ -1552,10 +2025,25 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
                      title ? title : song_id, 64);
         snprintf(msg, sizeof msg, "Downloading %s", short_title);
         loading_screen(msg, i, asset_count);
-        if (!download_asset_chunked(song_id, assets[i].path)) {
+        if (!download_asset_chunked(song_id, &assets[i])) {
             if (ready_body)
                 free(ready_body);
             return -8;
+        }
+        if (!verify_staged_asset(song_id, &assets[i])) {
+            dbg_print("[songs] staged asset verification failed: ");
+            dbg_print(assets[i].path);
+            dbg_print("\n");
+            {
+                char sroot[192], spath[256];
+                if (append_path(sroot, sizeof sroot,
+                                CUSTOM_SONG_STAGING_ROOT, song_id) &&
+                    append_path(spath, sizeof spath, sroot, assets[i].path))
+                    (void)cellFsUnlink(spath);
+            }
+            if (ready_body)
+                free(ready_body);
+            return -12;
         }
     }
 
@@ -1570,13 +2058,8 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
                                           courses, course_cap);
     }
 
-    int ok = write_local_manifest(song_id, ready_body, ready_len);
+    int ok = write_staged_manifest(song_id, ready_body, ready_len);
     if (ready_body)
         free(ready_body);
-    if (ok) {
-        loading_screen("Rendering title textures...", -1, -1);
-        if (taiko_title_prerender_after_download(song_id, title) < 0)
-            return -11;
-    }
     return ok ? 1 : -9;
 }

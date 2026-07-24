@@ -3,7 +3,7 @@
 
 #define CUSTOM_SONG_ID_MAX    32
 #define CUSTOM_SONG_SHORT_ID_MAX 16
-#define CUSTOM_SONG_REV_MAX   16
+#define CUSTOM_SONG_REV_MAX   41
 #define CUSTOM_SONG_TITLE_MAX 96
 #define CUSTOM_SONG_CATEGORY_ID_MAX    64
 #define CUSTOM_SONG_CATEGORY_TITLE_MAX 64
@@ -58,14 +58,30 @@ typedef struct {
     int stars;
 } custom_song_course_entry_t;
 
+typedef struct {
+    int active;
+    unsigned done;
+    unsigned total;
+    unsigned bytes_per_second;
+    char asset[128];
+} custom_song_transfer_t;
+
 #include "http_client.h"
 
 int custom_song_service_ready(void);
+/* Effective Connector bearer token (runtime override or baked fallback).
+ * Read-only process-lifetime storage; used by the cabinet WebSocket handshake. */
+const char *custom_song_api_token(void);
 /* Suppress overlay cards/prompts during background (mgmt poll) work. */
 void custom_song_client_set_quiet(int quiet);
 /* Restrict conversion/download/cache writes to attract. Used by the managed
  * background worker; manual picker calls leave this disabled. */
 void custom_song_client_set_attract_only(int attract_only);
+/* Force the next managed pass to bypass revision-only cache shortcuts and
+ * hash every manifest-listed local asset. */
+void custom_song_client_set_force_verify(int force_verify);
+/* Current HTTP asset-transfer telemetry for the Connector WebSocket. */
+void custom_song_transfer_snapshot(custom_song_transfer_t *out);
 /* Force the next cached/stale query to rescan custom_songs on disk. */
 void custom_song_library_mark_dirty(void);
 /* Connector request with token/host plumbing and a text/plain body.
@@ -84,6 +100,11 @@ int custom_song_search_page(const char *query, int offset, int limit,
 int custom_song_prepare_and_cache(const char *song_id, const char *title,
                                custom_song_course_entry_t *courses, int course_cap,
                                int *out_course_count);
+/* Atomically promote a fully downloaded staging directory into the stable
+ * runtime path. Returns 1 when promoted, 0 when no staged package exists, and
+ * a negative value on activation failure. Call only in the service window. */
+int custom_song_activate_staged(const char *song_id, const char *title);
+int custom_song_has_staged(const char *song_id);
 /* Ask a batch-capable server to start converting these library entries. Asset
  * downloads remain sequential. Returns 1 when accepted, otherwise 0; callers
  * can safely fall back to prepare_and_cache one song at a time. */
@@ -96,6 +117,8 @@ int custom_song_library_get2(int index, custom_song_entry_t *out,
                           int *out_cat_idx);
 int custom_song_library_find_index(const char *song_id);
 int custom_song_library_is_cached_at(int library_index);
+int custom_song_library_installed_revision_at(int library_index, char *out,
+                                              size_t out_cap);
 int custom_song_library_cached_count(void);
 /* 1 if the song is cached locally but the server's rev no longer matches the
  * cached manifest's source_hash (source files or converter changed). */

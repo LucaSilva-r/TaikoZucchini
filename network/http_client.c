@@ -36,6 +36,8 @@
 #include "mbedtls/platform.h"
 #include "mbedtls/error.h"
 #include "mbedtls/net_sockets.h"  /* error codes only; impl excluded */
+#include "mbedtls/base64.h"
+#include "mbedtls/sha1.h"
 
 #include "config.h"
 #include "config/runtime.h"
@@ -1066,8 +1068,8 @@ static int read_resp_streamed(mbedtls_ssl_context *ssl, int *out_status,
 
 static int http_download_inner(const char *host, int port, const char *path_base,
                                const char *extra_headers, size_t extra_len,
-                               unsigned int chunk, http_body_sink_fn sink,
-                               void *ctx) {
+                               unsigned int chunk, unsigned int initial_offset,
+                               http_body_sink_fn sink, void *ctx) {
     int fd = -1, rc = -1;
     mbedtls_ssl_context      *ssl     = (mbedtls_ssl_context *)calloc(1, sizeof *ssl);
     mbedtls_ssl_config       *conf    = (mbedtls_ssl_config *)calloc(1, sizeof *conf);
@@ -1120,7 +1122,7 @@ static int http_download_inner(const char *host, int port, const char *path_base
             goto done;
         }
     }
-    uint32_t offset = 0, total = 0;
+    uint32_t offset = initial_offset, total = 0;
     for (;;) {
         char head[1024];
         int n = snprintf(head, sizeof head,
@@ -1171,6 +1173,7 @@ typedef struct {
     int               port;
     size_t            extra_len;
     unsigned int      chunk;
+    unsigned int      initial_offset;
     http_body_sink_fn sink;
     void             *ctx;
     int               rc;
@@ -1180,14 +1183,18 @@ typedef struct {
 static void dl_worker_entry(uint64_t arg) {
     dl_args_t *a = (dl_args_t *)(uintptr_t)arg;
     a->rc = http_download_inner(a->host, a->port, a->path_base, a->extra,
-                                a->extra_len, a->chunk, a->sink, a->ctx);
+                                a->extra_len, a->chunk, a->initial_offset,
+                                a->sink, a->ctx);
     sys_semaphore_post(a->done_sem, 1);
     sys_ppu_thread_exit(0);
 }
 
-int http_download_ranged(const char *host, int port, const char *path_base,
-                         const char *extra_headers, size_t extra_headers_len,
-                         unsigned int chunk, http_body_sink_fn sink, void *ctx) {
+int http_download_ranged_from(const char *host, int port,
+                              const char *path_base,
+                              const char *extra_headers,
+                              size_t extra_headers_len,
+                              unsigned int chunk, unsigned int initial_offset,
+                              http_body_sink_fn sink, void *ctx) {
     /* Direct to the given host (like http_request_direct / api_request) — no
      * online_redirect: that's for game-server traffic, not tjarepo. */
     if (!host || !path_base || !sink) return -1;
@@ -1195,7 +1202,8 @@ int http_download_ranged(const char *host, int port, const char *path_base,
     dl_args_t a;
     a.host = host; a.port = port; a.path_base = path_base;
     a.extra = extra_headers; a.extra_len = extra_headers_len;
-    a.chunk = chunk; a.sink = sink; a.ctx = ctx; a.rc = -1;
+    a.chunk = chunk; a.initial_offset = initial_offset;
+    a.sink = sink; a.ctx = ctx; a.rc = -1;
 
     sys_semaphore_attribute_t sem_attr;
     sys_semaphore_attribute_initialize(sem_attr);
@@ -1216,6 +1224,13 @@ int http_download_ranged(const char *host, int port, const char *path_base,
     sys_ppu_thread_join(tid, &st);
     sys_semaphore_destroy(a.done_sem);
     return a.rc;
+}
+
+int http_download_ranged(const char *host, int port, const char *path_base,
+                         const char *extra_headers, size_t extra_headers_len,
+                         unsigned int chunk, http_body_sink_fn sink, void *ctx) {
+    return http_download_ranged_from(host, port, path_base, extra_headers,
+                                     extra_headers_len, chunk, 0, sink, ctx);
 }
 
 int http_get(const char *url, http_response_t *out) {
@@ -1297,4 +1312,313 @@ void http_get_test(void) {
     net_log("\n");
 
     http_response_free(&r);
+}
+
+/* ------------------------------------------------------------------ */
+/* Persistent WebSocket client                                        */
+/* ------------------------------------------------------------------ */
+
+#define WS_HEADER_MAX 4096
+#define WS_OUTGOING_MAX 2048
+#define WS_INCOMING_MAX (384 * 1024)
+#define WS_IO_TIMEOUT_MS 30000
+
+static int ws_read_exact(mbedtls_ssl_context *ssl, unsigned char *out,
+                         size_t len) {
+    while (len > 0) {
+        int rc = mbedtls_ssl_read(ssl, out, len);
+        if (rc == MBEDTLS_ERR_SSL_WANT_READ ||
+            rc == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            tls_retry_sleep();
+            continue;
+        }
+        if (rc <= 0)
+            return -1;
+        out += rc;
+        len -= (size_t)rc;
+    }
+    return 0;
+}
+
+static int ws_write_frame(mbedtls_ssl_context *ssl,
+                          mbedtls_ctr_drbg_context *drbg,
+                          unsigned char opcode,
+                          const unsigned char *payload, size_t len) {
+    unsigned char header[14], mask[4], masked[WS_OUTGOING_MAX];
+    size_t hn = 0;
+    if (len > sizeof masked)
+        return -1;
+    header[hn++] = (unsigned char)(0x80u | (opcode & 0x0fu));
+    if (len < 126) {
+        header[hn++] = (unsigned char)(0x80u | len);
+    } else {
+        header[hn++] = 0x80u | 126u;
+        header[hn++] = (unsigned char)(len >> 8);
+        header[hn++] = (unsigned char)len;
+    }
+    if (mbedtls_ctr_drbg_random(drbg, mask, sizeof mask) != 0)
+        return -1;
+    memcpy(header + hn, mask, sizeof mask);
+    hn += sizeof mask;
+    for (size_t i = 0; i < len; i++)
+        masked[i] = payload[i] ^ mask[i & 3u];
+    if (ssl_write_all(ssl, header, hn) != 0)
+        return -1;
+    return len ? ssl_write_all(ssl, masked, len) : 0;
+}
+
+static int ws_header_accept_matches(const char *headers,
+                                    const char *expected) {
+    const char *p = headers;
+    while (*p) {
+        const char *end = strstr(p, "\r\n");
+        if (!end)
+            return 0;
+        const char *colon = memchr(p, ':', (size_t)(end - p));
+        if (colon && icase_eq(p, (size_t)(colon - p),
+                              "Sec-WebSocket-Accept")) {
+            const char *value = colon + 1;
+            while (value < end && (*value == ' ' || *value == '\t'))
+                value++;
+            size_t len = (size_t)(end - value);
+            while (len && (value[len - 1] == ' ' || value[len - 1] == '\t'))
+                len--;
+            return strlen(expected) == len &&
+                   memcmp(value, expected, len) == 0;
+        }
+        p = end + 2;
+        if (*p == '\r' && p[1] == '\n')
+            break;
+    }
+    return 0;
+}
+
+int http_websocket_run(const char *host, int port, const char *path,
+                       const char *extra_headers, size_t extra_headers_len,
+                       http_ws_message_fn message,
+                       http_ws_outgoing_fn outgoing, void *ctx) {
+    static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    int fd = -1, rc = -1;
+    mbedtls_ssl_context *ssl = calloc(1, sizeof *ssl);
+    mbedtls_ssl_config *conf = calloc(1, sizeof *conf);
+    mbedtls_entropy_context *entropy = calloc(1, sizeof *entropy);
+    mbedtls_ctr_drbg_context *drbg = calloc(1, sizeof *drbg);
+    int ssl_i = 0, conf_i = 0, ent_i = 0, drbg_i = 0;
+    unsigned char nonce[16], digest[20];
+    unsigned char key[32], accept[40];
+    size_t key_len = 0, accept_len = 0;
+    char challenge[sizeof key + sizeof guid + 4];
+    char request[1536], headers[WS_HEADER_MAX];
+    size_t hlen = 0;
+
+    if (!host || !host[0] || !path || !path[0] || !message ||
+        !ssl || !conf || !entropy || !drbg)
+        goto done;
+
+    mbedtls_platform_set_calloc_free(calloc, free);
+    mbedtls_platform_set_time(plat_time);
+    mbedtls_ssl_init(ssl); ssl_i = 1;
+    mbedtls_ssl_config_init(conf); conf_i = 1;
+    mbedtls_entropy_init(entropy); ent_i = 1;
+    mbedtls_ctr_drbg_init(drbg); drbg_i = 1;
+    if (mbedtls_ctr_drbg_seed(drbg, mbedtls_entropy_func, entropy,
+                              (const unsigned char *)"taiko-ws", 8) != 0 ||
+        mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_CLIENT,
+                                    MBEDTLS_SSL_TRANSPORT_STREAM,
+                                    MBEDTLS_SSL_PRESET_DEFAULT) != 0)
+        goto done;
+    mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_rng(conf, mbedtls_ctr_drbg_random, drbg);
+    if (mbedtls_ssl_setup(ssl, conf) != 0 ||
+        mbedtls_ssl_set_hostname(ssl, host) != 0 ||
+        mbedtls_ctr_drbg_random(drbg, nonce, sizeof nonce) != 0 ||
+        mbedtls_base64_encode(key, sizeof key, &key_len,
+                              nonce, sizeof nonce) != 0)
+        goto done;
+    key[key_len] = 0;
+    int cn = snprintf(challenge, sizeof challenge, "%s%s", key, guid);
+    if (cn <= 0 || (size_t)cn >= sizeof challenge ||
+        mbedtls_sha1((const unsigned char *)challenge,
+                     (size_t)cn, digest) != 0 ||
+        mbedtls_base64_encode(accept, sizeof accept, &accept_len,
+                              digest, sizeof digest) != 0)
+        goto done;
+    accept[accept_len] = 0;
+
+    struct in_addr ip;
+    if (resolve_host(host, &ip) != 0)
+        goto done;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        goto done;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    sa.sin_addr = ip;
+    if (connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof sa,
+                             HTTP_CONNECT_TIMEOUT_MS) < 0)
+        goto done;
+    (void)set_io_timeouts(fd, WS_IO_TIMEOUT_MS);
+    mbedtls_ssl_set_bio(ssl, (void *)(intptr_t)fd, bio_send, bio_recv, NULL);
+    {
+        int64_t deadline = now_ms() + HTTP_HANDSHAKE_TIMEOUT_MS;
+        for (;;) {
+            int hr = mbedtls_ssl_handshake(ssl);
+            if (hr == 0)
+                break;
+            if (hr == MBEDTLS_ERR_SSL_WANT_READ ||
+                hr == MBEDTLS_ERR_SSL_WANT_WRITE) {
+                if (now_ms() > deadline)
+                    goto done;
+                tls_retry_sleep();
+                continue;
+            }
+            goto done;
+        }
+    }
+
+    int n = snprintf(request, sizeof request,
+                     "GET %s HTTP/1.1\r\n"
+                     "Host: %s%s%d\r\n"
+                     "Upgrade: websocket\r\n"
+                     "Connection: Upgrade\r\n"
+                     "Sec-WebSocket-Key: %s\r\n"
+                     "Sec-WebSocket-Version: 13\r\n"
+                     "User-Agent: taiko-zucchini/0.1\r\n",
+                     path, host, port == 443 ? "" : ":", port == 443 ? 0 : port,
+                     key);
+    /* Remove the placeholder port digits on the default-port form. */
+    if (port == 443) {
+        n = snprintf(request, sizeof request,
+                     "GET %s HTTP/1.1\r\n"
+                     "Host: %s\r\n"
+                     "Upgrade: websocket\r\n"
+                     "Connection: Upgrade\r\n"
+                     "Sec-WebSocket-Key: %s\r\n"
+                     "Sec-WebSocket-Version: 13\r\n"
+                     "User-Agent: taiko-zucchini/0.1\r\n",
+                     path, host, key);
+    }
+    if (n <= 0 || (size_t)n >= sizeof request)
+        goto done;
+    if (extra_headers && extra_headers_len) {
+        if ((size_t)n + extra_headers_len + 4 >= sizeof request)
+            goto done;
+        memcpy(request + n, extra_headers, extra_headers_len);
+        n += (int)extra_headers_len;
+        if (n < 2 || request[n - 2] != '\r' || request[n - 1] != '\n') {
+            request[n++] = '\r';
+            request[n++] = '\n';
+        }
+    }
+    request[n++] = '\r';
+    request[n++] = '\n';
+    if (ssl_write_all(ssl, (const unsigned char *)request, (size_t)n) != 0)
+        goto done;
+
+    /* Read one byte at a time so the first WebSocket frame cannot be consumed
+     * and discarded with the HTTP upgrade headers. */
+    while (hlen + 1 < sizeof headers) {
+        if (ws_read_exact(ssl, (unsigned char *)&headers[hlen], 1) != 0)
+            goto done;
+        hlen++;
+        if (hlen >= 4 && memcmp(headers + hlen - 4, "\r\n\r\n", 4) == 0)
+            break;
+    }
+    headers[hlen] = 0;
+    if (hlen < 12 || memcmp(headers, "HTTP/1.1 101", 12) != 0 ||
+        !ws_header_accept_matches(headers, (const char *)accept))
+        goto done;
+
+    dbg_print("[control] websocket connected\n");
+    int64_t next_outgoing = 0;
+    for (;;) {
+        unsigned char fh[2];
+        uint64_t len;
+        int64_t now = now_ms();
+        if (outgoing && now >= next_outgoing) {
+            char outbound[WS_OUTGOING_MAX];
+            size_t olen = outgoing(ctx, outbound, sizeof outbound);
+            if (olen > sizeof outbound ||
+                (olen && ws_write_frame(
+                    ssl, drbg, 0x1, (const unsigned char *)outbound, olen) != 0))
+                break;
+            next_outgoing = now + 250;
+        }
+
+        if (mbedtls_ssl_get_bytes_avail(ssl) == 0) {
+            fd_set rfds;
+            struct timeval tv;
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            tv.tv_sec = 0;
+            tv.tv_usec = 250 * 1000;
+            int sr = socketselect(fd + 1, &rfds, NULL, NULL, &tv);
+            if (sr < 0)
+                break;
+            if (sr == 0)
+                continue;
+        }
+        if (ws_read_exact(ssl, fh, sizeof fh) != 0)
+            break;
+        unsigned opcode = fh[0] & 0x0fu;
+        int fin = (fh[0] & 0x80u) != 0;
+        if ((fh[1] & 0x80u) != 0)
+            break; /* servers must not mask */
+        len = fh[1] & 0x7fu;
+        if (len == 126) {
+            unsigned char ext[2];
+            if (ws_read_exact(ssl, ext, sizeof ext) != 0)
+                break;
+            len = ((uint64_t)ext[0] << 8) | ext[1];
+        } else if (len == 127) {
+            unsigned char ext[8];
+            if (ws_read_exact(ssl, ext, sizeof ext) != 0)
+                break;
+            len = 0;
+            for (int i = 0; i < 8; i++)
+                len = (len << 8) | ext[i];
+        }
+        if (len > WS_INCOMING_MAX || !fin)
+            break;
+        unsigned char *payload = malloc((size_t)len + 1u);
+        if (!payload)
+            break;
+        if (len && ws_read_exact(ssl, payload, (size_t)len) != 0) {
+            free(payload);
+            break;
+        }
+        payload[len] = 0;
+        if (opcode == 0x1) {
+            message(ctx, (const char *)payload, (size_t)len);
+        } else if (opcode == 0x8) {
+            (void)ws_write_frame(ssl, drbg, 0x8, payload, (size_t)len);
+            free(payload);
+            rc = 0;
+            break;
+        } else if (opcode == 0x9) {
+            if (len > 125 ||
+                ws_write_frame(ssl, drbg, 0xA, payload, (size_t)len) != 0) {
+                free(payload);
+                break;
+            }
+        } else if (opcode != 0xA) {
+            free(payload);
+            break;
+        }
+        free(payload);
+    }
+
+done:
+    if (ssl_i)
+        mbedtls_ssl_close_notify(ssl);
+    if (fd >= 0)
+        socketclose(fd);
+    if (ssl_i) mbedtls_ssl_free(ssl);
+    if (conf_i) mbedtls_ssl_config_free(conf);
+    if (drbg_i) mbedtls_ctr_drbg_free(drbg);
+    if (ent_i) mbedtls_entropy_free(entropy);
+    free(ssl); free(conf); free(drbg); free(entropy);
+    return rc;
 }

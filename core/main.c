@@ -45,6 +45,7 @@
 #include "ftp_server.h"
 #include "version_check.h"
 #include "pairing.h"
+#include "remote_control.h"
 
 SYS_MODULE_INFO(taiko_dongle, 0, 1, 1);
 SYS_MODULE_START(taiko_start);
@@ -929,6 +930,9 @@ int taiko_start(unsigned int args, void *argp) {
          * keyboard itself — see the self_poll flag on menu_ingame_start. */
         kb_input_init();
     }
+    /* The Connector management/status WebSocket is useful even when USIO
+     * emulation is disabled; virtual inputs simply become harmless no-ops. */
+    taiko_remote_control_start();
     /* In-game main menu (keyboard F4 / pad L3+R3 / optional drum pattern).
      * The config gate is checked inside menu_ingame_start. The pad path is
      * independent of USIO; when USIO is off the watcher self-polls keyboard. */

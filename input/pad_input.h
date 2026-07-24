@@ -45,6 +45,15 @@ void pad_input_consume(pad_snapshot_t *out);
  * menu, same as a real test press). Safe from any thread. */
 void pad_input_inject_test_edge(void);
 
+/* Merge the latest Connector virtual-controller bitmask into the same USIO
+ * snapshot as physical pad and keyboard input. Bits 0..9 use PAD_ACT_* for P1
+ * and operator controls; bits 10..13 are P2's SL/CL/CR/SR hit edges. Repeated
+ * state refreshes do not create repeated edges. State expires inside
+ * pad_input_consume after 750 ms, and clear is called immediately on
+ * WebSocket disconnect. */
+void pad_input_remote_state(uint32_t action_mask);
+void pad_input_remote_clear(void);
+
 /* Snapshot + clear the mod-menu drum-nav edges. Independent latch from the
  * game-side hit edges (pad_input_consume): the menu can read drum hits
  * without stealing them from the USIO frame, and vice-versa. out[i] uses the

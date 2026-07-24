@@ -67,6 +67,27 @@ typedef int (*http_body_sink_fn)(void *ctx, const void *data, size_t len);
 int http_download_ranged(const char *host, int port, const char *path_base,
                          const char *extra_headers, size_t extra_headers_len,
                          unsigned int chunk, http_body_sink_fn sink, void *ctx);
+int http_download_ranged_from(const char *host, int port,
+                              const char *path_base,
+                              const char *extra_headers,
+                              size_t extra_headers_len,
+                              unsigned int chunk, unsigned int initial_offset,
+                              http_body_sink_fn sink, void *ctx);
+
+/* Persistent WSS client used by the Connector control channel. TLS
+ * verification intentionally follows the current HTTP compatibility policy
+ * (VERIFY_NONE); strict/CA/pin modes are deferred in
+ * docs/connector-tls-followup.md. Server text messages are delivered to
+ * `message`. Ping/pong and client masking are handled internally. The call
+ * blocks until disconnect or protocol failure and then returns. */
+typedef void (*http_ws_message_fn)(void *ctx, const char *message, size_t len);
+/* Called roughly every 250 ms while connected. Write at most `cap` bytes and
+ * return the text-frame length, or zero when nothing changed. */
+typedef size_t (*http_ws_outgoing_fn)(void *ctx, char *out, size_t cap);
+int http_websocket_run(const char *host, int port, const char *path,
+                       const char *extra_headers, size_t extra_headers_len,
+                       http_ws_message_fn message,
+                       http_ws_outgoing_fn outgoing, void *ctx);
 
 /* Case-insensitive header lookup. Returns pointer into `r->headers` to
  * the value (no surrounding whitespace), and writes value length into

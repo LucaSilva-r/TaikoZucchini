@@ -233,6 +233,11 @@ static int download_song(const custom_song_entry_t *song) {
     rc = custom_song_prepare_and_cache(song->id,
                                     song_overlay_title(song),
                                     scratch, CUSTOM_SONG_COURSE_LIST_MAX, &course_count);
+    if (rc > 0 && course_count > 0 && custom_song_has_staged(song->id)) {
+        if (custom_song_activate_staged(song->id,
+                                        song_overlay_title(song)) <= 0)
+            return 0;
+    }
     return rc > 0 && course_count > 0 ? 1 : 0;
 }
 

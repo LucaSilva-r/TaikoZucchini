@@ -1,13 +1,14 @@
 #ifndef TAIKO_NETWORK_MGMT_POLL_H
 #define TAIKO_NETWORK_MGMT_POLL_H
 
-/* Zucchini Connector management poll (pull model).
+#include <stddef.h>
+
+/* Zucchini Connector management channel.
  *
  * The cabinet is a pure HTTPS client: every MGMT_POLL_SECONDS it POSTs a
- * plain-text heartbeat (identity, cached-song list, raw taiko_config.cfg)
- * to /api/connector/cabinet/poll and applies whatever the operator queued
- * in the connector web UI: config key changes and the desired custom-song
- * selection. No listening socket on the PS3. */
+ * plain-text heartbeat remains as a boot/reconciliation fallback. The
+ * persistent cabinet WebSocket pushes command snapshots immediately and sends
+ * compact operation telemetry back without exposing a listening socket. */
 
 /* Arm before starting the version-check worker, then fire one immediate boot
  * poll. The chassisinfo synth waits only while this request (and an optional
@@ -21,6 +22,14 @@ void taiko_mgmt_boot_poll(void);
 /* Endless poll loop; never returns. Tail-call from the version_check
  * thread after the update check. */
 void taiko_mgmt_poll_run(void);
+
+/* Called by the cabinet WebSocket thread for an authoritative command
+ * snapshot using the legacy poll-response grammar. */
+void taiko_mgmt_apply_command(const char *body, size_t len);
+
+/* Build one compact `T\n...` WebSocket status message. Returns its byte count,
+ * zero when it cannot be built. */
+size_t taiko_mgmt_build_status(char *out, size_t cap);
 
 typedef struct taiko_mgmt_operation {
     int active;

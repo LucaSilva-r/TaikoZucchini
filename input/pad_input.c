@@ -9,6 +9,7 @@
 #include <cell/sysmodule.h>
 #include <sys/ppu_thread.h>
 #include <sys/synchronization.h>
+#include <sys/sys_time.h>
 #include <sys/timer.h>
 
 #include "debug.h"
@@ -29,6 +30,9 @@
 #define KB_POLL_DIVISOR      1      /* Poll keyboard every pad tick
                                        (250 Hz). Matches pad cadence so
                                        fast key taps aren't dropped. */
+#define REMOTE_DEADMAN_US 750000u
+#define REMOTE_P2_HIT_SHIFT 10u
+#define REMOTE_VALID_MASK (((1u << PAD_ACT_COUNT) - 1u) | (0xFu << REMOTE_P2_HIT_SHIFT))
 
 /* Encoded as: low 16 bits = DIGITAL1 mask, high 16 bits = DIGITAL2 mask. */
 typedef uint32_t bind_mask_t;
@@ -99,6 +103,13 @@ static uint8_t     g_hit_edges[PAD_INPUT_PORTS][4];
 static uint8_t     g_menu_hit_edges[PAD_INPUT_PORTS][4];
 static uint16_t    g_coin_edges;
 static uint16_t    g_test_edges;
+static uint32_t    g_remote_level;
+static uint32_t    g_remote_previous;
+static uint8_t     g_remote_hit_edges[2][4];
+static uint8_t     g_remote_menu_hit_edges[2][4];
+static uint16_t    g_remote_coin_edges;
+static uint16_t    g_remote_test_edges;
+static uint64_t    g_remote_updated_us;
 
 /* Coin (L3) and Service (R3) share the menu-entry combo, so they fire on
  * RELEASE not press: a press only arms; the release emits the credit.
@@ -340,6 +351,55 @@ void pad_input_inject_test_edge(void) {
     sys_lwmutex_unlock(&g_pad_lock);
 }
 
+static void remote_clear_locked(void) {
+    g_remote_level = 0;
+    g_remote_previous = 0;
+    memset(g_remote_hit_edges, 0, sizeof g_remote_hit_edges);
+    memset(g_remote_menu_hit_edges, 0, sizeof g_remote_menu_hit_edges);
+    g_remote_coin_edges = 0;
+    g_remote_test_edges = 0;
+    g_remote_updated_us = 0;
+}
+
+void pad_input_remote_state(uint32_t action_mask) {
+    if (!g_initialized)
+        return;
+    action_mask &= REMOTE_VALID_MASK;
+    sys_lwmutex_lock(&g_pad_lock, 0);
+    uint32_t rising = action_mask & ~g_remote_previous;
+    for (int player = 0; player < 2; player++) {
+        unsigned shift = player ? REMOTE_P2_HIT_SHIFT : 0u;
+        for (int i = 0; i < 4; i++) {
+            if (rising & (1u << (shift + (unsigned)i))) {
+                g_remote_hit_edges[player][i] = 1;
+                g_remote_menu_hit_edges[player][i] = 1;
+            }
+        }
+    }
+    if ((rising & PAD_ACT_BIT(PAD_ACT_BTN_COIN)) &&
+        g_remote_coin_edges < 0xFFFFu)
+        g_remote_coin_edges++;
+    if ((rising & PAD_ACT_BIT(PAD_ACT_BTN_TEST)) &&
+        g_remote_test_edges < 0xFFFFu)
+        g_remote_test_edges++;
+    g_remote_level = action_mask &
+        (PAD_ACT_BIT(PAD_ACT_BTN_ENTER) |
+         PAD_ACT_BIT(PAD_ACT_BTN_SERVICE) |
+         PAD_ACT_BIT(PAD_ACT_BTN_UP) |
+         PAD_ACT_BIT(PAD_ACT_BTN_DOWN));
+    g_remote_previous = action_mask;
+    g_remote_updated_us = sys_time_get_system_time();
+    sys_lwmutex_unlock(&g_pad_lock);
+}
+
+void pad_input_remote_clear(void) {
+    if (!g_initialized)
+        return;
+    sys_lwmutex_lock(&g_pad_lock, 0);
+    remote_clear_locked();
+    sys_lwmutex_unlock(&g_pad_lock);
+}
+
 void pad_input_consume_menu_drum(uint8_t out[4]) {
     out[0] = out[1] = out[2] = out[3] = 0;
     if (g_initialized) {
@@ -348,6 +408,11 @@ void pad_input_consume_menu_drum(uint8_t out[4]) {
             for (int i = 0; i < 4; i++) {
                 out[i] |= g_menu_hit_edges[p][i];
                 g_menu_hit_edges[p][i] = 0;
+            }
+        for (int p = 0; p < 2; p++)
+            for (int i = 0; i < 4; i++) {
+                out[i] |= g_remote_menu_hit_edges[p][i];
+                g_remote_menu_hit_edges[p][i] = 0;
             }
         sys_lwmutex_unlock(&g_pad_lock);
     }
@@ -362,6 +427,10 @@ void pad_input_consume(pad_snapshot_t *out) {
         return;
     }
     sys_lwmutex_lock(&g_pad_lock, 0);
+    if (g_remote_updated_us &&
+        sys_time_get_system_time() - g_remote_updated_us >
+            REMOTE_DEADMAN_US)
+        remote_clear_locked();
     /* Held state (live) OR captured tap (sticky). Only sticky is cleared
      * so held buttons stay reported across rapid back-to-back consumes. */
     out->level[0] = g_live_level[0] | g_sticky_press[0];
@@ -378,6 +447,18 @@ void pad_input_consume(pad_snapshot_t *out) {
     out->test_edges = g_test_edges;
     g_coin_edges = 0;
     g_test_edges = 0;
+    out->level[0] |= g_remote_level;
+    for (int p = 0; p < 2; p++)
+        for (int i = 0; i < 4; i++) {
+            out->hit[p][i] |= g_remote_hit_edges[p][i];
+            g_remote_hit_edges[p][i] = 0;
+        }
+    uint32_t coin_total = (uint32_t)out->coin_edges + g_remote_coin_edges;
+    uint32_t test_total = (uint32_t)out->test_edges + g_remote_test_edges;
+    out->coin_edges = (uint16_t)(coin_total > 0xFFFFu ? 0xFFFFu : coin_total);
+    out->test_edges = (uint16_t)(test_total > 0xFFFFu ? 0xFFFFu : test_total);
+    g_remote_coin_edges = 0;
+    g_remote_test_edges = 0;
     sys_lwmutex_unlock(&g_pad_lock);
 
     /* Fold keyboard accumulators into the same snapshot so USIO sees a
@@ -415,6 +496,7 @@ void pad_input_init(void) {
     }
 
     g_initialized = 1;
+    remote_clear_locked();
     g_run = 1;
     rc = sys_ppu_thread_create(&g_thread, worker_main, 0,
                                1000, 16 * 1024, 0, "pad_input");
