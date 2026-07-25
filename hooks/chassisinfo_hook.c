@@ -45,13 +45,14 @@ static int path_is_chassisinfo(const char *p) {
     return n >= tn && memcmp(p + (n - tn), tail, tn) == 0;
 }
 
-/* Preserve current-boot connector config without an arbitrary delay: wait
- * only for the already-started request to return success or failure. */
+/* Preserve current-boot connector config: wait for the control socket's first
+ * command snapshot. The gate releases itself at its own deadline, so this
+ * cannot block the boot on an unreachable connector. */
 static void wait_for_boot_poll(void) {
-    if (!taiko_mgmt_boot_poll_pending())
+    if (!taiko_mgmt_boot_gate_pending())
         return;
-    dbg_print("[chassis] waiting for connector request\n");
-    while (taiko_mgmt_boot_poll_pending())
+    dbg_print("[chassis] waiting for connector command\n");
+    while (taiko_mgmt_boot_gate_pending())
         sys_timer_usleep(10 * 1000);
 }
 

@@ -1319,9 +1319,11 @@ void http_get_test(void) {
 /* ------------------------------------------------------------------ */
 
 #define WS_HEADER_MAX 4096
-#define WS_OUTGOING_MAX 2048
 #define WS_INCOMING_MAX (384 * 1024)
 #define WS_IO_TIMEOUT_MS 30000
+/* Comfortably past the connector's 20 s server-side ping interval, so a slow
+ * frame or a missed ping cannot drop a healthy connection. */
+#define WS_IDLE_TIMEOUT_MS 60000
 
 static int ws_read_exact(mbedtls_ssl_context *ssl, unsigned char *out,
                          size_t len) {
@@ -1344,27 +1346,43 @@ static int ws_write_frame(mbedtls_ssl_context *ssl,
                           mbedtls_ctr_drbg_context *drbg,
                           unsigned char opcode,
                           const unsigned char *payload, size_t len) {
-    unsigned char header[14], mask[4], masked[WS_OUTGOING_MAX];
+    /* One TLS record per chunk, so keep this large: at 512 B a ~100 KiB
+     * heartbeat cost ~200 records/syscalls on the thread that also has to
+     * service remote input and answer the server's ping. */
+    unsigned char header[14], mask[4], chunk[4096];
     size_t hn = 0;
-    if (len > sizeof masked)
-        return -1;
     header[hn++] = (unsigned char)(0x80u | (opcode & 0x0fu));
     if (len < 126) {
         header[hn++] = (unsigned char)(0x80u | len);
-    } else {
+    } else if (len <= 0xffffu) {
         header[hn++] = 0x80u | 126u;
         header[hn++] = (unsigned char)(len >> 8);
         header[hn++] = (unsigned char)len;
+    } else {
+        header[hn++] = 0x80u | 127u;
+        for (int i = 7; i >= 0; i--)
+            header[hn++] = (unsigned char)(((uint64_t)len >> (i * 8)) & 0xffu);
     }
     if (mbedtls_ctr_drbg_random(drbg, mask, sizeof mask) != 0)
         return -1;
     memcpy(header + hn, mask, sizeof mask);
     hn += sizeof mask;
-    for (size_t i = 0; i < len; i++)
-        masked[i] = payload[i] ^ mask[i & 3u];
     if (ssl_write_all(ssl, header, hn) != 0)
         return -1;
-    return len ? ssl_write_all(ssl, masked, len) : 0;
+    /* Mask through a small stack window instead of a full masked copy: the
+     * cabinet heartbeat is ~100 KiB and must not be duplicated on the stack
+     * or on the fragmentation-sensitive PRX heap. */
+    for (size_t off = 0; off < len; ) {
+        size_t n = len - off;
+        if (n > sizeof chunk)
+            n = sizeof chunk;
+        for (size_t i = 0; i < n; i++)
+            chunk[i] = payload[off + i] ^ mask[(off + i) & 3u];
+        if (ssl_write_all(ssl, chunk, n) != 0)
+            return -1;
+        off += n;
+    }
+    return 0;
 }
 
 static int ws_header_accept_matches(const char *headers,
@@ -1399,10 +1417,10 @@ int http_websocket_run(const char *host, int port, const char *path,
                        http_ws_outgoing_fn outgoing, void *ctx) {
     static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
     int fd = -1, rc = -1;
-    mbedtls_ssl_context *ssl = calloc(1, sizeof *ssl);
-    mbedtls_ssl_config *conf = calloc(1, sizeof *conf);
-    mbedtls_entropy_context *entropy = calloc(1, sizeof *entropy);
-    mbedtls_ctr_drbg_context *drbg = calloc(1, sizeof *drbg);
+    mbedtls_ssl_context *ssl = NULL;
+    mbedtls_ssl_config *conf = NULL;
+    mbedtls_entropy_context *entropy = NULL;
+    mbedtls_ctr_drbg_context *drbg = NULL;
     int ssl_i = 0, conf_i = 0, ent_i = 0, drbg_i = 0;
     unsigned char nonce[16], digest[20];
     unsigned char key[32], accept[40];
@@ -1411,8 +1429,33 @@ int http_websocket_run(const char *host, int port, const char *path,
     char request[1536], headers[WS_HEADER_MAX];
     size_t hlen = 0;
 
-    if (!host || !host[0] || !path || !path[0] || !message ||
-        !ssl || !conf || !entropy || !drbg)
+    if (!host || !host[0] || !path || !path[0] || !message)
+        goto done;
+
+    /* Reach the connector before touching mbedTLS. Each ssl_setup() allocates
+     * two 16 KiB record buffers; doing that ahead of connect() would churn
+     * ~33 KiB of PRX heap on every retry against an unreachable connector. */
+    struct in_addr ip;
+    if (resolve_host(host, &ip) != 0)
+        goto done;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        goto done;
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)port);
+    sa.sin_addr = ip;
+    if (connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof sa,
+                             HTTP_CONNECT_TIMEOUT_MS) < 0)
+        goto done;
+    (void)set_io_timeouts(fd, WS_IO_TIMEOUT_MS);
+
+    ssl = calloc(1, sizeof *ssl);
+    conf = calloc(1, sizeof *conf);
+    entropy = calloc(1, sizeof *entropy);
+    drbg = calloc(1, sizeof *drbg);
+    if (!ssl || !conf || !entropy || !drbg)
         goto done;
 
     mbedtls_platform_set_calloc_free(calloc, free);
@@ -1445,21 +1488,6 @@ int http_websocket_run(const char *host, int port, const char *path,
         goto done;
     accept[accept_len] = 0;
 
-    struct in_addr ip;
-    if (resolve_host(host, &ip) != 0)
-        goto done;
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-        goto done;
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((uint16_t)port);
-    sa.sin_addr = ip;
-    if (connect_with_timeout(fd, (struct sockaddr *)&sa, sizeof sa,
-                             HTTP_CONNECT_TIMEOUT_MS) < 0)
-        goto done;
-    (void)set_io_timeouts(fd, WS_IO_TIMEOUT_MS);
     mbedtls_ssl_set_bio(ssl, (void *)(intptr_t)fd, bio_send, bio_recv, NULL);
     {
         int64_t deadline = now_ms() + HTTP_HANDSHAKE_TIMEOUT_MS;
@@ -1478,28 +1506,20 @@ int http_websocket_run(const char *host, int port, const char *path,
         }
     }
 
+    char port_suffix[8];
+    if (port == 443)
+        port_suffix[0] = 0;
+    else
+        snprintf(port_suffix, sizeof port_suffix, ":%d", port);
     int n = snprintf(request, sizeof request,
                      "GET %s HTTP/1.1\r\n"
-                     "Host: %s%s%d\r\n"
+                     "Host: %s%s\r\n"
                      "Upgrade: websocket\r\n"
                      "Connection: Upgrade\r\n"
                      "Sec-WebSocket-Key: %s\r\n"
                      "Sec-WebSocket-Version: 13\r\n"
                      "User-Agent: taiko-zucchini/0.1\r\n",
-                     path, host, port == 443 ? "" : ":", port == 443 ? 0 : port,
-                     key);
-    /* Remove the placeholder port digits on the default-port form. */
-    if (port == 443) {
-        n = snprintf(request, sizeof request,
-                     "GET %s HTTP/1.1\r\n"
-                     "Host: %s\r\n"
-                     "Upgrade: websocket\r\n"
-                     "Connection: Upgrade\r\n"
-                     "Sec-WebSocket-Key: %s\r\n"
-                     "Sec-WebSocket-Version: 13\r\n"
-                     "User-Agent: taiko-zucchini/0.1\r\n",
-                     path, host, key);
-    }
+                     path, host, port_suffix, key);
     if (n <= 0 || (size_t)n >= sizeof request)
         goto done;
     if (extra_headers && extra_headers_len) {
@@ -1533,16 +1553,26 @@ int http_websocket_run(const char *host, int port, const char *path,
 
     dbg_print("[control] websocket connected\n");
     int64_t next_outgoing = 0;
+    int64_t last_rx_ms = now_ms();
     for (;;) {
         unsigned char fh[2];
         uint64_t len;
         int64_t now = now_ms();
+        /* A path that dies without a FIN (cable pulled, router down) leaves
+         * this socket open and permanently silent, and the write side only
+         * notices once it has filled the kernel send buffer — minutes. Inbound
+         * is never legitimately quiet: the connector's WebSocket layer pings
+         * every 20 s, so measuring the gap bounds detection instead. */
+        if (now - last_rx_ms > WS_IDLE_TIMEOUT_MS) {
+            dbg_print("[control] websocket idle; assuming dead link\n");
+            break;
+        }
         if (outgoing && now >= next_outgoing) {
-            char outbound[WS_OUTGOING_MAX];
-            size_t olen = outgoing(ctx, outbound, sizeof outbound);
-            if (olen > sizeof outbound ||
-                (olen && ws_write_frame(
-                    ssl, drbg, 0x1, (const unsigned char *)outbound, olen) != 0))
+            size_t olen = 0;
+            const char *outbound = outgoing(ctx, &olen);
+            if (outbound && olen &&
+                ws_write_frame(ssl, drbg, 0x1,
+                               (const unsigned char *)outbound, olen) != 0)
                 break;
             next_outgoing = now + 250;
         }
@@ -1562,6 +1592,7 @@ int http_websocket_run(const char *host, int port, const char *path,
         }
         if (ws_read_exact(ssl, fh, sizeof fh) != 0)
             break;
+        last_rx_ms = now_ms();
         unsigned opcode = fh[0] & 0x0fu;
         int fin = (fh[0] & 0x80u) != 0;
         if ((fh[1] & 0x80u) != 0)

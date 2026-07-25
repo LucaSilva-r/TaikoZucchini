@@ -84,6 +84,12 @@ void custom_song_client_set_force_verify(int force_verify);
 void custom_song_transfer_snapshot(custom_song_transfer_t *out);
 /* Force the next cached/stale query to rescan custom_songs on disk. */
 void custom_song_library_mark_dirty(void);
+
+/* Force the cached-flag/installed-revision rescan now, on the calling thread.
+ * The scan opens a manifest per installed song and takes minutes on a large
+ * library, so a thread that must stay responsive (the control socket) must
+ * never be the one to trigger it lazily. */
+void custom_song_library_refresh_cache(void);
 /* Connector request with token/host plumbing and a text/plain body.
  * Caller owns resp (http_response_free). */
 int custom_song_api_request_text(const char *method, const char *path,

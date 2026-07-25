@@ -81,9 +81,12 @@ int http_download_ranged_from(const char *host, int port,
  * `message`. Ping/pong and client masking are handled internally. The call
  * blocks until disconnect or protocol failure and then returns. */
 typedef void (*http_ws_message_fn)(void *ctx, const char *message, size_t len);
-/* Called roughly every 250 ms while connected. Write at most `cap` bytes and
- * return the text-frame length, or zero when nothing changed. */
-typedef size_t (*http_ws_outgoing_fn)(void *ctx, char *out, size_t cap);
+/* Called roughly every 250 ms while connected. Return a pointer to a
+ * caller-owned buffer holding the next text frame and write its length to
+ * `*out_len`, or NULL when nothing changed. The buffer must stay valid until
+ * the next call; it is streamed out without being copied, so multi-hundred-KiB
+ * frames (the cabinet heartbeat) cost no extra allocation. */
+typedef const char *(*http_ws_outgoing_fn)(void *ctx, size_t *out_len);
 int http_websocket_run(const char *host, int port, const char *path,
                        const char *extra_headers, size_t extra_headers_len,
                        http_ws_message_fn message,

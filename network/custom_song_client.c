@@ -601,6 +601,11 @@ static void lib_refresh_cached_flags(void) {
     persist_installed_index();
 }
 
+void custom_song_library_refresh_cache(void) {
+    if (g_lib_loaded)
+        lib_refresh_cached_flags();
+}
+
 /* Separate from the cached-flags scan on purpose: this reads one manifest per
  * cached song, which takes seconds on a big library. The song-select injection
  * path only needs cached flags and must stay fast; only the downloader menu

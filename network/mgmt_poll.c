@@ -1,6 +1,9 @@
 /* Connector management heartbeat + managed-song worker.
  *
- * Heartbeats stay on the version-check thread and never wait for song work.
+ * Frames are built here and carried by the control socket (remote_control.c);
+ * this file owns no transport and no thread of its own. Frame building never
+ * waits for song work.
+ *
  * A selection seq is copied into an immutable worker snapshot; the worker
  * downloads and verifies into staging in any game state, then enters service
  * from attract to atomically activate one selection. Song-select filters
@@ -17,6 +20,7 @@
 #include <cell/fs/cell_fs_file_api.h>
 #include <sys/memory.h>
 #include <sys/ppu_thread.h>
+#include <sys/sys_time.h>
 #include <sys/timer.h>
 
 #include "config/runtime.h"
@@ -31,9 +35,10 @@
 #include "custom_song_client.h"
 #include "http_client.h"
 
-#define MGMT_POLL_SECONDS       30
 #define MGMT_RETRY_SECONDS      30
-#define MGMT_POLL_PATH          "/api/connector/cabinet/poll"
+/* How long chassisinfo synthesis may wait for the control socket to
+ * deliver the connector's first command snapshot. */
+#define MGMT_BOOT_GATE_SECONDS  8
 #define MGMT_CUSTOM_ROOT        "/dev_hdd0/plugins/taiko/custom_songs"
 #define MGMT_TRASH_ROOT         MGMT_CUSTOM_ROOT "/.trash"
 #define MGMT_ACTIVE_PATH        MGMT_CUSTOM_ROOT "/.managed_selection"
@@ -50,8 +55,6 @@
 
 volatile int g_custom_song_ui_busy;
 
-static volatile int g_boot_poll_pending;
-static int g_started_run;
 static int g_active_loaded;
 static volatile int g_synced_seq;
 static volatile int g_desired_ack;
@@ -81,8 +84,9 @@ static int *g_missing_job_index;
 static unsigned char *g_job_broken;
 static volatile int g_job_running;
 static int g_blocked_seq;
-static unsigned g_reconcile_poll_count;
+static volatile int g_reconcile_pending;
 static unsigned g_pkg_report_cursor;
+static volatile int g_heartbeat_dirty;
 
 static char (*g_active_sel)[CUSTOM_SONG_ID_MAX];
 static volatile int g_active_count;
@@ -380,9 +384,15 @@ static int build_heartbeat(void) {
     taiko_mgmt_operation_t op;
     taiko_mgmt_operation_snapshot(&op);
 
+    /* `H` marks a full heartbeat: identity, inventory and config. The compact
+     * `T` status frame shares this grammar on the same socket. */
+    off = hb_append(off, "H\n");
+    if (off < 0)
+        return -1;
+
     snprintf(line, sizeof line,
              "id=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\n"
-             "sync_proto=2\nseq=%d\ndesired_ack=%d\nactive_seq=%d\n"
+             "seq=%d\ndesired_ack=%d\nactive_seq=%d\n"
              "verify_ack=%d\n"
              "op_seq=%d\nop_phase=%s\nop_done=%u\nop_total=%u\n"
              "op_failed=%u\nop_song=%s\nop_error=%s\n",
@@ -402,12 +412,7 @@ static int build_heartbeat(void) {
     if (off < 0)
         return -1;
 
-    /* The worker mutates library cache metadata. Preserve the connector's last
-     * complete inventory during that window instead of racing or reporting []. */
-    if (g_job_running) {
-        off = hb_append(off, "have_complete=0\n");
-    } else {
-        off = hb_append(off, "have_complete=1\n");
+    {
         int count = custom_song_library_count();
         for (int i = 0; i < count; i++) {
             custom_song_entry_t entry;
@@ -585,13 +590,65 @@ void taiko_mgmt_apply_command(const char *body, size_t len) {
     spin_lock(&g_command_lock);
     int managed = 0, cfg_applied = 0;
     int server_seq = parse_response(body, len, &managed, &cfg_applied);
-    if (cfg_applied)
+    if (cfg_applied) {
         taiko_cfg_save();
+        /* The reported config body is part of the heartbeat. */
+        taiko_mgmt_heartbeat_request();
+    }
     if (managed) {
         int reconcile = g_poll_verify > g_verify_ack;
+        if (__sync_bool_compare_and_swap(&g_reconcile_pending, 1, 0))
+            reconcile = 1;
         maybe_start_selection(server_seq, reconcile);
     }
     spin_unlock(&g_command_lock);
+}
+
+/* A selection that ended with failures is terminal for its sequence, so a
+ * cabinet whose sync was interrupted (connector restarted mid-download) would
+ * otherwise sit on its blocked songs until an operator pressed Force resync.
+ * A reconnect is new information — the usual cause of those failures is the
+ * connector having been unreachable — so retry once per connection, and only
+ * when something was actually left blocked. */
+void taiko_mgmt_retry_blocked(void) {
+    if (!g_blocked_seq)
+        return;
+    g_blocked_seq = 0;
+    __sync_synchronize();
+    g_reconcile_pending = 1;
+}
+
+void taiko_mgmt_heartbeat_request(void) {
+    __sync_synchronize();
+    g_heartbeat_dirty = 1;
+}
+
+const char *taiko_mgmt_build_heartbeat(size_t *out_len) {
+    int len;
+    if (out_len)
+        *out_len = 0;
+    if (!g_heartbeat_dirty)
+        return NULL;
+    /* An `H` frame always carries a complete inventory. The selection worker
+     * mutates library cache metadata, so while it runs there is no complete
+     * inventory to report: stay quiet and let status frames carry progress
+     * rather than racing the worker or publishing a half-built list. The
+     * request stays pending and is served once the worker finishes. */
+    if (g_job_running)
+        return NULL;
+    spin_lock(&g_command_lock);
+    len = build_heartbeat();
+    spin_unlock(&g_command_lock);
+    /* Drop the request on overflow rather than leaving it pending: retrying a
+     * body that cannot fit would rebuild it on every loop iteration forever. */
+    g_heartbeat_dirty = 0;
+    if (len <= 0) {
+        dbg_print("[mgmt] heartbeat overflow\n");
+        return NULL;
+    }
+    if (out_len)
+        *out_len = (size_t)len;
+    return g_heartbeat;
 }
 
 size_t taiko_mgmt_build_status(char *out, size_t cap) {
@@ -607,8 +664,8 @@ size_t taiko_mgmt_build_status(char *out, size_t cap) {
     int n = snprintf(
         out, cap,
         "T\nid=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\n"
-        "sync_proto=3\nseq=%d\ndesired_ack=%d\nactive_seq=%d\n"
-        "verify_ack=%d\nhave_complete=0\n"
+        "seq=%d\ndesired_ack=%d\nactive_seq=%d\n"
+        "verify_ack=%d\n"
         "op_seq=%d\nop_phase=%s\nop_done=%u\nop_total=%u\n"
         "op_failed=%u\nop_song=%s\nop_error=%s\n"
         "xfer_active=%d\nxfer_done=%u\nxfer_total=%u\nxfer_bps=%u\n"
@@ -1146,6 +1203,16 @@ retry:
     custom_song_client_set_quiet(0);
     taiko_overlay_activity_set(TAIKO_OVL_ACTIVITY_SONG_SYNC, 0);
     g_job_running = 0;
+    /* This job invalidated the cached-flag index, and rebuilding it opens a
+     * manifest per installed song — minutes on a large library. Pay for it
+     * here, on the worker thread that is already allowed to be slow, so the
+     * heartbeat the control socket builds next is a cheap in-memory pass.
+     * Doing it lazily on the socket thread stalls remote input, misses the
+     * server's ping deadline, and drops the connection. */
+    custom_song_library_refresh_cache();
+    /* The library changed underneath the connector; publish the new inventory
+     * once, now, instead of on a timer. */
+    taiko_mgmt_heartbeat_request();
     sys_ppu_thread_exit(0);
 }
 
@@ -1155,7 +1222,7 @@ static void maybe_start_selection(int server_seq, int reconcile) {
                       "management workspace allocation failed");
         return;
     }
-    if ((!reconcile && server_seq == g_synced_seq) || g_job_running)
+    if (!reconcile && server_seq == g_synced_seq)
         return;
     /* Do not periodically restart a sequence that already reached a terminal
      * complete-with-errors state. A newer selection or an explicit verify
@@ -1163,9 +1230,15 @@ static void maybe_start_selection(int server_seq, int reconcile) {
     if (reconcile && server_seq == g_blocked_seq &&
         g_poll_verify <= g_verify_ack)
         return;
+    /* Claim the worker slot before touching g_job_*: the boot poll and the
+     * control socket both reach this from different threads, and a plain
+     * check-then-set let both spawn a worker and activate twice. */
+    if (!__sync_bool_compare_and_swap(&g_job_running, 0, 1))
+        return;
     spin_lock(&g_poll_lock);
     if (g_poll_sel_overflow) {
         spin_unlock(&g_poll_lock);
+        g_job_running = 0;
         operation_set(0, server_seq, "failed", 0,
                       (unsigned)g_poll_sel_count, 1, "",
                       "selection exceeds cabinet limit");
@@ -1187,7 +1260,6 @@ static void maybe_start_selection(int server_seq, int reconcile) {
     g_desired_ack = g_job_seq;
     operation_set(1, g_job_seq, "queued", 0,
                   (unsigned)g_job_sel_count, 0, "", "");
-    g_job_running = 1;
 
     sys_ppu_thread_t tid;
     int rc = sys_ppu_thread_create(&tid, selection_worker, 0,
@@ -1201,100 +1273,42 @@ static void maybe_start_selection(int server_seq, int reconcile) {
     }
 }
 
-/* ---------------------------- poll core ----------------------------- */
+/* --------------------------- boot gate ------------------------------ */
 
-static int poll_once(int *out_managed, int *out_server_seq) {
-    if (out_managed) *out_managed = 0;
-    if (out_server_seq) *out_server_seq = 0;
-    spin_lock(&g_command_lock);
-    int hb_len = build_heartbeat();
-    spin_unlock(&g_command_lock);
-    if (hb_len < 0) {
-        dbg_print("[mgmt] heartbeat overflow\n");
-        return -1;
-    }
+/* chassisinfo synthesis blocks on this so operator flags queued overnight
+ * apply as the cabinet powers on. It is released by the first command the
+ * control socket delivers, or by the deadline when the connector is
+ * unreachable, disabled, or simply slower than the game's first read. */
 
-    http_response_t resp;
-    memset(&resp, 0, sizeof resp);
-    int rc = custom_song_api_request_text("POST", MGMT_POLL_PATH,
-                                  g_heartbeat, (size_t)hb_len, &resp);
-    if (rc != 0 || resp.status != 200 || !resp.body) {
-        http_response_free(&resp);
-        return -1;
-    }
-    spin_lock(&g_command_lock);
-    g_applied_count = 0;
-    int managed = 0, cfg_applied = 0;
-    int server_seq = parse_response((const char *)resp.body, resp.body_len,
-                                    &managed, &cfg_applied);
-    spin_unlock(&g_command_lock);
-    http_response_free(&resp);
-    if (cfg_applied)
-        taiko_cfg_save();
-    if (out_managed) *out_managed = managed;
-    if (out_server_seq) *out_server_seq = server_seq;
-    return 0;
-}
+static volatile int g_boot_gate_armed;
+static int64_t g_boot_gate_deadline_us;
 
-static void poll_and_ack_config(void) {
-    int managed = 0, server_seq = 0;
-    if (poll_once(&managed, &server_seq) != 0)
-        return;
-    if (g_applied_count > 0) {
-        int ack_managed = 0, ack_seq = 0;
-        if (poll_once(&ack_managed, &ack_seq) == 0) {
-            managed = ack_managed;
-            server_seq = ack_seq;
-        }
-    }
-    if (managed) {
-        int reconcile = (++g_reconcile_poll_count % 12u) == 0u ||
-                        g_poll_verify > g_verify_ack;
-        maybe_start_selection(server_seq, reconcile);
-    }
-}
-
-static int mgmt_enabled(void) {
-    return custom_song_service_ready();
-}
-
-void taiko_mgmt_boot_poll_arm(void) {
+void taiko_mgmt_boot_gate_arm(void) {
+    g_boot_gate_deadline_us = (int64_t)sys_time_get_system_time() +
+                              MGMT_BOOT_GATE_SECONDS * 1000ll * 1000ll;
     __sync_synchronize();
-    g_boot_poll_pending = 1;
+    g_boot_gate_armed = 1;
 }
 
-void taiko_mgmt_boot_poll_finish(void) {
+void taiko_mgmt_boot_gate_release(void) {
     /* Publish all config writes before chassisinfo observes completion. */
     __sync_synchronize();
-    g_boot_poll_pending = 0;
+    g_boot_gate_armed = 0;
 }
 
-int taiko_mgmt_boot_poll_pending(void) {
-    int pending = g_boot_poll_pending;
+int taiko_mgmt_boot_gate_pending(void) {
+    int pending = g_boot_gate_armed;
     __sync_synchronize();
-    return pending;
+    if (!pending)
+        return 0;
+    if (!custom_song_service_ready() ||
+        (int64_t)sys_time_get_system_time() >= g_boot_gate_deadline_us) {
+        taiko_mgmt_boot_gate_release();
+        return 0;
+    }
+    return 1;
 }
 
-void taiko_mgmt_boot_poll(void) {
+void taiko_mgmt_load_active_selection(void) {
     load_active_selection();
-    if (!mgmt_enabled()) {
-        taiko_mgmt_boot_poll_finish();
-        return;
-    }
-    dbg_print("[mgmt] immediate boot poll\n");
-    poll_and_ack_config();
-    taiko_mgmt_boot_poll_finish();
-}
-
-void taiko_mgmt_poll_run(void) {
-    if (g_started_run)
-        return;
-    g_started_run = 1;
-    load_active_selection();
-    dbg_print("[mgmt] poll loop started\n");
-    for (;;) {
-        if (mgmt_enabled())
-            poll_and_ack_config();
-        sys_timer_sleep(MGMT_POLL_SECONDS);
-    }
 }

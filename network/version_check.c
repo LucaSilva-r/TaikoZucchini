@@ -37,7 +37,7 @@ static int g_started;
  * starts before the game brings networking up, so load both libraries before
  * its first cellNetCtlGetState call. The game remains responsible for
  * sys_net/cellNetCtl initialization and teardown. */
-static int load_network_imports(void) {
+int taiko_net_imports_ready(void) {
     int rc = cellSysmoduleLoadModule(CELL_SYSMODULE_NET);
     if (rc != CELL_OK && rc != CELL_SYSMODULE_ERROR_DUPLICATED) {
         dbg_print_hex32("[version] sysmodule NET load rc", (uint32_t)rc);
@@ -587,14 +587,10 @@ static void run_update_check(void) {
 static void version_check_thread(uint64_t arg) {
     (void)arg;
 
-    if (!load_network_imports()) {
-        dbg_print("[version] networking unavailable; background poll disabled\n");
-        taiko_mgmt_boot_poll_finish();
+    if (!taiko_net_imports_ready()) {
+        dbg_print("[version] networking unavailable; update check disabled\n");
         sys_ppu_thread_exit(0);
     }
-
-    /* Resolve the boot config request before chassisinfo is synthesized. */
-    taiko_mgmt_boot_poll();
 
     sys_timer_sleep(8);
 
@@ -618,9 +614,10 @@ static void version_check_thread(uint64_t arg) {
         }
     }
 
-    /* Thread becomes the connector management poll loop; never returns
-     * (keeps polling even when the cabinet had no IP at boot). */
-    taiko_mgmt_poll_run();
+    /* Steady-state management lives on the control WebSocket (taiko_control_ws),
+     * which reconnects on its own when the cabinet had no IP at boot. Nothing
+     * left to do on this thread. */
+    taiko_mgmt_load_active_selection();
 
     sys_ppu_thread_exit(0);
 }
@@ -629,13 +626,10 @@ void taiko_version_check_start(void) {
     if (g_started) return;
     g_started = 1;
 
-    taiko_mgmt_boot_poll_arm();
     sys_ppu_thread_t tid = 0;
     int rc = sys_ppu_thread_create(&tid, version_check_thread, 0,
                                    1200, 64 * 1024, 0,
                                    "taiko_version_check");
-    if (rc != 0) {
+    if (rc != 0)
         dbg_print_hex32("[version] thread_create", (uint32_t)rc);
-        taiko_mgmt_boot_poll_finish();
-    }
 }

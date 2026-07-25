@@ -14,6 +14,14 @@
 #include "custom_song_client.h"
 #include "http_client.h"
 #include "mgmt_poll.h"
+#include "version_check.h"
+
+/* Status frames are cheap and change often. The full heartbeat is ~100 KiB and
+ * blocks this thread while it goes out, so it is never sent on a timer — only
+ * when the snapshot it carries actually changed. */
+#define CONTROL_STATUS_MIN_US   (10ull * 1000ull * 1000ull)
+#define CONTROL_BACKOFF_MIN     3u
+#define CONTROL_BACKOFF_MAX     30u
 
 static volatile int g_started;
 static uint32_t g_last_seq;
@@ -32,14 +40,18 @@ static void control_message(void *ctx, const char *message, size_t len) {
     (void)ctx;
     if (len > 2 && message[0] == 'M' && message[1] == '\n') {
         taiko_mgmt_apply_command(message + 2, len - 2);
+        /* chassisinfo synthesis waits on this: the operator's queued flags are
+         * now applied, so the game may read the file. */
+        taiko_mgmt_boot_gate_release();
         return;
     }
-    if (len == 6 && memcmp(message, "CLEAR\n", 6) == 0) {
-        g_last_seq = 0;
-        pad_input_remote_clear();
+    if (len == 2 && memcmp(message, "R\n", 2) == 0) {
+        /* Connector asked for a fresh inventory/config snapshot. */
+        taiko_mgmt_heartbeat_request();
         return;
     }
-    if (len == 6 && memcmp(message, "READY\n", 6) == 0) {
+    if (len == 6 && (memcmp(message, "CLEAR\n", 6) == 0 ||
+                     memcmp(message, "READY\n", 6) == 0)) {
         g_last_seq = 0;
         pad_input_remote_clear();
         return;
@@ -76,26 +88,48 @@ static void control_message(void *ctx, const char *message, size_t len) {
     pad_input_remote_state(mask);
 }
 
-static size_t control_outgoing(void *ctx, char *out, size_t cap) {
+static const char *control_outgoing(void *ctx, size_t *out_len) {
     (void)ctx;
     char current[2048];
-    size_t len = taiko_mgmt_build_status(current, sizeof current);
-    if (!len || len > cap)
-        return 0;
     uint64_t now = sys_time_get_system_time();
+    *out_len = 0;
+
+    /* Inventory + config upload, sent only when something actually changed:
+     * a completed song job, an applied config, a new connection, or an
+     * explicit connector request. Returns NULL the rest of the time, which is
+     * almost always — pushing ~100 KiB on a timer stalled remote input and the
+     * server's ping handling on this same thread. */
+    {
+        size_t hlen = 0;
+        const char *heartbeat = taiko_mgmt_build_heartbeat(&hlen);
+        if (heartbeat && hlen) {
+            *out_len = hlen;
+            return heartbeat;
+        }
+    }
+
+    size_t len = taiko_mgmt_build_status(current, sizeof current);
+    if (!len)
+        return NULL;
     if (len == g_last_status_len &&
         memcmp(current, g_last_status, len) == 0 &&
-        now - g_last_status_sent_us < 10u * 1000u * 1000u)
-        return 0;
+        now - g_last_status_sent_us < CONTROL_STATUS_MIN_US)
+        return NULL;
     memcpy(g_last_status, current, len);
     g_last_status_len = len;
     g_last_status_sent_us = now;
-    memcpy(out, current, len);
-    return len;
+    *out_len = len;
+    return g_last_status;
 }
 
 static void remote_worker(uint64_t arg) {
     (void)arg;
+    unsigned backoff = CONTROL_BACKOFF_MIN;
+    /* Nothing else loads these for us any more: this thread is the only one
+     * that has to have a socket at boot, and it may start before the version
+     * thread does. */
+    (void)taiko_net_imports_ready();
+    taiko_mgmt_load_active_selection();
     for (;;) {
         if (!custom_song_service_ready()) {
             pad_input_remote_clear();
@@ -118,16 +152,33 @@ static void remote_worker(uint64_t arg) {
         }
 
         int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
-        /* Every new connector must receive identity/status immediately even if
-         * the state happens to match the last frame sent before a reconnect. */
+        /* Every new connector must receive a full heartbeat and then identity/
+         * status immediately, even if the state happens to match the last frame
+         * sent before a reconnect. */
         g_last_status_len = 0;
         g_last_status_sent_us = 0;
+        /* A reconnected connector may be a different process that knows
+         * nothing about this cabinet, so always open with a full snapshot. */
+        taiko_mgmt_heartbeat_request();
+        /* If the last sync died with the connection, retry it now instead of
+         * waiting for an operator to press Force resync. */
+        taiko_mgmt_retry_blocked();
+        uint64_t opened_us = sys_time_get_system_time();
         (void)http_websocket_run(g_cfg.connector_host, port, path,
                                  headers, (size_t)hn,
                                  control_message, control_outgoing, NULL);
         pad_input_remote_clear();
         dbg_print("[control] websocket disconnected; retrying\n");
-        sys_timer_sleep(3);
+        /* Back off only on a connection that never got anywhere. A session that
+         * ran for a while and then dropped reconnects immediately — that is the
+         * common LAN case (connector restart) and must not wait 30 s. */
+        if (sys_time_get_system_time() - opened_us >= 30ull * 1000ull * 1000ull)
+            backoff = CONTROL_BACKOFF_MIN;
+        sys_timer_sleep(backoff);
+        if (backoff < CONTROL_BACKOFF_MAX)
+            backoff *= 2;
+        if (backoff > CONTROL_BACKOFF_MAX)
+            backoff = CONTROL_BACKOFF_MAX;
     }
 }
 
@@ -135,12 +186,14 @@ void taiko_remote_control_start(void) {
     if (g_started)
         return;
     g_started = 1;
+    taiko_mgmt_boot_gate_arm();
     sys_ppu_thread_t tid = 0;
     int rc = sys_ppu_thread_create(&tid, remote_worker, 0,
                                    1300, 64 * 1024, 0,
                                    "taiko_control_ws");
     if (rc != 0) {
         g_started = 0;
+        taiko_mgmt_boot_gate_release();
         dbg_print_hex32("[control] thread_create", (uint32_t)rc);
     }
 }
