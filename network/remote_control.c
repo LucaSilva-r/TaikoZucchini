@@ -5,11 +5,13 @@
 #include <string.h>
 
 #include <sys/ppu_thread.h>
+#include <sys/process.h>
 #include <sys/sys_time.h>
 #include <sys/timer.h>
 
 #include "config/runtime.h"
 #include "core/debug.h"
+#include "core/overlay.h"
 #include "input/pad_input.h"
 #include "custom_song_client.h"
 #include "http_client.h"
@@ -48,6 +50,18 @@ static void control_message(void *ctx, const char *message, size_t len) {
     if (len == 2 && memcmp(message, "R\n", 2) == 0) {
         /* Connector asked for a fresh inventory/config snapshot. */
         taiko_mgmt_heartbeat_request();
+        return;
+    }
+    if (len == 2 && memcmp(message, "X\n", 2) == 0) {
+        /* Operator-requested shutdown. Exiting a PS3 title returns to XMB, and
+         * the drum is a DualShock, so the operator can walk the cabinet back in
+         * from there remotely — which is what makes a pending SPRX update
+         * (applied at the next launch) reachable without touching the machine.
+         * The overlay message is on screen for a moment before teardown. */
+        dbg_print("[control] remote exit requested\n");
+        taiko_overlay_show_message("Closing game (remote request)...");
+        sys_timer_sleep(2);
+        sys_process_exit(0);
         return;
     }
     if (len == 6 && (memcmp(message, "CLEAR\n", 6) == 0 ||

@@ -32,8 +32,15 @@
 #include "core/game_version.h"
 #include "core/overlay.h"
 #include "core/title_prerender.h"
+#include "config.h"
 #include "custom_song_client.h"
 #include "http_client.h"
+#include "plugin_update.h"
+
+/* The connector refuses to hand a cabinet an SPRX signed for the other
+ * flavor, and its install button is gated on this field matching the
+ * artifact's. Same token the GitHub updater picks its release asset by. */
+#define MGMT_BUILD_FLAVOR       (HEN_BUILD ? "hen" : "gex")
 
 #define MGMT_RETRY_SECONDS      30
 /* How long chassisinfo synthesis may wait for the control socket to
@@ -79,6 +86,7 @@ static char (*g_poll_sel)[CUSTOM_SONG_ID_MAX];
 static int g_poll_sel_count;
 static int g_poll_sel_overflow;
 static int g_poll_seq;
+static char g_poll_update[128];
 static volatile int g_poll_lock;
 
 static char (*g_job_sel)[CUSTOM_SONG_ID_MAX];
@@ -428,17 +436,23 @@ static int build_heartbeat(void) {
         return -1;
 
     snprintf(line, sizeof line,
-             "id=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\n"
+             "id=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\nflavor=%s\n"
              "seq=%d\ndesired_ack=%d\nactive_seq=%d\n"
              "verify_ack=%d\n"
              "op_seq=%d\nop_phase=%s\nop_done=%u\nop_total=%u\n"
              "op_failed=%u\nop_song=%s\nop_error=%s\n",
              taiko_cfg_cabinet_id(), taiko_cfg_dongle_serial(),
              g_cfg.cabinet_name, game ? game : "", TAIKO_MOD_VERSION,
+             MGMT_BUILD_FLAVOR,
              g_synced_seq, g_desired_ack, g_synced_seq, g_verify_ack,
              op.seq, op.phase[0] ? op.phase : "idle",
              op.done, op.total, op.failed, op.song, op.error);
     off = hb_append(off, line);
+    if (off < 0)
+        return -1;
+
+    if (taiko_update_status_lines(line, sizeof line) > 0)
+        off = hb_append(off, line);
     if (off < 0)
         return -1;
 
@@ -639,6 +653,7 @@ static int parse_response(const char *body, size_t len, int *out_managed,
     int seq = 0;
     *out_managed = 0;
     *out_cfg_applied = 0;
+    g_poll_update[0] = 0;
     spin_lock(&g_poll_lock);
     g_poll_sel_count = 0;
     g_poll_sel_overflow = 0;
@@ -668,6 +683,12 @@ static int parse_response(const char *body, size_t len, int *out_managed,
         } else if (ll > 4 && memcmp(p, "cfg ", 4) == 0) {
             apply_cfg_line(p + 4, ll - 4);
             *out_cfg_applied = 1;
+        } else if (ll > 7 && memcmp(p, "update ", 7) == 0 &&
+                   (size_t)(ll - 7) < sizeof g_poll_update) {
+            /* Copied out and applied after the locks are dropped: starting the
+             * update worker must not happen under the poll spinlock. */
+            memcpy(g_poll_update, p + 7, (size_t)(ll - 7));
+            g_poll_update[ll - 7] = 0;
         }
         if (!nl)
             break;
@@ -696,6 +717,10 @@ void taiko_mgmt_apply_command(const char *body, size_t len) {
         maybe_start_selection(server_seq, reconcile);
     }
     spin_unlock(&g_command_lock);
+    /* Plugin updates are independent of the managed-song machinery: an
+     * unmanaged cabinet still takes them. */
+    if (g_poll_update[0])
+        taiko_update_command_line(g_poll_update);
 }
 
 /* A selection that ended with failures is terminal for its sequence, so a
@@ -781,7 +806,7 @@ size_t taiko_mgmt_build_status(char *out, size_t cap) {
     spin_lock(&g_command_lock);
     int n = snprintf(
         out, cap,
-        "T\nid=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\n"
+        "T\nid=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\nflavor=%s\n"
         "seq=%d\ndesired_ack=%d\nactive_seq=%d\n"
         "verify_ack=%d\n"
         "op_seq=%d\nop_phase=%s\nop_done=%u\nop_total=%u\n"
@@ -790,7 +815,8 @@ size_t taiko_mgmt_build_status(char *out, size_t cap) {
         "xfer_asset=%s\n",
         taiko_cfg_cabinet_id(), taiko_cfg_dongle_serial(),
         g_cfg.cabinet_name, game ? game : "",
-        TAIKO_MOD_VERSION, g_synced_seq, g_desired_ack, g_synced_seq,
+        TAIKO_MOD_VERSION, MGMT_BUILD_FLAVOR,
+        g_synced_seq, g_desired_ack, g_synced_seq,
         g_verify_ack, op.seq, op.phase[0] ? op.phase : "idle",
         op.done, op.total, op.failed, op.song, op.error,
         transfer.active, transfer.done, transfer.total,
@@ -799,6 +825,7 @@ size_t taiko_mgmt_build_status(char *out, size_t cap) {
         spin_unlock(&g_command_lock);
         return 0;
     }
+    n += taiko_update_status_lines(out + n, cap - (size_t)n);
     int sent_applied = 0;
     while (sent_applied < g_applied_count) {
         int added = snprintf(out + n, cap - (size_t)n, "applied=%s\n",

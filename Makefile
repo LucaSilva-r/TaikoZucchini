@@ -126,7 +126,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            hooks/songselect_natives.c \
            network/uri.c network/http_client.c network/version_check.c \
            network/custom_song_client.c network/extra_scores.c \
-           network/mgmt_poll.c network/pairing.c network/remote_control.c
+           network/mgmt_poll.c network/plugin_update.c \
+           network/pairing.c network/remote_control.c
 OBJS    := $(SRCS:.c=.o)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf
@@ -303,8 +304,9 @@ hooks/video_out_hook.o: hooks/video_out_hook.c hooks/video_out_hook.h eboot_fpt.
 hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h song_loader_manifest.h core/debug.h core/icache.h
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
-network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h network/mgmt_poll.h config/version.h core/debug.h core/overlay.h
-network/mgmt_poll.o:      network/mgmt_poll.c      network/mgmt_poll.h network/custom_song_client.h network/http_client.h config/runtime.h config/version.h config/cfg_file.h core/debug.h core/game_version.h
+network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h network/mgmt_poll.h network/plugin_update.h config/version.h core/debug.h core/overlay.h
+network/mgmt_poll.o:      network/mgmt_poll.c      network/mgmt_poll.h network/custom_song_client.h network/http_client.h network/plugin_update.h config/runtime.h config/version.h config/cfg_file.h config.h core/debug.h core/game_version.h
+network/plugin_update.o:  network/plugin_update.c  network/plugin_update.h network/custom_song_client.h network/http_client.h config/runtime.h config.h core/debug.h core/overlay.h
 hooks/cell_http_shim.o: hooks/cell_http_shim.c hooks/cell_http_shim.h network/http_client.h core/debug.h config/runtime.h config.h
 
 RPCS3_DEV_HDD0 ?= $(HOME)/.config/rpcs3/dev_hdd0

@@ -22,6 +22,7 @@
 #include "mgmt_poll.h"
 #include "kb_input.h"
 #include "overlay.h"
+#include "plugin_update.h"
 #include "usrdir_path.h"
 
 #define TAIKO_UPDATE_PLUGIN_PATH "/dev_hdd0/plugins/taiko/zucchini.sprx"
@@ -586,6 +587,11 @@ static void run_update_check(void) {
 
 static void version_check_thread(uint64_t arg) {
     (void)arg;
+
+    /* Off the control socket thread, before it can build its first frame:
+     * the connector's update acknowledgement is the hash of the SPRX on
+     * disk. */
+    taiko_update_prime();
 
     if (!taiko_net_imports_ready()) {
         dbg_print("[version] networking unavailable; update check disabled\n");
