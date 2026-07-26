@@ -264,6 +264,15 @@ static int persist_selection(int seq,
     int n = snprintf(line, sizeof line, "seq=%d\n", seq);
     if (n <= 0 || !write_all(fd, line, (size_t)n))
         ok = 0;
+    /* The verify generation must survive a reboot. It used to live only in RAM,
+     * so every boot started at 0, any verify=N the connector sent looked new,
+     * and a full verify pass re-prepared the entire library even when every
+     * song was cached and current. */
+    if (ok) {
+        n = snprintf(line, sizeof line, "verify_ack=%d\n", g_verify_ack);
+        if (n <= 0 || !write_all(fd, line, (size_t)n))
+            ok = 0;
+    }
     for (int i = 0; ok && i < id_count; i++) {
         n = snprintf(line, sizeof line, "%s\n", ids[i]);
         if (n <= 0 || !write_all(fd, line, (size_t)n))
@@ -292,6 +301,17 @@ static int persist_selection(int seq,
 
 static int persist_active_selection(int seq) {
     return persist_selection(seq, g_job_sel, g_job_sel_count);
+}
+
+/* Acknowledge a completed verify pass and get that ack onto disk. Without the
+ * write, the ack dies with the process and the next boot repeats the pass. The
+ * selection content is unchanged; only the verify_ack line differs. */
+static void ack_verify_pass(int seq) {
+    if (!g_job_verify)
+        return;
+    g_verify_ack = g_job_verify_generation;
+    if (g_active_count > 0)
+        (void)persist_selection(seq, g_active_sel, (int)g_active_count);
 }
 
 static void publish_active_selection(int seq) {
@@ -345,7 +365,7 @@ static void load_active_selection(void) {
     }
     buf[got] = 0;
 
-    int seq = 0, count = 0;
+    int seq = 0, count = 0, verify_ack = 0;
     char *p = buf;
     while (*p) {
         char *nl = strchr(p, '\n');
@@ -356,6 +376,8 @@ static void load_active_selection(void) {
             p[--len] = 0;
         if (strncmp(p, "seq=", 4) == 0) {
             seq = atoi(p + 4);
+        } else if (strncmp(p, "verify_ack=", 11) == 0) {
+            verify_ack = atoi(p + 11);
         } else if (len > 0 && len < CUSTOM_SONG_ID_MAX && count < MGMT_SEL_MAX) {
             memcpy(g_active_sel[count], p, len + 1);
             count++;
@@ -370,6 +392,7 @@ static void load_active_selection(void) {
     g_active_enabled = 1;
     g_synced_seq = seq;
     g_desired_ack = seq;
+    g_verify_ack = verify_ack;
     if (recovered_old)
         (void)cellFsRename(MGMT_ACTIVE_OLD_PATH, MGMT_ACTIVE_PATH);
     dbg_print_hex32("[mgmt] restored active selection seq", (uint32_t)seq);
@@ -434,7 +457,14 @@ static int build_heartbeat(void) {
     {
         int count = custom_song_library_count();
         int have = 0;
-        for (int i = 0; i < count; i++) {
+        /* Before the library index is loaded we cannot enumerate anything, and
+         * an inventory of zero is indistinguishable from "this cabinet is
+         * empty": the connector would replace `have` with an empty list and
+         * prune every package state, then re-desire the whole library. Omitting
+         * have_count entirely makes it keep the inventory it already has (it
+         * treats a missing count as a truncated frame), so send nothing until we
+         * know what we hold. */
+        for (int i = 0; count > 0 && i < count; i++) {
             custom_song_entry_t entry;
             if (!custom_song_library_is_cached_at(i) ||
                 !custom_song_library_get(i, &entry) ||
@@ -446,10 +476,12 @@ static int build_heartbeat(void) {
                 return -1;
             have++;
         }
-        snprintf(line, sizeof line, "have_count=%d\n", have);
-        off = hb_append(off, line);
-        if (off < 0)
-            return -1;
+        if (count > 0) {
+            snprintf(line, sizeof line, "have_count=%d\n", have);
+            off = hb_append(off, line);
+            if (off < 0)
+                return -1;
+        }
     }
 
     off = hb_append(off, "\n");
@@ -483,6 +515,16 @@ static int build_packages(void) {
     char line[512];
     int off;
     int count = custom_song_library_count();
+
+    /* Before the library index is loaded, count is 0 and every pkg line below
+     * is skipped -- an inventory frame that truthfully means "I have nothing".
+     * The connector believes it and re-desires the entire library, which is why
+     * a fully synced cabinet resynced from scratch on every boot. Say nothing
+     * until we know what we have; the connector keeps its previous inventory. */
+    if (count <= 0) {
+        g_packages_dirty = 1;
+        return 0;
+    }
 
     off = snprintf(g_packages, MGMT_PACKAGES_SIZE, "P\nid=%s\n",
                    taiko_cfg_cabinet_id());
@@ -939,6 +981,14 @@ static int adopt_latest_selection(void) {
         g_job_seq = g_poll_seq;
         g_job_verify = g_poll_verify > g_verify_ack;
         g_job_verify_generation = g_poll_verify;
+        if (g_job_verify) {
+            /* A full verify re-prepares every selected song. Log what asked for
+             * it: if `verify` keeps climbing across boots while `ack` tracks it,
+             * the connector is escalating and the cabinet is obeying correctly. */
+            dbg_print_hex32("[mgmt] full verify pass, connector verify",
+                            (uint32_t)g_poll_verify);
+            dbg_print_hex32("  acked", (uint32_t)g_verify_ack);
+        }
         memset(g_job_broken, 0, (size_t)g_job_sel_count);
         g_desired_ack = g_job_seq;
         adopted = 1;
@@ -1091,8 +1141,7 @@ static void selection_worker(uint64_t arg) {
         if (latest_selection_pending())
             continue;
         if (missing == 0 && failed == 0 && g_job_seq == g_synced_seq) {
-            if (g_job_verify)
-                g_verify_ack = g_job_verify_generation;
+            ack_verify_pass(g_job_seq);
             operation_set(0, g_job_seq, "complete", done,
                           (unsigned)g_job_sel_count, 0, "", "");
             break;
@@ -1101,6 +1150,7 @@ static void selection_worker(uint64_t arg) {
             (void)custom_song_prepare_batch(g_missing_index, missing);
 
         int selection_superseded = 0;
+        int window_shut = 0;
         for (int i = 0; i < missing; i++) {
             custom_song_entry_t song;
             custom_song_course_entry_t courses[CUSTOM_SONG_COURSE_LIST_MAX];
@@ -1124,6 +1174,12 @@ static void selection_worker(uint64_t arg) {
                                                 &course_count);
             if (rc > 0 && course_count > 0) {
                 done++;
+            } else if (rc == CUSTOM_SONG_PREPARE_ERR_WINDOW_SHUT) {
+                /* Connector unreachable, or the game left attract. Leave the
+                 * remaining songs untouched and let the next pass resume; the
+                 * selection stays pending so nothing is lost. */
+                window_shut = 1;
+                break;
             } else if (rc == CUSTOM_SONG_PREPARE_ERR_SERVER_FAILED ||
                        (rc > 0 && course_count <= 0)) {
                 g_job_broken[g_missing_job_index[i]] = 1;
@@ -1161,6 +1217,15 @@ static void selection_worker(uint64_t arg) {
 
         if (selection_superseded)
             continue;
+        if (window_shut) {
+            /* Not an error state: hold the sequence as-is and wait for the
+             * window to reopen instead of reporting a completed-with-failures
+             * pass, which would make the connector re-desire everything. */
+            operation_set(1, g_job_seq, "waiting", done,
+                          (unsigned)g_job_sel_count, failed, "", "");
+            sys_timer_sleep(5);
+            continue;
+        }
         if (latest_selection_pending())
             continue;
         if (g_job_seq == g_synced_seq) {
@@ -1172,8 +1237,7 @@ static void selection_worker(uint64_t arg) {
                 }
             }
             if (!any_staged) {
-                if (g_job_verify)
-                    g_verify_ack = g_job_verify_generation;
+                ack_verify_pass(g_job_seq);
                 operation_set(0, g_job_seq,
                               failed ? "complete_errors" : "complete",
                               done, (unsigned)g_job_sel_count, failed,
@@ -1240,8 +1304,7 @@ static void selection_worker(uint64_t arg) {
                 goto retry;
             }
             publish_active_selection(g_job_seq);
-            if (g_job_verify)
-                g_verify_ack = g_job_verify_generation;
+            ack_verify_pass(g_job_seq);
             /* Remove deselected packages from the live namespace immediately,
              * but reclaim their bytes only after the game has reloaded. */
             quarantine_deselected(g_job_seq);

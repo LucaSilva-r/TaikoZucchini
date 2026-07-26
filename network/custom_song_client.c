@@ -488,7 +488,14 @@ static int load_installed_index(void) {
         if (space && space < nl && nl - space == 41) {
             *space = 0;
             int idx = lib_find_song_index(p);
-            if (idx >= 0 && cached_dir_has_manifest(p)) {
+            /* Deliberately does NOT re-verify the song directory here. We wrote
+             * this index ourselves after a successful scan, so re-opendir'ing
+             * every entry on each boot re-pays the cost the index exists to
+             * avoid (over a thousand directory enumerations on a real HDD).
+             * A song whose files vanished behind our back is caught by the
+             * per-song custom_song_is_cached() check on the paths that actually
+             * use it, and by the next full rescan. */
+            if (idx >= 0) {
                 memcpy(g_lib_installed_rev[idx], space + 1, 40);
                 g_lib_installed_rev[idx][40] = 0;
                 g_lib_cached[idx] = 1;
@@ -551,8 +558,11 @@ static void lib_refresh_cached_flags(void) {
     g_lib_cache_scanned = 1;
 
     recover_activation_transactions();
-    if (load_installed_index())
+    if (load_installed_index()) {
+        dbg_print("[songs] installed index reused\n");
         return;
+    }
+    dbg_print("[songs] installed index miss, scanning every song dir\n");
 
     if (cellFsOpendir(CUSTOM_SONG_ROOT, &fd) != CELL_FS_SUCCEEDED)
         return;
@@ -1867,6 +1877,11 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
         }
     }
 
+    /* Nothing below can succeed while work is not permitted, and the caller
+     * must be able to tell that apart from a song-specific failure. */
+    if (!custom_song_service_ready() || !custom_song_work_window_open())
+        return CUSTOM_SONG_PREPARE_ERR_WINDOW_SHUT;
+
     loading_screen("Preparing...", -1, -1);
     int n = snprintf(path, sizeof path, "/api/connector/songs/%s/prepare",
                      song_id);
@@ -1876,6 +1891,9 @@ int custom_song_prepare_and_cache(const char *song_id, const char *title,
     memset(&resp, 0, sizeof resp);
     int rc = api_request("POST", path, &resp);
     if (rc != 0) {
+        /* Re-check: a window that shut mid-request is a pause, not a failure. */
+        if (!custom_song_service_ready() || !custom_song_work_window_open())
+            return CUSTOM_SONG_PREPARE_ERR_WINDOW_SHUT;
         dbg_print("[songs] prepare request failed\n");
         return -2;
     }

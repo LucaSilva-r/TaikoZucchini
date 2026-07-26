@@ -18,6 +18,15 @@
  * cannot repair it; managed sync should skip it and continue. */
 #define CUSTOM_SONG_PREPARE_ERR_SERVER_FAILED (-4)
 
+/* prepare_and_cache result used when work is not permitted right now: the
+ * connector is unreachable, or the attract-only work window is shut because the
+ * game is booting / a player is in a song. Nothing is wrong with the song, so
+ * managed sync must pause and resume later rather than blaming it. Marking
+ * these terminal used to fail every remaining song within milliseconds at boot
+ * (the game is not in attract yet), which then made the connector re-desire the
+ * whole library on the next boot. */
+#define CUSTOM_SONG_PREPARE_ERR_WINDOW_SHUT (-5)
+
 /* Canonical difficulty slots in the index: Easy,Normal,Hard,Oni,Ura. */
 #define CUSTOM_SONG_DIFF_SLOTS 5
 enum {
