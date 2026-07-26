@@ -29,7 +29,6 @@
 static int g_running     = 0;
 static int g_listen_sock = -1;
 static char g_ip_str[32] = "0.0.0.0";
-static sys_ppu_thread_t g_listener_tid = 0;
 static void *g_net_mem   = NULL;
 /* When set, the network stack was brought up by someone else (the game);
  * boot_setup reuses it and ftp_server_stop must not finalise it. */

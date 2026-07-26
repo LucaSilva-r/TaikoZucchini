@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#define TAIKO_CHASSISINFO_VIRT_FD 0x7AC0FF01
+
 /* Synthesize chassisinfo.xml in memory and serve it via FPT-published
  * cellFs* redirects. The EBOOT's cellFsOpen import stub is rewritten at
  * repatch time to dispatch through TAIKO_FPT_FS_OPEN; this module
@@ -15,6 +17,12 @@
  * DATA00000.BIN logic runs. */
 
 void chassisinfo_hook_install(void);
+
+/* Older builds read data/chassisinfo.xml through direct sys_fs calls
+ * before the import-stub hook can see them. When the root file exists,
+ * patch its existing XML values in place during startup so those direct
+ * readers naturally consume the configured serial/flags. */
+void chassisinfo_rewrite_root_file(void);
 
 /* Called from data00000_redirect's cellFsOpen hook. If the path is a
  * chassisinfo.xml request, allocates the virtual fd, populates *out_fd

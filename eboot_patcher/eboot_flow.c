@@ -20,6 +20,7 @@
 #include "sce_rand.h"
 #include "self_build.h"
 #include "sprx_loader_patch.h"
+#include "eboot_inline_specs.h"
 #include "patches/patches.h"
 #include "debug.h"
 #include "patch_warn.h"
@@ -507,6 +508,9 @@ int eboot_flow_run(eboot_flow_args_t *args) {
         if ((rc = patches_apply_all_to_buffer(buf, buf_len, segs, nsegs)) != 0) {
             ok = -510 + rc; goto done;
         }
+        if ((rc = eboot_inline_hooks_apply(&ctx)) != 0) {
+            ok = -515 + rc; goto done;
+        }
         if ((rc = sprx_loader_patch_apply(&ctx, TAIKO_PRX_PATH)) != 0) {
             ok = -520 + rc; goto done;
         }
@@ -540,6 +544,9 @@ int eboot_flow_run(eboot_flow_args_t *args) {
     }
     if ((rc = patches_apply_all_to_buffer(buf, buf_len, segs, nsegs)) != 0) {
         ok = -510 + rc; goto done;
+    }
+    if ((rc = eboot_inline_hooks_apply(&ctx)) != 0) {
+        ok = -515 + rc; goto done;
     }
     if ((rc = sprx_loader_patch_apply(&ctx, TAIKO_PRX_PATH)) != 0) {
         ok = -520 + rc; goto done;

@@ -330,11 +330,11 @@ static int ensure_overlay_mapped(void) {
     }
 
     cursor = align_up_u32(cursor, 128);
-    CgBinaryProgram *fp = (CgBinaryProgram *)overlay_quad_fp_cgb;
+    CgBinaryProgram fp = overlay_quad_header(overlay_quad_fp_cgb);
     g_fp_ucode_io = off + cursor;
     memcpy((uint8_t *)g_overlay_mem + cursor,
-           (const uint8_t *)fp + fp->ucode, fp->ucodeSize);
-    cursor += fp->ucodeSize;
+           overlay_quad_ucode(overlay_quad_fp_cgb), fp.ucodeSize);
+    cursor += fp.ucodeSize;
 
     cursor = align_up_u32(cursor, 128);
     CgBinaryProgram *color_fp = (CgBinaryProgram *)overlay_color_fp_cgb;
@@ -668,18 +668,17 @@ static void append_texture_batch(CellGcmContextData *cmd,
     cellGcmSetCullFaceEnable(cmd, CELL_GCM_FALSE);
 
     append_blend_state(cmd, 1);
-    cellGcmSetVertexProgram(cmd, (CGprogram)overlay_quad_vp_cgb,
-                            (const uint8_t *)overlay_quad_vp_cgb +
-                            ((CgBinaryProgram *)overlay_quad_vp_cgb)->ucode);
+    cellGcmSetVertexProgram(cmd, overlay_quad_program(overlay_quad_vp_cgb),
+                            overlay_quad_ucode(overlay_quad_vp_cgb));
     const uint8_t *fragment_program = preserve_texture_color
         ? overlay_color_fp_cgb
         : overlay_quad_fp_cgb;
     uint32_t fragment_program_io = preserve_texture_color
         ? g_color_fp_ucode_io
         : g_fp_ucode_io;
-    cellGcmSetFragmentProgramOffset(cmd, (CGprogram)fragment_program,
+    cellGcmSetFragmentProgramOffset(cmd, overlay_quad_program(fragment_program),
                                     fragment_program_io, CELL_GCM_LOCATION_MAIN);
-    cellGcmSetFragmentProgramControl(cmd, (CGprogram)fragment_program, 0, 1, 0);
+    cellGcmSetFragmentProgramControl(cmd, overlay_quad_program(fragment_program), 0, 1, 0);
 
     CellGcmTexture tex;
     memset(&tex, 0, sizeof tex);
