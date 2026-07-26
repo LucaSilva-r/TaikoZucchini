@@ -33,10 +33,11 @@ size_t taiko_mgmt_build_status(char *out, size_t cap);
  * command snapshot re-attempts them. No-op when nothing is blocked. */
 void taiko_mgmt_retry_blocked(void);
 
-/* Mark the inventory/config snapshot stale, so the control thread publishes a
- * fresh `H` frame at its next opportunity. The snapshot only changes on real
- * events — a completed song job, an applied config, a new connection, or an
- * explicit connector request — so it is never rebuilt on a timer. */
+/* Mark the inventory/config snapshot (and the package-state report) stale, so
+ * the control thread publishes fresh `H` and `P` frames at its next
+ * opportunity. The snapshot only changes on real events — a completed song job,
+ * an applied config, a new connection, or an explicit connector request — so it
+ * is never rebuilt on a timer. */
 void taiko_mgmt_heartbeat_request(void);
 
 /* Full `H\n...` heartbeat (identity, operation state, song inventory, global
@@ -45,6 +46,13 @@ void taiko_mgmt_heartbeat_request(void);
  * A request raised while a song job runs stays pending until it finishes.
  * Caller must be the control thread. */
 const char *taiko_mgmt_build_heartbeat(size_t *out_len);
+
+/* `P\n...` package-state report: identity plus a bounded slice of per-song
+ * installed revisions. Advisory and deliberately separate from the heartbeat,
+ * so a large library can never push the authoritative inventory out of its
+ * buffer. Returns NULL when nothing is pending; consecutive calls walk the
+ * library until a full pass completes. Caller must be the control thread. */
+const char *taiko_mgmt_build_packages(size_t *out_len);
 
 typedef struct taiko_mgmt_operation {
     int active;

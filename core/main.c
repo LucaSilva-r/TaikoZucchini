@@ -742,6 +742,9 @@ int taiko_start(unsigned int args, void *argp) {
 
     dbg_log_reset();
     dbg_print("Taiko Zucchini SPRX loaded.\n");
+    /* Baseline for the footprint budget: everything the plugin maps later is
+     * measured against this. BLUE has been seen down at ~8.5 MiB free. */
+    dbg_print_freemem("[main] free at sprx start\n");
     dbg_print_hex32("[eboot] raw args", args);
     dbg_print_hex32("[eboot] raw argp", (uint32_t)(uintptr_t)argp);
     if (argp && args >= 4u) {

@@ -108,6 +108,18 @@ static const char *control_outgoing(void *ctx, size_t *out_len) {
         }
     }
 
+    /* Advisory per-song package state, in its own frame and after the
+     * inventory: a big library must never crowd `have` out of the heartbeat.
+     * Sent in slices across consecutive ticks until a full pass completes. */
+    {
+        size_t plen = 0;
+        const char *packages = taiko_mgmt_build_packages(&plen);
+        if (packages && plen) {
+            *out_len = plen;
+            return packages;
+        }
+    }
+
     size_t len = taiko_mgmt_build_status(current, sizeof current);
     if (!len)
         return NULL;

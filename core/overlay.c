@@ -24,9 +24,20 @@
 #define OVERLAY_MESSAGE_BOX_FRAMES 600
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
-#define OVERLAY_MAP_SIZE       (16 * 1024 * 1024)
+/* BLUE boots with only ~8.5 MiB of user memory free, and a game-side
+ * operator new failure there throws std::bad_alloc that nothing catches (the
+ * unwinder then walks off the thread stack and takes a DSI). So this mapping is
+ * sized to what the layout actually uses, not to a round number. The cursor
+ * check at the end of ensure_overlay_mapped() is the backstop if the layout
+ * ever grows. */
+#define OVERLAY_MAP_SIZE       (2 * 1024 * 1024)
 #define OVERLAY_CMD_RING_SLOTS 64
-#define OVERLAY_CMD_WORDS      16384
+/* Measured on HW: the busiest screen (mod menu) used 326 command words and
+ * 1254 vertices. Both arenas are sized to a wide margin over that rather than
+ * to the round numbers they started at, because the free-memory floor during
+ * play is a few hundred KiB and this mapping is pure overhead to the game.
+ * Overflow of either fails cleanly (batch dropped / text truncated). */
+#define OVERLAY_CMD_WORDS      2048
 
 #define OVERLAY_MAX_LINES      36
 #define OVERLAY_TEXT_CAP       96
@@ -40,8 +51,8 @@
 #define OVERLAY_ATLAS_PITCH    4096
 #define OVERLAY_SWATCH_W       16
 #define OVERLAY_SWATCH_H       16
-#define OVERLAY_VERTEX_SLOTS   8
-#define OVERLAY_VERTEX_MAX     8192   /* room for 16 rows + wrapped desc */
+#define OVERLAY_VERTEX_SLOTS   4
+#define OVERLAY_VERTEX_MAX     4096   /* room for 16 rows + wrapped desc */
 
 /* Card/QR surface: a 64x64 ARGB texture holding the QR at 1px/module (QR is
  * 57 modules), nearest-neighbour scaled up on blit so it stays crisp. */
@@ -271,6 +282,7 @@ static int ensure_overlay_mapped(void) {
         }
         g_overlay_mem = (uint32_t *)(uintptr_t)addr;
         memset(g_overlay_mem, 0, OVERLAY_MAP_SIZE);
+        dbg_print_freemem("[overlay] mapped\n");
     }
 
     uint32_t off = 0;
@@ -423,8 +435,15 @@ static int append_text_vertices(overlay_vertex_t *v, int *count, int max_vtx,
         if (c < font->first_char || c > font->last_char) continue;
         const menu_glyph_t *g = &font->glyphs[c - font->first_char];
         if (g->w && g->h) {
-            if (*count + 6 > max_vtx)
+            if (*count + 6 > max_vtx) {
+                static int warned;
+                if (!warned) {
+                    warned = 1;
+                    dbg_print_hex32("[overlay] vertex arena full at",
+                                    (uint32_t)*count);
+                }
                 return 0;
+            }
             float x0 = (float)(pen + g->bx);
             float y0 = (float)(y + font->baseline - g->by);
             float x1 = x0 + (float)g->w;
@@ -589,8 +608,18 @@ static int finish_and_call(CellGcmContextData *game,
                            uint32_t *cmd_buf) {
     cellGcmSetReturnCommandUnsafe(cmd);
     size_t bytes = (size_t)(cmd->current - cmd->begin) * sizeof(uint32_t);
-    if (bytes == 0 || bytes > OVERLAY_CMD_WORDS * sizeof(uint32_t))
+    if (bytes == 0 || bytes > OVERLAY_CMD_WORDS * sizeof(uint32_t)) {
+        /* OVERLAY_CMD_WORDS is sized to a measured peak; say so once if a
+         * screen ever exceeds it, rather than silently dropping the batch. */
+        static int warned;
+        if (bytes && !warned) {
+            warned = 1;
+            dbg_print_hex32("[overlay] cmd buffer overflow, words",
+                            (uint32_t)(bytes / sizeof(uint32_t)));
+        }
         return 0;
+    }
+
     flush_dcache(cmd_buf, bytes);
     /* CallCommand is ~2 words; reserve a small margin and grow if needed. */
     if (!ensure_game_space(game, OVERLAY_GCM_HEADROOM_WORDS))

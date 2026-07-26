@@ -58,7 +58,10 @@ void *memalign(size_t alignment, size_t size) {
     return (void *)a;
 }
 
-enum { HEAP_SIZE = 3 * 1024 * 1024 };
+/* Measured peak use on HW (boot + song sync + TLS + glyph rendering + a full
+ * set) was 1.98 MiB, tracked by the high-water marks below. 2.5 MiB keeps ~25%
+ * headroom; raise it again if [heap] peak frontier approaches this value. */
+enum { HEAP_SIZE = 5 * 512 * 1024 };
 static unsigned char g_heap[HEAP_SIZE] __attribute__((aligned(16)));
 
 typedef struct HeapBlock {

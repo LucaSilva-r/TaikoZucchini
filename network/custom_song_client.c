@@ -338,32 +338,6 @@ static int json_get_int_after(const unsigned char *start,
     return 1;
 }
 
-static int url_encode_append(char *out, size_t cap, size_t *n,
-                             const char *src) {
-    static const char hex[] = "0123456789ABCDEF";
-    if (!out || !n || !src)
-        return 0;
-    while (*src) {
-        unsigned char c = (unsigned char)*src++;
-        int safe = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                   (c >= '0' && c <= '9') || c == '-' || c == '_' ||
-                   c == '.' || c == '~';
-        if (safe) {
-            if (*n + 1 >= cap)
-                return 0;
-            out[(*n)++] = (char)c;
-        } else {
-            if (*n + 3 >= cap)
-                return 0;
-            out[(*n)++] = '%';
-            out[(*n)++] = hex[c >> 4];
-            out[(*n)++] = hex[c & 0x0f];
-        }
-    }
-    out[*n] = 0;
-    return 1;
-}
-
 /* --- in-memory library ----------------------------------------------------
  * The whole library (categories + songs id/title/category) is downloaded once
  * and cached to disk; we only re-download when the server's library hash
@@ -758,10 +732,8 @@ static int parse_library(const unsigned char *body, size_t len) {
         for (int d = 0; d < CUSTOM_SONG_DIFF_SLOTS; d++) s->stars[d] = -1;
         if (json_get_string_after(idp, item_end, "\"diffs\"", diffs, sizeof diffs))
             parse_diffs_str(diffs, s->stars);
-        if (!json_get_string_after(idp, item_end, "\"package_revision\"",
-                                   s->rev, sizeof s->rev))
-            json_get_string_after(idp, item_end, "\"rev\"",
-                                  s->rev, sizeof s->rev);
+        json_get_string_after(idp, item_end, "\"package_revision\"",
+                              s->rev, sizeof s->rev);
         char source[8];
         source[0] = 0;
         if (json_get_string_after(idp, item_end, "\"source\"",
@@ -1550,8 +1522,10 @@ static int verify_asset_at(const char *base, const char *song_id,
         return 0;
     if (asset->size && st.st_size != asset->size)
         return 0;
+    /* Every asset in a schema-3 manifest carries a sha1; one without it is a
+     * malformed manifest, not something to wave through. */
     if (!asset->sha1[0])
-        return 1; /* schema-2 compatibility */
+        return 0;
     if (cellFsOpen(path, CELL_FS_O_RDONLY, &fd, NULL, 0) != CELL_FS_SUCCEEDED)
         return 0;
     mbedtls_sha1_init(&sha);

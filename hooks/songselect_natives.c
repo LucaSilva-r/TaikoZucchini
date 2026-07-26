@@ -1876,6 +1876,12 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
      ~(SSN_RT_POOL_SLAB_SIZE - 1u))
 #define SSN_RT_POOL_SLAB_COUNT \
     (SSN_RT_POOL_MEM_SIZE / SSN_RT_POOL_SLAB_SIZE)
+/* Upload descriptors are backing owners for pointers shallow-copied into the
+ * draw-facing descriptor. Keep them out of the song-name key ranges: scene
+ * teardown unmaps those keys while NU::Draw may still have requests queued.
+ * Type 3 was the original, known-good donor type; use an otherwise-unused
+ * high subrange and one key per fixed pool slot. */
+#define SSN_RT_STAGING_KEY_BASE 0x0003f000u
 
 typedef struct ssn_rt_pool_slot {
     uint32_t resource;   /* game-owned upload descriptor (may be scene-freed) */
@@ -1909,10 +1915,12 @@ static void ssn_rt_reset_pool_descriptors(ssn_rt_pool_slot_t *pool,
                                           unsigned n) {
     unsigned i;
     for (i = 0; i < n; i++) {
-        pool[i].resource = 0;
-        pool[i].registered_key = 0;
-        pool[i].game_buf = 0;
-        pool[i].game_io = 0;
+        /* Preserve the private upload owner. draw_desc is a shallow copy and
+         * its virtual methods can expose an inner texture context owned by
+         * resource. Forgetting resource here caused a fresh descriptor to be
+         * registered on every song-list rebuild; scene teardown then freed the
+         * old inner context underneath queued NU::Draw requests. Liveness is
+         * checked immediately before the next upload. */
         pool[i].index = 0;
         pool[i].lru = 0;
         pool[i].draw_ready = 0;
@@ -2025,6 +2033,7 @@ static int ssn_rt_pool_mem_init(void) {
         dbg_print("[ssn] owned pool slab layout overflow\n");
         return 0;
     }
+    dbg_print_freemem("[ssn] title pool slabs mapped\n");
     g_rt_pool_mem_ready = 1;
     return 1;
 }
@@ -2035,17 +2044,31 @@ static uint32_t ssn_rt_alloc_descriptor(uint32_t registered_key,
                                         uint32_t w, uint32_t h) {
     uint32_t mgr = *(volatile uint32_t *)(uintptr_t)SSN_NU_TEX_ALLOC_MGR_CELL;
     uint32_t res = 0;
+    int rc;
     if (!ssn_ptr_sane(mgr))
         return 0;
-    if (((nu_tex_alloc_fn)(uintptr_t)g_nu_tex_alloc_desc)(
-            mgr, registered_key, 0x82u, w, h, 1u, 0u, &res) != 0)
+    /* Every failure below is logged: a game-side texture allocation that starts
+     * failing is the memory-pressure signal we need, and it is exactly the state
+     * in which the engine runs cleanup paths that can free objects out from
+     * under queued NU::Draw requests. */
+    rc = ((nu_tex_alloc_fn)(uintptr_t)g_nu_tex_alloc_desc)(
+            mgr, registered_key, 0x82u, w, h, 1u, 0u, &res);
+    if (rc != 0) {
+        dbg_print_hex32("[ssn] tex alloc failed rc", (uint32_t)rc);
+        dbg_print_hex32("  key", registered_key);
+        dbg_print_freemem("");
         return 0;
-    if (!ssn_heap_ptr_sane(res))
+    }
+    if (!ssn_heap_ptr_sane(res)) {
+        dbg_print_hex32("[ssn] tex alloc insane res", res);
         return 0;
+    }
     /* +0x08 is the key under which the allocator registered this descriptor.
      * Scene teardown uses it to remove the same entry from the manager map. */
-    if (*(volatile uint32_t *)(uintptr_t)(res + 0x08u) != registered_key)
+    if (*(volatile uint32_t *)(uintptr_t)(res + 0x08u) != registered_key) {
+        dbg_print_hex32("[ssn] tex alloc key mismatch res", res);
         return 0;
+    }
     return res;
 }
 
@@ -2075,11 +2098,26 @@ static void ssn_rt_forget_upload_resource(ssn_rt_pool_slot_t *slot) {
     slot->game_io = 0;
 }
 
+static uint32_t ssn_rt_staging_key(uint32_t type, unsigned slot) {
+    unsigned ordinal;
+
+    if (type == TITLE_TEX_SONGLIST_SHORT)
+        ordinal = SSN_RT_POOL_LONG + slot;
+    else if (type == 11u)
+        ordinal = SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT + slot;
+    else if (type == 12u)
+        ordinal = SSN_RT_POOL_LONG + SSN_RT_POOL_SHORT +
+                  SSN_RT_POOL_HUD + slot;
+    else
+        ordinal = slot;
+    return SSN_RT_STAGING_KEY_BASE + ordinal;
+}
+
 /* Render title -> our slot buffer via the game's own upload (handles any
  * swizzle), then force the descriptor to point at OUR buffer + known IO offset
  * (main-memory location). No allocation. */
-static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t type,
-                              uint32_t index) {
+static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t key,
+                              uint32_t type, uint32_t index) {
     uint32_t res = slot->resource;
     const char *title;
     uint32_t w = 0;
@@ -2147,7 +2185,10 @@ static int ssn_rt_slot_upload(ssn_rt_pool_slot_t *slot, uint32_t type,
         remap: the A1R5G5B5-derived default routed alpha from the wrong texel
         component, so the opaque outline sampled as transparent. */
     slot->draw_desc[0x18u / 4u] = 1u;        /* main memory */
-    slot->draw_desc[0x08u / 4u] = slot->registered_key;
+    /* Only the persistent copy represents the requested song key. The backing
+     * owner stays registered under its private key so song-scene unmap cannot
+     * destroy the inner texture context while draw requests still reference it. */
+    slot->draw_desc[0x08u / 4u] = key;
     icache_flush(slot->draw_desc, sizeof slot->draw_desc);
     icache_flush((void *)(uintptr_t)slot->buf, w * h * 4u);
     __sync_synchronize();
@@ -2164,6 +2205,7 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
         ((type == 11u) ? SSN_RT_POOL_HUD :
          ((type == 12u) ? SSN_RT_POOL_TRANS : SSN_RT_POOL_LONG));
     ssn_rt_pool_slot_t *victim = NULL;
+    unsigned victim_index = 0;
     unsigned i;
 
     if (!ssn_rt_pool_mem_init())
@@ -2181,10 +2223,13 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
     for (i = 0; i < n; i++) {
         if (!pool[i].resource) {
             victim = &pool[i];
+            victim_index = i;
             break;
         }
-        if (!victim || pool[i].lru < victim->lru)
+        if (!victim || pool[i].lru < victim->lru) {
             victim = &pool[i];
+            victim_index = i;
+        }
     }
     if (!victim)
         return 0;
@@ -2197,16 +2242,19 @@ static uint32_t ssn_rt_owned_resource(uint32_t key, uint32_t type,
         uint32_t res;
         if (!ssn_rt_title_dims(type, &w, &h))
             return 0;
-        res = ssn_rt_alloc_descriptor(key, w, h);
+        uint32_t staging_key = ssn_rt_staging_key(type, victim_index);
+        res = ssn_rt_alloc_descriptor(staging_key, w, h);
         if (!res)
             return 0;
         victim->resource = res;      /* cache BEFORE upload: never re-alloc */
-        victim->registered_key = key;
+        victim->registered_key = staging_key;
         victim->game_io = *(volatile uint32_t *)(uintptr_t)(res + 0x30u);
         victim->game_buf = *(volatile uint32_t *)(uintptr_t)(res + 0x34u);
     }
-    if (!ssn_rt_slot_upload(victim, type, index))
+    if (!ssn_rt_slot_upload(victim, key, type, index)) {
+        dbg_print_hex32("[ssn] title upload failed key", key);
         return 0;
+    }
     victim->index = index;
     victim->lru = ++g_rt_pool_tick;
     return (uint32_t)(uintptr_t)victim->draw_desc;

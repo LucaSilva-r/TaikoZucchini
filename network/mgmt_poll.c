@@ -51,6 +51,12 @@
 #define MGMT_APPLIED_MAX        24
 #define MGMT_APPLIED_KVLEN      184
 #define MGMT_HEARTBEAT_SIZE     (192 * 1024)
+/* Advisory per-song package status rides its own `P` frame. It used to share
+ * the heartbeat buffer, where a large library let the rotating slice fill the
+ * buffer to the brim and every later append — including the config body — then
+ * failed, dropping the whole heartbeat and freezing the connector's inventory.
+ * Separate frames mean advisory data can never cost the authoritative one. */
+#define MGMT_PACKAGES_SIZE      (64 * 1024)
 #define MGMT_WORKSPACE_SIZE     (1024 * 1024)
 
 volatile int g_custom_song_ui_busy;
@@ -68,6 +74,7 @@ static int g_applied_count;
  * mapping toward Green's 0x021xxxxx game text and can overlap GameSongSetup. */
 static void *g_workspace;
 static char *g_heartbeat;
+static char *g_packages;
 static char (*g_poll_sel)[CUSTOM_SONG_ID_MAX];
 static int g_poll_sel_count;
 static int g_poll_sel_overflow;
@@ -87,6 +94,7 @@ static int g_blocked_seq;
 static volatile int g_reconcile_pending;
 static unsigned g_pkg_report_cursor;
 static volatile int g_heartbeat_dirty;
+static volatile int g_packages_dirty;
 
 static char (*g_active_sel)[CUSTOM_SONG_ID_MAX];
 static volatile int g_active_count;
@@ -112,6 +120,8 @@ static int ensure_workspace(void) {
     unsigned char *p = (unsigned char *)g_workspace;
     g_heartbeat = (char *)p;
     p += MGMT_HEARTBEAT_SIZE;
+    g_packages = (char *)p;
+    p += MGMT_PACKAGES_SIZE;
     g_poll_sel = (char (*)[CUSTOM_SONG_ID_MAX])p;
     p += MGMT_SEL_MAX * CUSTOM_SONG_ID_MAX;
     g_job_sel = (char (*)[CUSTOM_SONG_ID_MAX])p;
@@ -370,8 +380,12 @@ static void load_active_selection(void) {
 static int hb_append(int off, const char *s) {
     int n = snprintf(g_heartbeat + off, MGMT_HEARTBEAT_SIZE - (size_t)off,
                      "%s", s);
-    if (n < 0 || (size_t)(off + n) >= MGMT_HEARTBEAT_SIZE)
+    if (n < 0 || (size_t)(off + n) >= MGMT_HEARTBEAT_SIZE) {
+        /* snprintf already wrote a truncated tail; callers that tolerate the
+         * failure keep using `off`, so undo it. */
+        g_heartbeat[off] = 0;
         return -1;
+    }
     return off + n;
 }
 
@@ -412,8 +426,14 @@ static int build_heartbeat(void) {
     if (off < 0)
         return -1;
 
+    /* The complete inventory. A partial one is worse than none: the connector
+     * treats `have` as authoritative and drops everything absent from it, so
+     * any append failure here must fail the whole frame. `have_count` lets the
+     * receiver reject a list truncated anywhere below this (buffer, WebSocket,
+     * proxy) instead of trusting a prefix. */
     {
         int count = custom_song_library_count();
+        int have = 0;
         for (int i = 0; i < count; i++) {
             custom_song_entry_t entry;
             if (!custom_song_library_is_cached_at(i) ||
@@ -424,67 +444,13 @@ static int build_heartbeat(void) {
             off = hb_append(off, line);
             if (off < 0)
                 return -1;
+            have++;
         }
-
-        /* Installed revisions are advisory status, unlike the complete `have`
-         * inventory above. Report a rotating bounded slice so a 4096-song
-         * cabinet stays inside the original 192 KiB/1 MiB workspace footprint.
-         * Moving that allocation changes the game's subsequent fixed-address
-         * heap layout on arcade builds. */
-        if (count > 0) {
-            unsigned start = g_pkg_report_cursor % (unsigned)count;
-            unsigned visited = 0;
-            for (; visited < (unsigned)count; visited++) {
-                int i = (int)((start + visited) % (unsigned)count);
-                custom_song_entry_t entry;
-                char revision[CUSTOM_SONG_REV_MAX];
-                int n;
-                if (!custom_song_library_is_cached_at(i) ||
-                    !custom_song_library_get(i, &entry) ||
-                    !taiko_mgmt_song_active(entry.id) ||
-                    !custom_song_library_installed_revision_at(
-                        i, revision, sizeof revision))
-                    continue;
-                int job_index = sorted_index(g_job_sel, g_job_sel_count,
-                                             entry.id);
-                int blocked = job_index >= 0 && g_job_broken[job_index];
-                n = snprintf(line, sizeof line, "pkg %s %s %s%s\n",
-                             entry.id, revision,
-                             blocked ? "blocked" :
-                             (strcmp(revision, entry.rev) == 0
-                                  ? "installed" : "stale"),
-                             blocked ? " conversion_failed" : "");
-                if (n <= 0 || (size_t)n >= sizeof line)
-                    continue;
-                if ((size_t)off + (size_t)n + 1 >= MGMT_HEARTBEAT_SIZE)
-                    break;
-                memcpy(g_heartbeat + off, line, (size_t)n);
-                off += n;
-                g_heartbeat[off] = 0;
-            }
-            g_pkg_report_cursor = (start + visited) % (unsigned)count;
-        }
-    }
-
-    /* Report terminal per-song failures even when the package was never
-     * completed locally. Connector persists these cabinet-specific states and
-     * can present the exact blocked IDs instead of only a generic op_failed
-     * count. Keep this after the installed-package slice so "blocked" wins if
-     * a stale active copy of the same song also exists. */
-    for (int i = 0; i < g_job_sel_count && off >= 0; i++) {
-        custom_song_entry_t entry;
-        const char *revision = "-";
-        if (!g_job_broken[i])
-            continue;
-        int idx = custom_song_library_find_index(g_job_sel[i]);
-        if (idx >= 0 && custom_song_library_get(idx, &entry) && entry.rev[0])
-            revision = entry.rev;
-        snprintf(line, sizeof line, "pkg %s %s blocked conversion_failed\n",
-                 g_job_sel[i], revision);
+        snprintf(line, sizeof line, "have_count=%d\n", have);
         off = hb_append(off, line);
+        if (off < 0)
+            return -1;
     }
-    if (off < 0)
-        return -1;
 
     off = hb_append(off, "\n");
     if (off < 0)
@@ -494,10 +460,96 @@ static int build_heartbeat(void) {
     uint64_t got = 0;
     if (cfg_file_read(TAIKO_GLOBAL_CONFIG_PATH, cfgbuf, sizeof cfgbuf - 1,
                       &got) && got > 0) {
+        int next;
         cfgbuf[got] = 0;
-        off = hb_append(off, cfgbuf);
+        next = hb_append(off, cfgbuf);
+        if (next > 0)
+            off = next;
     }
     return off;
+}
+
+/* ------------------------- packages build --------------------------- */
+
+/* Build one `P` frame: identity plus a bounded slice of per-song installed
+ * revisions. Advisory, so a full library is reported across consecutive
+ * frames — the cursor persists and taiko_mgmt_build_packages() keeps the dirty
+ * flag set until a pass completes, which at the 250 ms outgoing tick walks a
+ * 4096-song cabinet in a couple of seconds. Returns the length, or 0 when
+ * there is nothing to say. */
+static int build_packages(void) {
+    if (!ensure_workspace())
+        return 0;
+    char line[512];
+    int off;
+    int count = custom_song_library_count();
+
+    off = snprintf(g_packages, MGMT_PACKAGES_SIZE, "P\nid=%s\n",
+                   taiko_cfg_cabinet_id());
+    if (off <= 0 || (size_t)off >= MGMT_PACKAGES_SIZE)
+        return 0;
+    int head = off;
+
+    if (count > 0) {
+        unsigned start = g_pkg_report_cursor % (unsigned)count;
+        unsigned visited = 0;
+        for (; visited < (unsigned)count; visited++) {
+            int i = (int)((start + visited) % (unsigned)count);
+            custom_song_entry_t entry;
+            char revision[CUSTOM_SONG_REV_MAX];
+            int n;
+            if (!custom_song_library_is_cached_at(i) ||
+                !custom_song_library_get(i, &entry) ||
+                !taiko_mgmt_song_active(entry.id) ||
+                !custom_song_library_installed_revision_at(
+                    i, revision, sizeof revision))
+                continue;
+            int job_index = sorted_index(g_job_sel, g_job_sel_count, entry.id);
+            int blocked = job_index >= 0 && g_job_broken[job_index];
+            n = snprintf(line, sizeof line, "pkg %s %s %s%s\n",
+                         entry.id, revision,
+                         blocked ? "blocked" :
+                         (strcmp(revision, entry.rev) == 0
+                              ? "installed" : "stale"),
+                         blocked ? " conversion_failed" : "");
+            if (n <= 0 || (size_t)n >= sizeof line)
+                continue;
+            if ((size_t)off + (size_t)n + 1 >= MGMT_PACKAGES_SIZE)
+                break;
+            memcpy(g_packages + off, line, (size_t)n);
+            off += n;
+            g_packages[off] = 0;
+        }
+        g_pkg_report_cursor = (start + visited) % (unsigned)count;
+        /* A short pass means the buffer filled: more slices to come. */
+        g_packages_dirty = visited < (unsigned)count;
+    }
+
+    /* Terminal per-song failures, reported even when the package was never
+     * completed locally, so the connector can name the blocked IDs instead of
+     * showing only a generic failure count. Last, so "blocked" wins over a
+     * stale active copy of the same song above. */
+    for (int i = 0; i < g_job_sel_count; i++) {
+        custom_song_entry_t entry;
+        const char *revision = "-";
+        int n;
+        if (!g_job_broken[i])
+            continue;
+        int idx = custom_song_library_find_index(g_job_sel[i]);
+        if (idx >= 0 && custom_song_library_get(idx, &entry) && entry.rev[0])
+            revision = entry.rev;
+        n = snprintf(line, sizeof line, "pkg %s %s blocked conversion_failed\n",
+                     g_job_sel[i], revision);
+        if (n <= 0 || (size_t)n >= sizeof line)
+            continue;
+        if ((size_t)off + (size_t)n + 1 >= MGMT_PACKAGES_SIZE)
+            break;
+        memcpy(g_packages + off, line, (size_t)n);
+        off += n;
+        g_packages[off] = 0;
+    }
+
+    return off > head ? off : 0;
 }
 
 /* ------------------------- response parse --------------------------- */
@@ -621,6 +673,7 @@ void taiko_mgmt_retry_blocked(void) {
 void taiko_mgmt_heartbeat_request(void) {
     __sync_synchronize();
     g_heartbeat_dirty = 1;
+    g_packages_dirty = 1;
 }
 
 const char *taiko_mgmt_build_heartbeat(size_t *out_len) {
@@ -649,6 +702,29 @@ const char *taiko_mgmt_build_heartbeat(size_t *out_len) {
     if (out_len)
         *out_len = (size_t)len;
     return g_heartbeat;
+}
+
+const char *taiko_mgmt_build_packages(size_t *out_len) {
+    int len;
+    if (out_len)
+        *out_len = 0;
+    if (!g_packages_dirty)
+        return NULL;
+    /* Same reason as the heartbeat: the selection worker owns library cache
+     * metadata while it runs. */
+    if (g_job_running)
+        return NULL;
+    spin_lock(&g_command_lock);
+    /* build_packages() re-arms this when its slice stopped short of a full
+     * pass, so clear before the call rather than after. */
+    g_packages_dirty = 0;
+    len = build_packages();
+    spin_unlock(&g_command_lock);
+    if (len <= 0)
+        return NULL;
+    if (out_len)
+        *out_len = (size_t)len;
+    return g_packages;
 }
 
 size_t taiko_mgmt_build_status(char *out, size_t cap) {
@@ -1029,6 +1105,11 @@ static void selection_worker(uint64_t arg) {
             custom_song_entry_t song;
             custom_song_course_entry_t courses[CUSTOM_SONG_COURSE_LIST_MAX];
             int course_count = 0;
+            /* Yield once per song. A successful prepare blocks on network I/O
+             * anyway, but the failure paths below return almost immediately,
+             * and a few hundred of those back to back keep this worker on the
+             * CPU long enough for lv2 to log "busy loop detected". */
+            sys_timer_usleep(1000);
             if (!custom_song_library_get(g_missing_index[i], &song)) {
                 g_job_broken[g_missing_job_index[i]] = 1;
                 failed++;

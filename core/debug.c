@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <sys/syscall.h>
+#include <sys/memory.h>
 
 #include "debug.h"
 #include "diag_log.h"
@@ -38,6 +39,14 @@ void dbg_print(const char *s) {
     uint32_t len = dbg_strlen(s);
     dbg_write_tty(s, len);
     diag_log_append(s, len);
+}
+
+void dbg_print_freemem(const char *tag) {
+    sys_memory_info_t info;
+    if (sys_memory_get_user_memory_size(&info) != CELL_OK)
+        return;
+    dbg_print(tag);
+    dbg_print_hex32("  mem.free", (uint32_t)info.available_user_memory);
 }
 
 static void put_hex_nibble(char **p, uint8_t n) {

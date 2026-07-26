@@ -156,6 +156,7 @@ static int ensure_mapped(void) {
     }
     g_map_mem = (void *)(uintptr_t)addr;
     memset(g_map_mem, 0, UI_MAP_SIZE);
+    dbg_print_freemem("[menu_draw] mapped 8M\n");
 
     rc = cellGcmMapMainMemory(g_map_mem, UI_MAP_SIZE, &g_map_io);
     if (rc != CELL_OK) {
