@@ -52,7 +52,8 @@ INCLUDES := -I$(CELL_SDK)/target/ppu/include \
             -I$(MBEDTLS_DIR)/include \
             -I$(MBEDTLS_DIR)/library \
             -I$(QUIRC_DIR)/lib \
-            -I$(FREETYPE_DIR)/include
+            -I$(FREETYPE_DIR)/include \
+            -Ivendor/puff
 
 # Signing target baked into the sprx: 1 = retail STD (HEN), 0 = debug (GEX).
 # build_sprx.sh compiles the sprx once per flavor.
@@ -115,6 +116,8 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            storage/usio_backup.c \
            storage/usrdir_path.c \
            storage/param_sfo_fix.c \
+           storage/dani_data_fix.c storage/zdf_blob.c \
+           vendor/puff/puff.c \
            hooks/camera_diag.c hooks/smart_stub.c hooks/bpreader_hook.c \
            hooks/chassisinfo_hook.c storage/chassisinfo_synth.c \
            storage/chassisinfo_schema.c \
@@ -146,6 +149,12 @@ ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
             patches/asm/pre_red_dani_emit_gate_hook.S
 ASM_OBJS := $(ASM_SRCS:.S=.o)
 OBJS += $(ASM_OBJS)
+
+DANI_ZDF := assets/dani/kimidori_musicinfo.zdf \
+            assets/dani/kimidori_musicmedleyinfo.zdf \
+            assets/dani/murasaki_musicmedleyinfo.zdf
+DANI_OBJS := $(DANI_ZDF:.zdf=.zdf.o)
+OBJS += $(DANI_OBJS)
 
 SPU_QR_ELF := $(BIN_DIR)/qr_spu.elf
 SPU_QR_PPU_OBJ := $(BIN_DIR)/qr_spu_elf.o
@@ -264,6 +273,11 @@ $(SPU_QR_PPU_OBJ): $(SPU_QR_ELF) | $(BIN_DIR)
 		--rename-section .data=.spu_image.$<,readonly,contents,alloc \
 		$< $@
 
+%.zdf.o: %.zdf
+	$(PPU_OBJCOPY) -I binary -O elf64-powerpc-celloslv2 -B powerpc \
+		--rename-section .data=.rodata,readonly,contents,alloc \
+		$< $@
+
 # Build mbedTLS sources with -Os to keep size down; behaviour identical
 # to the main CFLAGS otherwise. Kept separate so future flag tweaks for
 # the vendored tree don't bleed into our own code.
@@ -289,7 +303,7 @@ $(QUIRC_DIR)/lib/%.o: $(QUIRC_DIR)/lib/%.c
 
 config/runtime.o: config/runtime.c config/runtime.h config/cfg_file.h config.h core/debug.h storage/usrdir_path.h input/pad_input.h input/kb_input.h storage/chassisinfo_schema.h
 config/cfg_file.o: config/cfg_file.c config/cfg_file.h
-core/main.o:      core/main.c      config.h config/runtime.h patches/patches.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h hooks/chassisinfo_hook.h core/overlay.h network/version_check.h cards/card_picker.h
+core/main.o:      core/main.c      storage/dani_data_fix.h config.h config/runtime.h patches/patches.h core/debug.h hooks/http_hook.h hooks/dns_hook.h hooks/socket_hook.h storage/data00000_redirect.h hooks/camera_diag.h hooks/chassisinfo_hook.h core/overlay.h network/version_check.h cards/card_picker.h
 mod_menu/menu.o: mod_menu/menu.c mod_menu/menu.h config/runtime.h mod_menu/menu_font_30.h mod_menu/menu_font_42.h
 mod_menu/menu_pad.o: mod_menu/menu_pad.c mod_menu/menu_pad.h input/kb_input.h
 mod_menu/menu_actions.o: mod_menu/menu_actions.c mod_menu/menu_actions.h config/runtime.h
@@ -321,6 +335,8 @@ hooks/chassisinfo_hook.o: hooks/chassisinfo_hook.c hooks/chassisinfo_hook.h stor
 core/game_version.o: core/game_version.c core/game_version.h core/debug.h
 storage/chassisinfo_synth.o: storage/chassisinfo_synth.c storage/chassisinfo_synth.h storage/chassisinfo_schema.h config.h config/runtime.h core/debug.h
 storage/chassisinfo_schema.o: storage/chassisinfo_schema.c storage/chassisinfo_schema.h
+storage/dani_data_fix.o: storage/dani_data_fix.c storage/dani_data_fix.h storage/zdf_blob.h config/runtime.h core/debug.h core/game_version.h storage/usrdir_path.h
+storage/zdf_blob.o: storage/zdf_blob.c storage/zdf_blob.h vendor/puff/puff.h
 patches/patches.o:   patches/patches.c   config.h config/runtime.h patches/patches.h patches/song_loader_patch.h core/icache.h core/debug.h storage/usrdir_path.h
 patches/patch_resolver.o: patches/patch_resolver.c patches/patch_resolver.h patches/patch_target.h
 patches/song_loader_patch.o: patches/song_loader_patch.c patches/song_loader_patch.h patches/patch_resolver.h song_loader_manifest.h core/debug.h
@@ -354,11 +370,11 @@ install: $(SPRX)
 	@echo "installed -> $(RPCS3_PLUGIN_DIR)/zucchini.sprx"
 
 clean:
-	rm -f $(OBJS) $(ASM_OBJS) $(DEPS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(ASM_OBJS) $(DANI_OBJS) $(DEPS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 	$(MAKE) -C bootstrap_eboot clean
 	$(MAKE) -C ftp_eboot clean
 
 clean-prx:
-	rm -f $(OBJS) $(ASM_OBJS) $(DEPS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
+	rm -f $(OBJS) $(ASM_OBJS) $(DANI_OBJS) $(DEPS) $(SPU_QR_OBJS) $(SPU_QR_ELF) $(SYM) $(PRX) $(SPRX)
 
 .PHONY: all bootstrap ftp-eboot clean clean-prx install

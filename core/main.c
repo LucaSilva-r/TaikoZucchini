@@ -35,6 +35,7 @@
 #include "usrdir_path.h"
 #include "eboot_fpt.h"
 #include "param_sfo_fix.h"
+#include "dani_data_fix.h"
 #include "eboot_flow.h"
 #include "patch_ui.h"
 #include "overlay.h"
@@ -828,6 +829,10 @@ int taiko_start(unsigned int args, void *argp) {
     /* Load config first so feature gates below see runtime values. Falls
      * back to compile-time defaults if USRDIR isn't resolvable yet. */
     taiko_cfg_init();
+
+    /* Repair the Kimidori/Murasaki Dani data files before anything can read
+     * them. Idempotent: rewrites only what differs from the embedded copies. */
+    dani_data_fix_apply();
 
     /* Operator pre-patch override: if START+SELECT is held during boot,
      * open the mod-config menu before the hash-check / patch flow so

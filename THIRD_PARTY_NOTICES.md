@@ -8,6 +8,9 @@ This repository includes third-party open source components:
 - quirc in `vendor/quirc/`
   - License: ISC
   - License text: `vendor/quirc/LICENSE`
+- puff in `vendor/puff/` (zlib contrib, unmodified)
+  - Copyright: Mark Adler
+  - License: zlib (notice at the top of `vendor/puff/puff.c`)
 - Roboto Medium in `fonts/Roboto-Medium.ttf`
   - Copyright: Google
   - License: Apache-2.0
