@@ -865,6 +865,7 @@ int taiko_start(unsigned int args, void *argp) {
     menu_maybe_open();
     dbg_print("[patch] DATA00000 runtime hook marker\n");
     apply_runtime_data00000_patch();
+    patches_apply_dani_dojo_live_fallback();
     int repatch_rc = maybe_repatch_from_original();
     if (repatch_rc > 0) {
         /* menu_action_reboot_game now exits to XMB (exitspawn2 crashes the

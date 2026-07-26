@@ -38,3 +38,10 @@ Thumbs.db
 .idea/
 *.swp
 *~
+
+# Local runtime scratch
+/run/
+/runs/
+/tmp/
+/.codex-tmp/
+/cache/
