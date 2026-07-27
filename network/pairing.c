@@ -237,14 +237,37 @@ static void apply_response(const pairing_response_t *response) {
     }
 }
 
+/* Bit per precondition, so a closed window says *which* one is closing it.
+ * Logged once per change — silent while the answer stays the same. */
+enum {
+    PAIRING_BLOCK_CFG       = 1u << 0,
+    PAIRING_BLOCK_USIO      = 1u << 1,
+    PAIRING_BLOCK_READER    = 1u << 2,
+    PAIRING_BLOCK_NOT_LED   = 1u << 3,
+    PAIRING_BLOCK_STATE     = 1u << 4,
+    PAIRING_BLOCK_ONLINE    = 1u << 5,
+};
+
 static int pairing_window_open(void) {
-    taiko_game_state_t state = taiko_game_state_current();
-    return g_cfg.six_pin_login &&
-           g_cfg.usio_emulation &&
-           bpreader_serial_reader_enabled() &&
-           bpreader_hook_reader_accepting_card() &&
-           (state == TAIKO_GAME_STATE_ATTRACT || state == TAIKO_GAME_STATE_SHOP) &&
-           taiko_game_online_allows_card_input();
+    static uint32_t last_blocked = 0xFFFFFFFFu;
+    uint32_t blocked = 0;
+
+    if (!g_cfg.six_pin_login)                     blocked |= PAIRING_BLOCK_CFG;
+    if (!g_cfg.usio_emulation)                    blocked |= PAIRING_BLOCK_USIO;
+    if (!bpreader_serial_reader_enabled())        blocked |= PAIRING_BLOCK_READER;
+    if (!bpreader_hook_reader_accepting_card())   blocked |= PAIRING_BLOCK_NOT_LED;
+    /* UNKNOWN is "no state signal", not "wrong scene" — pre-Murasaki builds
+     * load assets through std::ifstream and never hit the cellFsOpen hook the
+     * classifier feeds on, so their state never leaves UNKNOWN. */
+    if (!taiko_game_state_overlay_visible(TAIKO_GAME_STATE_SHOP))
+        blocked |= PAIRING_BLOCK_STATE;
+    if (!taiko_game_online_allows_card_input())   blocked |= PAIRING_BLOCK_ONLINE;
+
+    if (blocked != last_blocked) {
+        dbg_print_hex32("[pairing] window blocked-by", blocked);
+        last_blocked = blocked;
+    }
+    return blocked == 0;
 }
 
 static void pairing_thread_entry(uint64_t arg) {
