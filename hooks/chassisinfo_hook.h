@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 
+#include "chassisinfo_synth.h"
+
 #define TAIKO_CHASSISINFO_VIRT_FD 0x7AC0FF01
 
 /* Synthesize chassisinfo.xml in memory and serve it via FPT-published
@@ -29,5 +31,11 @@ void chassisinfo_rewrite_root_file(void);
  * and returns 1. Otherwise returns 0 and the caller continues with its
  * own logic. */
 int chassisinfo_synth_try_open(const char *path, int *out_fd);
+
+/* Shape of the chassisinfo.xml this build ships, or NULL if it ships
+ * none. The field list is the only trustworthy statement of which
+ * operator flags this build understands, so the mod menu offers exactly
+ * these and nothing when there is no file. Result is cached. */
+const chassisinfo_template_t *chassisinfo_build_template(void);
 
 #endif

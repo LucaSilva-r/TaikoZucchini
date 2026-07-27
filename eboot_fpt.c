@@ -230,6 +230,17 @@ uint32_t taiko_fpt_version_seen(void) {
     return t ? t->version : 0;
 }
 
+const char *taiko_fpt_game_build_id(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 11u || !t->game_build_id[0])
+        return NULL;
+    /* Refuse an unterminated cell rather than hand out a runaway string. */
+    for (unsigned i = 0; i < TAIKO_FPT_BUILD_ID_BYTES; i++)
+        if (!t->game_build_id[i])
+            return t->game_build_id;
+    return NULL;
+}
+
 const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void) {
     taiko_fpt_t *t = get_fpt();
     const taiko_song_loader_manifest_t *m;

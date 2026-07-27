@@ -22,4 +22,9 @@ const char *taiko_game_version_code(void);
  * known. Mapping is computed from the version code at first call. */
 const char *taiko_game_chassisinfo_dir(void);
 
+/* Full build id as the game prints it on its boot-check screen
+ * ("ST8100-7-NA-MPR0-A06"), or NULL when the running EBOOT predates the
+ * FPT field. Includes the minor revision the dir/code forms drop. */
+const char *taiko_game_build_id(void);
+
 #endif

@@ -6,7 +6,10 @@
 #include "song_loader_manifest.h"
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 10u          /* v10: game online-ready predicate OPD */
+#define TAIKO_FPT_VERSION 11u          /* v11: game build id scanned from the EBOOT */
+
+/* "S11113-1-NA-MPR0-N02" is 20 chars; 24 leaves room + alignment. */
+#define TAIKO_FPT_BUILD_ID_BYTES 24u
 #define TAIKO_FPT_V1_SLOT_COUNT 64u
 
 /* 12 digits stored UTF-16BE (00,'2',00,'6',...) = 24 bytes. Matches the
@@ -115,6 +118,11 @@ typedef struct {
      * The patcher resolves this structurally per EBOOT; zero means the
      * predicate shape was not recognized and runtime keeps the legacy gate. */
     uint32_t game_online_ready_opd;
+    /* v11: the build id the game prints on its own boot-check screen
+     * ("ST8100-7-NA-MPR0-A06"), scanned out of the EBOOT at patch time.
+     * This is the game's own statement of what it is, unlike PARAM.SFO,
+     * which is repack-editable metadata. Empty if the scan found nothing. */
+    char     game_build_id[TAIKO_FPT_BUILD_ID_BYTES];
 } taiko_fpt_t;
 
 /* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
@@ -130,6 +138,9 @@ uintptr_t taiko_fpt_slot_value(uint32_t slot);
 uintptr_t taiko_fpt_song_select_scene(void);
 uintptr_t taiko_fpt_table_address(void);
 uint32_t taiko_fpt_version_seen(void);
+/* Build id the patcher scanned out of this EBOOT ("ST8100-7-NA-MPR0-A06"),
+ * or NULL on pre-v11 tables / a failed scan. */
+const char *taiko_fpt_game_build_id(void);
 int taiko_fpt_available(void);
 const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void);
 /* Publish the v9 songselect hook cells. Return 0 (and do nothing) on tables

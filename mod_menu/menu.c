@@ -28,6 +28,8 @@
 #include "custom_song_launcher.h"
 #include "config/version.h"
 #include "storage/chassisinfo_schema.h"
+#include "hooks/chassisinfo_hook.h"
+#include "eboot_fpt.h"
 #include "game_version.h"
 #include "game_state.h"
 #include "overlay.h"
@@ -372,9 +374,11 @@ static int g_sel = 1;          /* skip first section header */
 static int g_scroll = 0;
 static const char *g_status = NULL;
 
-/* Visibility mask for chassisinfo flags: 1 if the field is in the
- * detected build's schema, 0 if it's a flag from a different build
- * that doesn't apply here. Filled lazily on first menu open. */
+/* Visibility mask for chassisinfo flags: 1 if the build's own
+ * chassisinfo.xml carries the field. A build that ships no such file
+ * gets no chassis rows at all — we would only be guessing which flags
+ * its boost reader accepts, and guessing wrong is what made Red's
+ * deserialize fail. Filled lazily on first menu open. */
 static uint8_t g_chassis_visible[TAIKO_CHASSIS_FLAG_COUNT];
 static int     g_chassis_visible_ready;
 
@@ -382,16 +386,11 @@ static void compute_chassis_visibility(void) {
     if (g_chassis_visible_ready) return;
     g_chassis_visible_ready = 1;
     memset(g_chassis_visible, 0, sizeof g_chassis_visible);
-    const char *dir = taiko_game_chassisinfo_dir();
-    const chassisinfo_schema_t *s = chassisinfo_schema_for_dir(dir);
-    if (!s) {
-        /* Unknown build → show everything so the operator can still
-         * edit the cfg, even if the synth won't emit a given flag. */
-        memset(g_chassis_visible, 1, sizeof g_chassis_visible);
+    const chassisinfo_template_t *t = chassisinfo_build_template();
+    if (!t)
         return;
-    }
-    for (uint8_t i = 0; i < s->field_count; i++) {
-        uint8_t id = s->field_ids[i];
+    for (uint8_t i = 0; i < t->field_count; i++) {
+        uint8_t id = t->field_ids[i];
         if (id < TAIKO_CHASSIS_FLAG_COUNT)
             g_chassis_visible[id] = 1;
     }
@@ -486,17 +485,43 @@ static int item_is_chassis(int idx) {
     return f >= F_CHASSIS_BASE && f <= F_CHASSIS_LAST;
 }
 
+/* The patcher only reports INJECTION once it has structurally resolved
+ * every site the injector writes through, so this is the build's own
+ * answer to "can songs be injected here" — no per-version table to keep
+ * in step. Green and Blue resolve it today; everything else reports 0. */
+static int song_injection_supported(void) {
+    const taiko_song_loader_manifest_t *m = taiko_fpt_song_loader_manifest();
+    return m && (m->capabilities & TAIKO_SONG_CAP_INJECTION);
+}
+
 static int item_visible(int idx) {
+    if (g_items[idx].kind == ITEM_TOGGLE &&
+        g_items[idx].field == F_CUSTOM_SONG_INJECTOR)
+        return song_injection_supported();
     if (!item_is_chassis(idx)) return 1;
     int cf = g_items[idx].field - F_CHASSIS_BASE;
     compute_chassis_visibility();
     return g_chassis_visible[cf];
 }
 
+/* A section whose every row is hidden is just a stray heading. */
+static int section_has_rows(int section_idx) {
+    for (int i = section_idx + 1; i < ITEM_COUNT; i++) {
+        if (g_items[i].kind == ITEM_SECTION) return 0;
+        if (item_visible(i)) return 1;
+    }
+    return 0;
+}
+
 static void rebuild_view(void) {
     g_view_count = 0;
     for (int i = 0; i < ITEM_COUNT && g_view_count < ITEM_COUNT_MAX; i++) {
-        if (g_items[i].kind == ITEM_SECTION || item_visible(i))
+        if (g_items[i].kind == ITEM_SECTION) {
+            if (section_has_rows(i))
+                g_view_idx[g_view_count++] = i;
+            continue;
+        }
+        if (item_visible(i))
             g_view_idx[g_view_count++] = i;
     }
     g_view_ready = 1;
@@ -545,6 +570,14 @@ static void draw_frame(void) {
         uint32_t c = ftp_server_is_running() ? COLOR_ON : COLOR_DIM;
         menu_draw_text(&menu_font_30_font,
                        LIST_X + LIST_W - tw, 60, c, ftp_line);
+    }
+    {
+        /* The game's own boot-check build id, so the operator can tell at a
+         * glance which build the mod detected. */
+        const char *build = taiko_game_build_id();
+        if (!build) build = taiko_game_version_code();
+        if (build)
+            menu_draw_text(&menu_font_30_font, 120, 100, COLOR_DIM, build);
     }
     menu_draw_rect(120, 117, 1680, 3, COLOR_BORDER);
 
@@ -1537,7 +1570,8 @@ static int main_row_selectable(int code) {
         return 0;
     if (code >= MAIN_CARD_BASE && !card_picker_can_present())
         return 0;
-    if (code == MAIN_SONGS && !g_cfg.custom_song_injector)
+    if (code == MAIN_SONGS &&
+        (!g_cfg.custom_song_injector || !song_injection_supported()))
         return 0;
     if (code == MAIN_SONGS && taiko_mgmt_operation_active())
         return 0;
@@ -1596,6 +1630,8 @@ static const char *main_row_desc(int code) {
     case MAIN_CARDS:
         return "Pick, create, or scan a saved card for the current card prompt.";
     case MAIN_SONGS:
+        if (!song_injection_supported())
+            return "This game build has no song injection support.";
         return g_cfg.custom_song_injector
             ? "Browse and download custom songs from the configured Connector service."
             : "Disabled by the Custom song injector setting under Core.";
@@ -1654,6 +1690,10 @@ static void main_render(const int *rows, int count, int sel) {
             values[i] = "can't swipe BanaPass now";
             kinds[i] = TAIKO_OVL_ROW_DISABLED;
         }
+        else if (rows[i] == MAIN_SONGS && !song_injection_supported()) {
+            values[i] = "unsupported on this version";
+            kinds[i] = TAIKO_OVL_ROW_DISABLED;
+        }
         else if (rows[i] == MAIN_SONGS && !g_cfg.custom_song_injector) {
             values[i] = "disabled";
             kinds[i] = TAIKO_OVL_ROW_DISABLED;
@@ -1673,8 +1713,16 @@ static void main_render(const int *rows, int count, int sel) {
             kinds[i] = TAIKO_OVL_ROW_NORMAL;
     }
 
-    char title[64];
-    snprintf(title, sizeof title, "Taiko Zucchini %s", TAIKO_MOD_VERSION);
+    /* Build id as the game itself prints it on its boot-check screen; falls
+     * back to the title code on EBOOTs patched before the FPT carried it. */
+    char title[96];
+    const char *build = taiko_game_build_id();
+    if (!build) build = taiko_game_version_code();
+    if (build)
+        snprintf(title, sizeof title, "Taiko Zucchini %s  -  %s",
+                 TAIKO_MOD_VERSION, build);
+    else
+        snprintf(title, sizeof title, "Taiko Zucchini %s", TAIKO_MOD_VERSION);
 
     const char *desc = rows[sel] == MAIN_OPS
         ? ops_desc : main_row_desc(rows[sel]);

@@ -99,6 +99,18 @@ static const uint8_t order_st8100_1[] = {
 /* ST9100-1 is identical to ST8100-1 in shipped XML. */
 #define order_st9100_1 order_st8100_1
 
+/* Red's ST8100-7: ST8100-1's list without anytime_dani/force_dani.
+ * Verified against RED/USRDIR/data/config/ST8100-7/chassisinfo.xml. */
+static const uint8_t order_st8100_7[] = {
+    CI_F_IS_PROMOTION, CI_F_FORCE_OFFLINE, CI_F_FORCE_FREEPLAY,
+    CI_F_FORCE_AUTOPLAY, CI_F_FORCE_SERIOUS,
+    CI_F_FORCE_MUSICINFO_ALLRELEASE, CI_F_FORCE_BURST_MODE,
+    CI_F_IGNORE_NETWORK_AUTHENTICATION, CI_F_IGNORE_NETWORK_CONNECTION,
+    CI_F_IGNORE_CLOSETIME, CI_F_IGNORE_NBLINEPOINT,
+    CI_F_IGNORE_MUCHA_INVALID_ENFORCED,
+    CI_F_DISABLE_COUNTDOWNTIMER, CI_F_ANYTIME_TOKKUN,
+};
+
 static const uint8_t order_s10100_1[] = {
     CI_F_IS_PROMOTION, CI_F_FORCE_OFFLINE, CI_F_FORCE_FREEPLAY,
     CI_F_FORCE_AUTOPLAY, CI_F_FORCE_SERIOUS,
@@ -139,9 +151,7 @@ static const chassisinfo_schema_t g_schemas[] = {
     { "ST6100-1", 0x20140107, order_st6100_1, COUNT_OF(order_st6100_1), "disable_songselect_countdown" },
     { "ST7100-1", 0x20150212, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
     { "ST8100-1", 0x20160809, order_st8100_1, COUNT_OF(order_st8100_1), "disable_countdowntimer" },
-    /* ST8100-7 (Red, title-code ST87) ships the same chassisinfo
-     * schema as ST7100-1, despite the ST8100 directory name. */
-    { "ST8100-7", 0x20150212, order_st7100_1, COUNT_OF(order_st7100_1), "disable_countdowntimer" },
+    { "ST8100-7", 0x20160407, order_st8100_7, COUNT_OF(order_st8100_7), "disable_countdowntimer" },
     { "ST9100-1", 0x20160809, order_st9100_1, COUNT_OF(order_st9100_1), "disable_countdowntimer" },
     { "S10100-1", 0x20180914, order_s10100_1, COUNT_OF(order_s10100_1), "disable_countdowntimer" },
     { "S11100-1", 0x20190415, order_s11100_1, COUNT_OF(order_s11100_1), "disable_countdowntimer" },
@@ -157,6 +167,29 @@ const chassisinfo_schema_t *chassisinfo_schema_for_dir(const char *dir) {
 const char *chassisinfo_field_name(int field_id) {
     if (field_id < 0 || field_id >= CI_F__COUNT) return NULL;
     return FIELD_NAMES[field_id];
+}
+
+static int name_equals(const char *a, size_t a_len, const char *b) {
+    if (!a || !b) return 0;
+    size_t i = 0;
+    for (; i < a_len; i++) {
+        if (!b[i] || a[i] != b[i]) return 0;
+    }
+    return b[i] == '\0';
+}
+
+int chassisinfo_field_id_by_name(const char *name, size_t len) {
+    if (!name || len == 0) return -1;
+    /* Both spellings are the same operator concept; see CI_F_DISABLE_
+     * COUNTDOWNTIMER in the header. */
+    if (name_equals(name, len, "disable_countdowntimer") ||
+        name_equals(name, len, "disable_songselect_countdown"))
+        return CI_F_DISABLE_COUNTDOWNTIMER;
+    for (int id = 0; id < CI_F__COUNT; id++) {
+        if (id == CI_F_DISABLE_COUNTDOWNTIMER) continue;
+        if (name_equals(name, len, FIELD_NAMES[id])) return id;
+    }
+    return -1;
 }
 
 unsigned chassisinfo_schema_count(void) {

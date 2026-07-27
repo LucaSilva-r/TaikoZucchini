@@ -53,6 +53,15 @@ void chassisinfo_template_defaults(chassisinfo_template_t *out,
               " class_id=\"1\" tracking_level=\"0\" version=\"0\"");
     out->info_attrs[0] = '\0';
     out->header_version = schema ? schema->header_version : 0;
+
+    if (schema && schema->field_ids && schema->field_count) {
+        uint8_t n = schema->field_count;
+        if (n > CI_F__COUNT) n = CI_F__COUNT;
+        memcpy(out->field_ids, schema->field_ids, n);
+        out->field_count = n;
+        copy_cstr(out->countdown_name, sizeof(out->countdown_name),
+                  schema->countdown_name);
+    }
 }
 
 static const char *find_token(const char *xml, size_t len,
@@ -143,6 +152,58 @@ static int parse_u32_decimal(const char *p, const char *end, uint32_t *out) {
     return 1;
 }
 
+/* Read the element sequence of the first <Info> block. Only a complete
+ * translation is accepted: one unrecognised element and we keep the
+ * schema's order, because emitting a document with a field dropped is
+ * exactly the failure this is here to prevent. */
+static void parse_info_field_order(chassisinfo_template_t *out,
+                                   const char *info, size_t len) {
+    const char *end = find_token(info, len, "</Info>");
+    if (!end) return;
+
+    uint8_t ids[CI_F__COUNT];
+    uint8_t seen[CI_F__COUNT];
+    uint8_t count = 0;
+    char countdown[sizeof(out->countdown_name)];
+    countdown[0] = '\0';
+    memset(seen, 0, sizeof seen);
+
+    const char *p = info;
+    while (*p != '>' && p < end) p++;   /* past the <Info ...> tag itself */
+
+    while (p < end) {
+        while (p < end && *p != '<') p++;
+        if (p >= end || p[1] == '/') { p++; continue; }
+        const char *name = p + 1;
+        const char *name_end = name;
+        while (name_end < end && *name_end != '>' && *name_end != ' ')
+            name_end++;
+        if (name_end >= end || *name_end != '>') return;
+        size_t name_len = (size_t)(name_end - name);
+        p = name_end + 1;
+
+        if (name_len == 6 && memcmp(name, "serial", 6) == 0)
+            continue;
+
+        int id = chassisinfo_field_id_by_name(name, name_len);
+        if (id < 0 || count >= CI_F__COUNT || seen[id])
+            return;
+        if (id == CI_F_DISABLE_COUNTDOWNTIMER) {
+            if (name_len >= sizeof countdown) return;
+            memcpy(countdown, name, name_len);
+            countdown[name_len] = '\0';
+        }
+        seen[id] = 1;
+        ids[count++] = (uint8_t)id;
+    }
+
+    if (count == 0) return;
+    memcpy(out->field_ids, ids, count);
+    out->field_count = count;
+    if (countdown[0])
+        copy_cstr(out->countdown_name, sizeof(out->countdown_name), countdown);
+}
+
 int chassisinfo_template_parse(chassisinfo_template_t *out,
                                const char *xml, size_t len) {
     if (!out || !xml || len == 0) return 0;
@@ -184,6 +245,7 @@ int chassisinfo_template_parse(chassisinfo_template_t *out,
     if (info) {
         copy_attr_span(out->info_attrs, sizeof(out->info_attrs),
                        info, "Info");
+        parse_info_field_order(out, info, len - (size_t)(info - xml));
         parsed = 1;
     }
 
@@ -449,10 +511,23 @@ size_t chassisinfo_synth_build_with_template(
     p = append(buf, cap, p, f->serial);
     p = append(buf, cap, p, "</serial>\n");
 
-    for (uint8_t i = 0; i < schema->field_count; i++) {
-        uint8_t id = schema->field_ids[i];
+    /* Template order wins when the build shipped a chassisinfo.xml we
+     * could read; the schema table is the fallback for builds that
+     * don't ship one. */
+    const uint8_t *order = schema->field_ids;
+    uint8_t order_count = schema->field_count;
+    const char *countdown = schema->countdown_name;
+    if (tmpl->field_count) {
+        order = tmpl->field_ids;
+        order_count = tmpl->field_count;
+        if (tmpl->countdown_name[0])
+            countdown = tmpl->countdown_name;
+    }
+
+    for (uint8_t i = 0; i < order_count; i++) {
+        uint8_t id = order[i];
         const char *name = (id == CI_F_DISABLE_COUNTDOWNTIMER)
-            ? schema->countdown_name
+            ? countdown
             : chassisinfo_field_name(id);
         if (!name) continue;
         p = emit_field(buf, cap, p, name, f->flags[id]);

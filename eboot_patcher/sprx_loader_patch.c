@@ -206,6 +206,66 @@ static const fpt_stub_fnid_t FPT_STUB_FNIDS[] = {
     { 0xad218fafu, TAIKO_FPT_NP_DRM_AVAIL }, /* sceNpDrmIsAvailable */
 };
 
+static int ascii_digit(uint8_t c) { return c >= '0' && c <= '9'; }
+static int ascii_upper(uint8_t c) { return c >= 'A' && c <= 'Z'; }
+
+/* The build id the game prints on its boot-check screen, e.g.
+ * "ST8100-7-NA-MPR0-A06" or "S11113-1-NA-MPR0-N02". Every build embeds
+ * exactly one, which makes it the game's own unambiguous identity —
+ * PARAM.SFO's TITLE code is metadata a repack can get wrong.
+ *
+ * Grammar: ('S'|"ST") <4-5 digits> '-' <digit> '-' 2 upper '-'
+ *          4 alnum-upper '-' upper 2 digits, on a word boundary. */
+static int scan_game_build_id(const self_ctx_t *ctx, char *out, size_t cap) {
+    if (!ctx || !ctx->buf || cap < TAIKO_FPT_BUILD_ID_BYTES)
+        return 0;
+
+    for (size_t i = 0; i + 24 <= ctx->buf_len; i++) {
+        const uint8_t *p = ctx->buf + i;
+        if (p[0] != 'S')
+            continue;
+        if (i > 0) {
+            uint8_t b = ctx->buf[i - 1];
+            if (ascii_digit(b) || ascii_upper(b) ||
+                (b >= 'a' && b <= 'z'))
+                continue;
+        }
+
+        size_t n = (p[1] == 'T') ? 2 : 1;
+        size_t digits = 0;
+        while (ascii_digit(p[n + digits]))
+            digits++;
+        if (digits < 4 || digits > 5)
+            continue;
+        n += digits;
+
+        if (p[n] != '-' || !ascii_digit(p[n + 1]) || p[n + 2] != '-')
+            continue;
+        n += 3;
+        if (!ascii_upper(p[n]) || !ascii_upper(p[n + 1]) || p[n + 2] != '-')
+            continue;
+        n += 3;
+        for (int k = 0; k < 4; k++)
+            if (!ascii_upper(p[n + k]) && !ascii_digit(p[n + k]))
+                goto next;
+        n += 4;
+        if (p[n] != '-' || !ascii_upper(p[n + 1]) ||
+            !ascii_digit(p[n + 2]) || !ascii_digit(p[n + 3]))
+            continue;
+        n += 4;
+        if (n >= cap)
+            continue;
+
+        memset(out, 0, cap);
+        memcpy(out, p, n);
+        out[n] = '\0';
+        return 1;
+    next:
+        continue;
+    }
+    return 0;
+}
+
 static int import_stub_matches_buf(const uint8_t *p) {
     if (load_be32(p + 0) != 0x39800000u)
         return 0;
@@ -1345,6 +1405,19 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
         if (song)
             memcpy(ctx->buf + fpt_off + offsetof(taiko_fpt_t, song_loader),
                    song, sizeof(*song));
+    }
+
+    {
+        char build_id[TAIKO_FPT_BUILD_ID_BYTES];
+        if (scan_game_build_id(ctx, build_id, sizeof build_id)) {
+            memcpy(ctx->buf + fpt_off + offsetof(taiko_fpt_t, game_build_id),
+                   build_id, sizeof build_id);
+            dbg_print("[patch] game build id=");
+            dbg_print(build_id);
+            dbg_print("\n");
+        } else {
+            dbg_print("[patch] game build id not found in EBOOT\n");
+        }
     }
 
     uint32_t game_local_alloc_opd = 0;

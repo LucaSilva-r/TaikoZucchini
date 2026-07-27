@@ -191,6 +191,33 @@ static int load_template_from_path(const char *path,
     return 1;
 }
 
+/* The two places a build keeps its chassisinfo.xml. */
+static int load_shipped_template(const char *dir,
+                                 chassisinfo_template_t *tmpl) {
+    char resolved[384];
+    if (usrdir_resolve_path("data/chassisinfo.xml",
+                            resolved, sizeof resolved) &&
+        load_template_from_path(resolved, tmpl))
+        return 1;
+
+    if (!dir)
+        return 0;
+
+    char tail[128];
+    static const char prefix[] = "data/config/";
+    static const char suffix[] = "/chassisinfo.xml";
+    size_t pos = 0;
+    for (size_t i = 0; prefix[i] && pos + 1 < sizeof tail; i++)
+        tail[pos++] = prefix[i];
+    for (size_t i = 0; dir[i] && pos + 1 < sizeof tail; i++)
+        tail[pos++] = dir[i];
+    for (size_t i = 0; suffix[i] && pos + 1 < sizeof tail; i++)
+        tail[pos++] = suffix[i];
+    tail[pos] = '\0';
+    return usrdir_resolve_path(tail, resolved, sizeof resolved) &&
+           load_template_from_path(resolved, tmpl);
+}
+
 static void load_template(const char *path, const char *dir,
                           const chassisinfo_schema_t *schema,
                           chassisinfo_template_t *tmpl) {
@@ -199,27 +226,28 @@ static void load_template(const char *path, const char *dir,
     if (load_template_from_path(path, tmpl))
         return;
 
-    char resolved[384];
-    if (usrdir_resolve_path("data/chassisinfo.xml",
-                            resolved, sizeof resolved) &&
-        load_template_from_path(resolved, tmpl))
-        return;
+    (void)load_shipped_template(dir, tmpl);
+}
 
-    if (dir) {
-        char tail[128];
-        static const char prefix[] = "data/config/";
-        static const char suffix[] = "/chassisinfo.xml";
-        size_t pos = 0;
-        for (size_t i = 0; prefix[i] && pos + 1 < sizeof tail; i++)
-            tail[pos++] = prefix[i];
-        for (size_t i = 0; dir[i] && pos + 1 < sizeof tail; i++)
-            tail[pos++] = dir[i];
-        for (size_t i = 0; suffix[i] && pos + 1 < sizeof tail; i++)
-            tail[pos++] = suffix[i];
-        tail[pos] = '\0';
-        if (usrdir_resolve_path(tail, resolved, sizeof resolved))
-            (void)load_template_from_path(resolved, tmpl);
+static chassisinfo_template_t g_build_tmpl;
+static int g_build_tmpl_state;   /* 0 = unresolved, 1 = found, -1 = none */
+
+const chassisinfo_template_t *chassisinfo_build_template(void) {
+    if (g_build_tmpl_state)
+        return g_build_tmpl_state > 0 ? &g_build_tmpl : NULL;
+
+    /* No schema seed: field_count stays 0 unless a real file supplied
+     * the order, which is what makes "ships none" detectable. */
+    chassisinfo_template_defaults(&g_build_tmpl, NULL);
+    if (load_shipped_template(taiko_game_chassisinfo_dir(), &g_build_tmpl) &&
+        g_build_tmpl.field_count) {
+        g_build_tmpl_state = 1;
+        return &g_build_tmpl;
     }
+
+    dbg_print("[chassis] build ships no chassisinfo.xml\n");
+    g_build_tmpl_state = -1;
+    return NULL;
 }
 
 int chassisinfo_synth_try_open(const char *path, int *out_fd) {

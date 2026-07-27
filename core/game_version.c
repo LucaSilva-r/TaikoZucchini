@@ -1,4 +1,10 @@
-/* Detect the Taiko build from PARAM.SFO. The TITLE field looks like
+/* Detect the Taiko build. Primary source is the build id the game prints
+ * on its own boot-check screen ("ST8100-7-NA-MPR0-A06"), which the patcher
+ * scans out of the EBOOT and parks in the FPT — the game's own statement
+ * of what it is. PARAM.SFO is the fallback for EBOOTs patched before the
+ * FPT carried the field; it self-heals on the next repatch.
+ *
+ * Fallback: the TITLE field looks like
  * "Taiko no Tatsujin(S111)" / "(ST87)" / "(ST91)" — the parenthesized
  * code is the build identifier. Mapping to the chassisinfo config
  * folder splits the code into <prefix><N><M>:
@@ -26,6 +32,7 @@
 #include <cell/fs/cell_fs_errno.h>
 
 #include "debug.h"
+#include "eboot_fpt.h"
 #include "storage/usrdir_path.h"
 
 static char g_version_code[8];   /* "S111" or "ST87" + NUL */
@@ -166,8 +173,67 @@ static int derive_paramsfo_path(const char *usrdir, char *out, size_t cap) {
     return 1;
 }
 
+/* Split the build id's leading segment ("ST8100-7", "S11113-1") into the
+ * config-dir form and the four-char title code.
+ *
+ * Layout is <prefix><series>1<minor>-<variant>: a literal '1' then a
+ * two-digit minor revision. Green ships S11113-1 — series 11, minor 13 —
+ * and reads its config from S11100-1, so the dir is the same string with
+ * the minor zeroed. The title code drops the middle entirely:
+ * ST8100-7 -> ST87, S11113-1 -> S111. */
+static int split_build_id(const char *id) {
+    size_t p = (id[0] == 'S' && id[1] == 'T') ? 2 : 1;
+    size_t d = p;
+    while (id[d] >= '0' && id[d] <= '9') d++;
+    size_t digits = d - p;
+    if (digits < 4 || id[d] != '-') return 0;
+    size_t series = digits - 3;
+    if (id[p + series] != '1') return 0;      /* the literal in <series>1<minor> */
+    char variant = id[d + 1];
+    if (variant < '0' || variant > '9') return 0;
+    if (p + series + 5 > sizeof g_dir) return 0;
+    if (p + series + 2 > sizeof g_version_code) return 0;
+
+    memcpy(g_dir, id, p + series);
+    g_dir[p + series + 0] = '1';
+    g_dir[p + series + 1] = '0';
+    g_dir[p + series + 2] = '0';
+    g_dir[p + series + 3] = '-';
+    g_dir[p + series + 4] = variant;
+    g_dir[p + series + 5] = '\0';
+
+    memcpy(g_version_code, id, p + series);
+    g_version_code[p + series] = variant;
+    g_version_code[p + series + 1] = '\0';
+    return 1;
+}
+
+/* The build id the game prints on its own boot-check screen, baked into
+ * the FPT at patch time. Preferred over PARAM.SFO, which is metadata a
+ * repack can get wrong. */
+static int scan_from_fpt(void) {
+    const char *id = taiko_fpt_game_build_id();
+    if (!id || !id[0]) return 0;
+    if (!split_build_id(id)) {
+        g_dir[0] = '\0';
+        g_version_code[0] = '\0';
+        return 0;
+    }
+    dbg_print("[gamever] build=");
+    dbg_print(id);
+    dbg_print(" dir=");
+    dbg_print(g_dir);
+    dbg_print("\n");
+    return 1;
+}
+
 static void scan_once(void) {
     if (g_scanned && g_version_code[0]) return;
+
+    if (scan_from_fpt()) {
+        g_scanned = 1;
+        return;
+    }
     /* Don't latch on failure paths — the bootstrap/argv seed may not have
      * arrived yet when an early caller asks for the game version. Sticky
      * failure here would permanently block chassisinfo synth and any flags
@@ -225,4 +291,8 @@ const char *taiko_game_version_code(void) {
 const char *taiko_game_chassisinfo_dir(void) {
     scan_once();
     return g_dir[0] ? g_dir : NULL;
+}
+
+const char *taiko_game_build_id(void) {
+    return taiko_fpt_game_build_id();
 }

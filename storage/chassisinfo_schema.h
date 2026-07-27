@@ -2,6 +2,7 @@
 #define TAIKO_STORAGE_CHASSISINFO_SCHEMA_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* All operator flags Taiko builds emit in chassisinfo.xml. Stable
  * order (don't renumber) — the cfg uses these ids as bit positions.
@@ -51,6 +52,11 @@ const chassisinfo_schema_t *chassisinfo_schema_for_dir(const char *dir);
 /* Return the XML element name for a field id. Used for emission and
  * (later) menu labels. NULL on out-of-range. */
 const char *chassisinfo_field_name(int field_id);
+
+/* Reverse of chassisinfo_field_name: map an XML element name (not NUL
+ * terminated, `len` bytes) to its CI_F_* id. Both countdown spellings
+ * resolve to CI_F_DISABLE_COUNTDOWNTIMER. Returns -1 if unknown. */
+int chassisinfo_field_id_by_name(const char *name, size_t len);
 
 /* Number of schemas in the table (handy for the menu's version picker). */
 unsigned chassisinfo_schema_count(void);

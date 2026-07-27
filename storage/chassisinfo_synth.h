@@ -15,12 +15,22 @@ typedef struct {
     uint8_t flags[CI_F__COUNT];
 } chassisinfo_fields_t;
 
+/* Shape of the build's own chassisinfo.xml. The field order and the
+ * countdown element's spelling come from the shipped file when one is
+ * readable — the game's boost xml_iarchive wants the exact element
+ * sequence its serializer emitted, and the same directory name carries
+ * different sequences in different builds (ST7100-1 is 12 fields in
+ * White, 14 in Green), so the static per-dir table cannot be right for
+ * all of them. It stays as the fallback for builds that ship no XML. */
 typedef struct {
     char     archive_version[16];
     char     chassis_attrs[128];
     char     header_attrs[128];
     char     info_attrs[128];
     uint32_t header_version;
+    uint8_t  field_ids[CI_F__COUNT];
+    uint8_t  field_count;
+    char     countdown_name[40];
 } chassisinfo_template_t;
 
 typedef struct {
