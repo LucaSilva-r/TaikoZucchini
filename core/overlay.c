@@ -1241,7 +1241,7 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
  * with the menu/toast call above without touching the game's render state. */
 static void maybe_draw_activity(void *ctx, uint8_t id) {
     if (!g_activity_flags ||
-        taiko_game_state_current() != TAIKO_GAME_STATE_ATTRACT ||
+        !taiko_game_state_overlay_visible(TAIKO_GAME_STATE_UNKNOWN) ||
         !ensure_overlay_mapped())
         return;
 
@@ -1386,9 +1386,8 @@ static int pairing_render_texture(const char code[7], int seconds) {
 }
 
 static void maybe_draw_pairing(void *ctx, uint8_t id) {
-    taiko_game_state_t state = taiko_game_state_current();
     if (!g_pairing_active ||
-        (state != TAIKO_GAME_STATE_ATTRACT && state != TAIKO_GAME_STATE_SHOP) ||
+        !taiko_game_state_overlay_visible(TAIKO_GAME_STATE_SHOP) ||
         !ensure_overlay_mapped())
         return;
 

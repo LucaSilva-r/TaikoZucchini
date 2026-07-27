@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "game_state.h"
+#include "debug.h"
 
 #define SONG_ID_MAX 32
 #define COURSE_MAX  8
@@ -115,9 +116,25 @@ taiko_game_state_t taiko_game_state_current(void) {
 
 int taiko_game_state_allows_mod_menu(void) {
     taiko_game_state_t state = g_game_state;
-    return state == TAIKO_GAME_STATE_ATTRACT ||
+    /* UNKNOWN means "no signal", not "wrong scene". Pre-lumen-era builds
+     * (sorairo, 2011) load every asset through std::ifstream, which reaches
+     * sys_fs_open via a statically linked open() wrapper and never touches
+     * the cellFsOpen import we hook — so classify_open_path() never runs and
+     * the state never leaves UNKNOWN. Blocking on that killed the mod menu
+     * (and every overlay gated on ATTRACT) on those versions. */
+    return state == TAIKO_GAME_STATE_UNKNOWN ||
+           state == TAIKO_GAME_STATE_ATTRACT ||
            state == TAIKO_GAME_STATE_ENTRY ||
            state == TAIKO_GAME_STATE_SHOP;
+}
+
+/* Same rule for the attract-only overlays (activity dot, pairing code):
+ * draw them when the state says attract, or when there is no state at all. */
+int taiko_game_state_overlay_visible(taiko_game_state_t also_allow) {
+    taiko_game_state_t state = g_game_state;
+    return state == TAIKO_GAME_STATE_UNKNOWN ||
+           state == TAIKO_GAME_STATE_ATTRACT ||
+           state == also_allow;
 }
 
 const char *taiko_game_state_preview_song(void) {
@@ -328,8 +345,12 @@ static void observe_fumen(const char *path) {
 
 void taiko_game_state_observe_open(const char *path) {
     taiko_game_state_t state = classify_open_path(path);
-    if (state != TAIKO_GAME_STATE_UNKNOWN && state != g_game_state)
+    if (state != TAIKO_GAME_STATE_UNKNOWN && state != g_game_state) {
         g_game_state = state;
+        dbg_print("[state] ");
+        dbg_print(taiko_game_state_name(state));
+        dbg_print("\n");
+    }
 
     const char *asset = classify_asset_path(path);
     if (!asset)

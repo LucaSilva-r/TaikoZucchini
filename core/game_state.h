@@ -24,6 +24,10 @@ typedef enum taiko_game_state {
 taiko_game_state_t taiko_game_state_current(void);
 const char *taiko_game_state_name(taiko_game_state_t state);
 int taiko_game_state_allows_mod_menu(void);
+/* Attract-only overlays: true in attract, in `also_allow`, or when the state
+ * is UNKNOWN (builds whose file IO bypasses the cellFsOpen hook). Pass
+ * TAIKO_GAME_STATE_UNKNOWN when there is no second allowed state. */
+int taiko_game_state_overlay_visible(taiko_game_state_t also_allow);
 const char *taiko_game_state_preview_song(void);
 const char *taiko_game_state_gameplay_song(void);
 const char *taiko_game_state_gameplay_course(void);
