@@ -353,7 +353,7 @@ hooks/http_hook.o:      hooks/http_hook.c      hooks/http_hook.h core/icache.h c
 hooks/dns_hook.o:       hooks/dns_hook.c       hooks/dns_hook.h core/icache.h core/debug.h eboot_fpt.h config/runtime.h config.h
 hooks/socket_hook.o:    hooks/socket_hook.c    hooks/socket_hook.h core/icache.h core/debug.h eboot_fpt.h network/http_client.h config/runtime.h config.h
 hooks/video_out_hook.o: hooks/video_out_hook.c hooks/video_out_hook.h eboot_fpt.h config/runtime.h config.h core/debug.h
-hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h song_loader_manifest.h core/debug.h core/icache.h
+hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.h song_loader_manifest.h core/debug.h core/icache.h core/game_state.h
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
 network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h network/mgmt_poll.h network/plugin_update.h config/version.h core/debug.h core/overlay.h

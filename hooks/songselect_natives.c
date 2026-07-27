@@ -9,6 +9,7 @@
 
 #include "songselect_natives.h"
 #include "debug.h"
+#include "game_state.h"
 #include "eboot_fpt.h"
 #include "icache.h"
 #include "overlay.h"
@@ -1815,6 +1816,15 @@ static const char *ssn_rt_title_text(uint32_t index) {
 static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
                                         uint32_t game_toc) {
     uint32_t ret;
+    uint32_t resume;
+
+    /* Re-entry is entry+4 from the manifest, not a baked address: the lookup
+     * lives at 0x54a988 on GREEN but 0x580328 on BLUE. */
+    if (!g_song_manifest)
+        return 0;
+    resume = SSN_TEXRETR_RETURN;
+    if (!resume)
+        return 0;
 
     __asm__ volatile(
         "mflr 0\n"
@@ -1824,10 +1834,8 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
         "mr 2,%2\n"
         "mr 3,%3\n"
         "mr 4,%4\n"
+        "mtctr %5\n"
         "lis 9,0x446f\n"
-        "lis 12,0x0054\n"
-        "ori 12,12,0xa98c\n"
-        "mtctr 12\n"
         "bctrl\n"
         "mr %0,3\n"
         "ld 2,48(1)\n"
@@ -1835,7 +1843,7 @@ static uint32_t ssn_texretr_orig_lookup(uint32_t map, uint32_t key,
         "ld 0,16(1)\n"
         "mtlr 0\n"
         : "=r"(ret)
-        : "0"(0), "r"(game_toc), "r"(map), "r"(key)
+        : "0"(0), "r"(game_toc), "r"(map), "r"(key), "r"(resume)
         : "r0", "r3", "r4", "r9", "r12", "ctr", "memory", "lr");
     return ret;
 }
@@ -2377,9 +2385,24 @@ uint32_t hk_texretr_lookup(uint32_t map, uint32_t key, uint32_t game_toc) {
     uint32_t type;
     uint32_t resource;
     uint32_t fallback_key;
+    static uint32_t seen_first;
 
-    if (!ssn_custom_texture_key(key, &index, &type))
-        return 0;             /* not a custom handle: game handles it */
+    if (!seen_first) {
+        seen_first = 1;
+        dbg_print_hex32("[ssn] texretr detour live, first key", key);
+    }
+
+    if (!ssn_custom_texture_key(key, &index, &type)) {
+        /* Stock title key: hands off. Substituting a donor here is what broke
+         * every song above uid 100 (and all of Dan-i Dojo) -- the game keeps
+         * only ~101 song titles resident and streams the rest in on demand,
+         * and it decides to stream by seeing this lookup MISS. Handing back a
+         * valid-looking donor told it the title was already there, so it never
+         * loaded the real one and drew the donor forever (uid 100 = 迅風丸).
+         * Returning 0 makes the detour fall through to the original lookup,
+         * which is exactly what the unhooked game does. */
+        return 0;
+    }
     resource = ssn_rt_owned_resource(key, type, index);
     if (resource)
         return resource;
@@ -2396,36 +2419,14 @@ extern char ssn_texretr_detour_code[];
 __asm__(
 ".globl ssn_texretr_detour_code\n"
 "ssn_texretr_detour_code:\n"
-"lis 12,0x0009\n"
-"ori 12,12,0x1770\n"          /* r12 = 0x00091770 (outside/short base) */
-"subf 0,12,4\n"               /* r0 = key - 0x91770 */
-"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
-"blt 2f\n"
-"1:\n"
-"lis 12,0x000a\n"
-"ori 12,12,0x1770\n"          /* r12 = 0x000a1770 (inside/long base) */
-"subf 0,12,4\n"
-"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
-"blt 2f\n"
-"lis 12,0x000b\n"
-"ori 12,12,0x1770\n"          /* r12 = 0x000b1770 (song_name custom base) */
-"subf 0,12,4\n"
-"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
-"blt 2f\n"
-"lis 12,0x000b\n"             /* r12 = 0x000b0000 (song_name dummy/base key) */
-"subf 0,12,4\n"
-"cmpwi 0,0\n"
-"beq 2f\n"
-"lis 12,0x000c\n"
-"ori 12,12,0x1770\n"          /* r12 = 0x000c1770 (transition song_name base) */
-"subf 0,12,4\n"
-"cmplwi 0,0," SSN_STRINGIFY(SSN_INJECT_MAX) "\n"
-"blt 2f\n"
-"lis 12,0x000c\n"            /* r12 = 0x000c0000 (transition dummy/base key) */
-"subf 0,12,4\n"
-"cmpwi 0,0\n"
-"beq 2f\n"
-"b 3f\n"
+/* Take every title-type key (9..12), custom or stock: the helper decides.
+ * Stock keys have to come through too, because an unregistered stock key
+ * returns null and the caller dereferences it unconditionally. */
+"srwi 12,4,16\n"
+"cmplwi 12,9\n"
+"blt 3f\n"
+"cmplwi 12,12\n"
+"bgt 3f\n"
 "2:\n"
 "stdu 1,-0x100(1)\n"
 "mflr 0\n"
@@ -2490,6 +2491,8 @@ static void install_texretr_hook(void) {
     if (taiko_fpt_publish_ssn_texretr(
             (uint32_t)(uintptr_t)ssn_texretr_detour_code)) {
         installed = 1;
+        dbg_print("[ssn] texretr hook armed via FPT\n");
+        dbg_print_hex32("  resume", g_ssn_texretr_resume);
         return;
     }
     cur = *(volatile uint32_t *)(uintptr_t)SSN_TEXRETR_ENTRY;
@@ -2508,6 +2511,8 @@ static void install_texretr_hook(void) {
     g_ssn_texretr_resume = SSN_TEXRETR_RETURN;
     mem_write_and_flush((void *)(uintptr_t)SSN_TEXRETR_ENTRY, &br, sizeof br);
     installed = 1;
+    dbg_print("[ssn] texretr hook armed via .text patch\n");
+    dbg_print_hex32("  entry", SSN_TEXRETR_ENTRY);
 }
 
 static int ssn_inject_island_matches(void) {
@@ -2767,6 +2772,34 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     if (!ssn_stack_ptr_sane(owner) || !ssn_stack_ptr_sane(temp))
         return;
 
+    /* The waiwai/AI-battle selects rebuild their list through this same E46
+     * path and render injected rows as broken dummy songs, so skip them. They
+     * also drop the caches, so the next song-select build starts fresh instead
+     * of reconciling against a foreign scene's vector.
+     *
+     * Skip only the scenes known to be wrong rather than requiring a positive
+     * song_select match: the list build runs during scene setup, before the
+     * state observer has necessarily seen that scene's lumendata, so demanding
+     * SONG_SELECT here skipped injection entirely.
+     *
+     * Dan-i Dojo used to be excluded too, because it asks the texture manager
+     * for title keys its scene never registered and the game dereferences the
+     * result without a null check. That was a symptom of hk_texretr_lookup
+     * substituting a donor on a stock-title miss; the lookup now falls through
+     * to the game, so Dan-i no longer needs the exclusion. */
+    {
+        taiko_game_state_t state = taiko_game_state_current();
+
+        if (state == TAIKO_GAME_STATE_WAIWAI_SONG_SELECT) {
+            if (g_ssn_virtual_song_count || g_ssn_src_begin) {
+                dbg_print("[ssn] rival select scene: injection skipped, reset\n");
+                ssn_reset_virtual_songs();
+                g_ssn_src_begin = 0;
+            }
+            return;
+        }
+    }
+
     src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
 
     ref_count = ssn_collect_cached_refs(refs, SSN_INJECT_MAX);
@@ -3021,4 +3054,9 @@ void songselect_natives_install(void) {
         install_basic_lookup_hook();
     if (g_song_capabilities & TAIKO_SONG_CAP_INJECTION)
         install_e46_listbuild_bridge();
+    /* Arm here, not only from the RequestSongBoardTexture_Long native: scenes
+     * that never run the song-select natives (Dan-i Dojo) still perform title
+     * lookups, and an unresolved key there is dereferenced without a check. */
+    if (g_song_capabilities & TAIKO_SONG_CAP_TEXTURES)
+        install_texretr_hook();
 }
