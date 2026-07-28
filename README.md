@@ -83,6 +83,16 @@ Device        Path                          Vendor ID   Product ID   Serial
 If any VID/PID/Serial is set, **older Taiko versions WILL have issues.** Clear
 them and click **Save**.
 
+### RPCS3: screenshots come out black
+
+Remote screenshots (the Connector's Screenshot button) read the RSX local
+memory the game scans out, which on real hardware *is* the displayed frame.
+RPCS3 renders on the host GPU and only copies the result back into
+guest-visible memory when **Configuration → GPU → Write Color Buffers** is
+enabled; with it off — the default — the capture is a buffer the emulator never
+wrote, so the image is black. Enable that option if you want screenshots under
+RPCS3; it costs performance and changes nothing on a real console.
+
 ## Release Contents
 
 A normal release should include:
