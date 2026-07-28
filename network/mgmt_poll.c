@@ -36,6 +36,8 @@
 #include "custom_song_client.h"
 #include "http_client.h"
 #include "plugin_update.h"
+#include "eboot_fpt.h"
+#include "song_loader_manifest.h"
 
 /* The connector refuses to hand a cabinet an SPRX signed for the other
  * flavor, and its install button is gated on this field matching the
@@ -67,6 +69,15 @@
 #define MGMT_WORKSPACE_SIZE     (1024 * 1024)
 
 volatile int g_custom_song_ui_busy;
+
+/* Custom songs only appear in song select on builds whose song-loader sites
+ * the patcher could resolve. Reported so the connector can warn an operator
+ * before they queue a library onto a cabinet that will never show it, rather
+ * than the connector guessing from the build name. */
+static int song_injection_supported(void) {
+    const taiko_song_loader_manifest_t *m = taiko_fpt_song_loader_manifest();
+    return m && (m->capabilities & TAIKO_SONG_CAP_INJECTION) ? 1 : 0;
+}
 
 static int g_active_loaded;
 static volatile int g_synced_seq;
@@ -436,14 +447,17 @@ static int build_heartbeat(void) {
         return -1;
 
     snprintf(line, sizeof line,
-             "id=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\nflavor=%s\n"
+             "id=%s\nserial=%s\nname=%s\ngame=%s\nbuild=%s\nversion=%s\n"
+             "flavor=%s\nsong_inject=%d\n"
              "seq=%d\ndesired_ack=%d\nactive_seq=%d\n"
              "verify_ack=%d\n"
              "op_seq=%d\nop_phase=%s\nop_done=%u\nop_total=%u\n"
              "op_failed=%u\nop_song=%s\nop_error=%s\n",
              taiko_cfg_cabinet_id(), taiko_cfg_dongle_serial(),
-             g_cfg.cabinet_name, game ? game : "", TAIKO_MOD_VERSION,
-             MGMT_BUILD_FLAVOR,
+             g_cfg.cabinet_name, game ? game : "",
+             taiko_game_build_id() ? taiko_game_build_id() : "",
+             TAIKO_MOD_VERSION, MGMT_BUILD_FLAVOR,
+             song_injection_supported(),
              g_synced_seq, g_desired_ack, g_synced_seq, g_verify_ack,
              op.seq, op.phase[0] ? op.phase : "idle",
              op.done, op.total, op.failed, op.song, op.error);
@@ -806,7 +820,8 @@ size_t taiko_mgmt_build_status(char *out, size_t cap) {
     spin_lock(&g_command_lock);
     int n = snprintf(
         out, cap,
-        "T\nid=%s\nserial=%s\nname=%s\ngame=%s\nversion=%s\nflavor=%s\n"
+        "T\nid=%s\nserial=%s\nname=%s\ngame=%s\nbuild=%s\nversion=%s\n"
+        "flavor=%s\nsong_inject=%d\n"
         "seq=%d\ndesired_ack=%d\nactive_seq=%d\n"
         "verify_ack=%d\n"
         "op_seq=%d\nop_phase=%s\nop_done=%u\nop_total=%u\n"
@@ -815,7 +830,9 @@ size_t taiko_mgmt_build_status(char *out, size_t cap) {
         "xfer_asset=%s\n",
         taiko_cfg_cabinet_id(), taiko_cfg_dongle_serial(),
         g_cfg.cabinet_name, game ? game : "",
+        taiko_game_build_id() ? taiko_game_build_id() : "",
         TAIKO_MOD_VERSION, MGMT_BUILD_FLAVOR,
+        song_injection_supported(),
         g_synced_seq, g_desired_ack, g_synced_seq,
         g_verify_ack, op.seq, op.phase[0] ? op.phase : "idle",
         op.done, op.total, op.failed, op.song, op.error,

@@ -3,11 +3,17 @@
 
 /* Detect which Taiko build the loaded game is. Source: PARAM.SFO
  * TITLE field, whose name is "Taiko no Tatsujin(<CODE>)". Examples:
+ * The series number is the arcade release order, not the colour name:
  *   (S111) -> S11100-1 (Green)
- *   (S101) -> S10100-1 (Yellow)
- *   (ST91) -> ST9100-1 (White)
+ *   (S101) -> S10100-1 (Blue)
+ *   (ST91) -> ST9100-1 (Yellow)
  *   (ST87) -> ST8100-7 (Red)
- *   (ST71) -> ST7100-1 (Sorairo)
+ *   (ST71) -> ST7100-1 (White)
+ *   (ST61) -> ST6100-1 (Murasaki)
+ *   (ST51) -> ST5100-1 (Kimidori)
+ *   (ST41) -> ST4100-1 (Momoiro)
+ *   (ST31) -> ST3100-1 (Sorairo)
+ *   (ST21) -> ST2100-1 (Katsu-don)
  *
  * PARAM.SFO is one directory above USRDIR; we read it through
  * cellFs* using the cached usrdir resolver. Result is memoized

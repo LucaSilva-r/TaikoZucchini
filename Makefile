@@ -357,7 +357,7 @@ hooks/songselect_natives.o: hooks/songselect_natives.c hooks/songselect_natives.
 network/uri.o:            network/uri.c            network/uri.h
 network/http_client.o:    network/http_client.c    network/http_client.h network/uri.h core/debug.h config/runtime.h config.h
 network/version_check.o:  network/version_check.c  network/version_check.h network/http_client.h network/mgmt_poll.h network/plugin_update.h config/version.h core/debug.h core/overlay.h
-network/mgmt_poll.o:      network/mgmt_poll.c      network/mgmt_poll.h network/custom_song_client.h network/http_client.h network/plugin_update.h config/runtime.h config/version.h config/cfg_file.h config.h core/debug.h core/game_version.h
+network/mgmt_poll.o:      network/mgmt_poll.c      network/mgmt_poll.h network/custom_song_client.h network/http_client.h network/plugin_update.h eboot_fpt.h song_loader_manifest.h config/runtime.h config/version.h config/cfg_file.h config.h core/debug.h core/game_version.h
 network/plugin_update.o:  network/plugin_update.c  network/plugin_update.h network/custom_song_client.h network/http_client.h config/runtime.h config.h core/debug.h core/overlay.h
 hooks/cell_http_shim.o: hooks/cell_http_shim.c hooks/cell_http_shim.h network/http_client.h core/debug.h config/runtime.h config.h
 

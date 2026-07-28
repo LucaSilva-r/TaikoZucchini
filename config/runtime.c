@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/sys_time.h>
+#include <netex/libnetctl.h>
 
 #include "config.h"
 #include "cfg_file.h"
@@ -13,7 +14,7 @@
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
 
-#define TAIKO_CFG_VERSION 20  /* v20: six-pin login toggle */
+#define TAIKO_CFG_VERSION 22  /* v22: agent_token for the webMAN agent */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file (TAIKO_GLOBAL_CONFIG_PATH, exported via runtime.h). A per-game
@@ -54,6 +55,7 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_port   = 443,
     .connector_host           = {0},
     .connector_port           = 443,
+    .connector_agent_port     = 8080,
     .cabinet_id               = {0},
     .cabinet_name             = {0},
 
@@ -258,6 +260,28 @@ static void handle_network(const char *key, const char *value, void *u) {
         }
         if (v == 0 || v > 65535u) v = 443;
         g_cfg.connector_port = (uint16_t)v;
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "connector_agent_port")) {
+        while (*value == ' ' || *value == '\t') value++;
+        unsigned v = 0;
+        while (*value >= '0' && *value <= '9') {
+            v = v * 10u + (unsigned)(*value - '0');
+            value++;
+        }
+        if (v > 65535u) v = 8080;
+        g_cfg.connector_agent_port = (uint16_t)v;
+        return;
+    }
+    if (cfg_file_str_eq_ci(key, "agent_token")) {
+        while (*value == ' ' || *value == '\t') value++;
+        size_t n = 0;
+        while (value[n] && value[n] != '\r' && value[n] != '\n' &&
+               n < TAIKO_API_TOKEN_MAX - 1) {
+            g_cfg.agent_token[n] = value[n];
+            n++;
+        }
+        g_cfg.agent_token[n] = 0;
         return;
     }
     if (cfg_file_str_eq_ci(key, "zucchini_api_token")) {
@@ -578,10 +602,21 @@ static void write_cfg_file(const char *path) {
     emit_kv_uint(fd,
         "TCP port for the Connector converter service.",
         "connector_port", (unsigned)g_cfg.connector_port);
+    emit_kv_uint(fd,
+        "Plain-HTTP port the webMAN agent polls for console commands "
+        "(reboot, relaunch). 0 disables the agent. webMAN cannot use the "
+        "TLS port above.",
+        "connector_agent_port", (unsigned)g_cfg.connector_agent_port);
     emit_kv_str(fd,
         "Optional TaikOnline card issuer bearer token override. Leave blank "
         "for official builds with the token baked into zucchini.sprx.",
         "zucchini_api_token", g_cfg.zucchini_api_token);
+    emit_kv_str(fd,
+        "Credential the webMAN agent uses for the connector's plain-HTTP "
+        "agent port. The connector fills this in automatically; it is a "
+        "different secret from zucchini_api_token on purpose, because this "
+        "one travels in clear on the LAN and is readable on this disk.",
+        "agent_token", g_cfg.agent_token);
     cfg_file_write_str(fd, "\n");
 
     cfg_file_write_str(fd, "[chassis]\n");
@@ -618,8 +653,65 @@ static void parse_into_cfg(const char *buf, size_t len) {
 /* 8 hex chars from the µs clock mixed through splitmix64 — dongle serials
  * collide across cabinets (all default to CFG_DONGLE_SERIAL), so the
  * connector needs an identity that is unique in practice. */
+/* Derive the cabinet id from the console's MAC.
+ *
+ * The plugin and the webMAN agent are installed independently and in either
+ * order, and both need to agree on this id without talking to each other —
+ * the connector simply files whatever id a frame carries, so two different
+ * ids mean two records for one machine. The MAC is the only stable value both
+ * halves can read (the agent could use IDPS, a sandboxed game process cannot).
+ *
+ * Refuses the unset/failed-discovery values: RPCS3 leaves the address at
+ * FF:FF:FF:FF:FF:FF when it cannot determine one, and every such instance
+ * would otherwise land on the same id. Callers fall back to random there.
+ *
+ * Returns 1 when an id was written. */
+static int cabinet_id_from_mac(void) {
+    static const char hexd[] = "0123456789abcdef";
+    union CellNetCtlInfo info;
+    int all_zero = 1, all_ff = 1;
+
+    if (cellNetCtlGetInfo(CELL_NET_CTL_INFO_ETHER_ADDR, &info) != 0)
+        return 0;
+
+    const uint8_t *mac = (const uint8_t *)info.ether_addr.data;
+    for (int i = 0; i < 6; i++) {
+        if (mac[i] != 0x00) all_zero = 0;
+        if (mac[i] != 0xFF) all_ff = 0;
+    }
+    if (all_zero || all_ff)
+        return 0;
+
+    /* FNV-1a; 32 bits is exactly the 8 hex chars an id holds. */
+    uint32_t h = 2166136261u;
+    for (int i = 0; i < 6; i++) {
+        h ^= mac[i];
+        h *= 16777619u;
+    }
+    for (int i = TAIKO_CABINET_ID_LEN - 1; i >= 0; i--) {
+        g_cfg.cabinet_id[i] = hexd[h & 0xF];
+        h >>= 4;
+    }
+    g_cfg.cabinet_id[TAIKO_CABINET_ID_LEN] = 0;
+    dbg_print("[cfg] cabinet_id from console MAC: ");
+    dbg_print(g_cfg.cabinet_id);
+    dbg_print("\n");
+    return 1;
+}
+
+/* Boot-time attempt. The network is not necessarily up yet, and burning a
+ * random id here would be permanent — so leave it empty and let the first
+ * net-time caller settle it. */
+static int cabinet_id_generate_early(void) {
+    return cabinet_id_from_mac();
+}
+
 static void cabinet_id_generate(void) {
     static const char hexd[] = "0123456789abcdef";
+
+    if (cabinet_id_from_mac())
+        return;
+
     uint64_t z = (uint64_t)sys_time_get_system_time();
     z ^= (uintptr_t)&z * 0x9E3779B97F4A7C15ULL;
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
@@ -649,7 +741,7 @@ static void load_global(void) {
 
     if (!read_ok || got == 0) {
         dbg_print("[cfg] global absent, writing defaults\n");
-        cabinet_id_generate();
+        (void)cabinet_id_generate_early();
         write_cfg_file(TAIKO_GLOBAL_CONFIG_PATH);
         return;
     }
@@ -664,10 +756,8 @@ static void load_global(void) {
 
     /* Config predates cabinet identity (or the key was mangled). */
     int id_generated = 0;
-    if (!g_cfg.cabinet_id[0]) {
-        cabinet_id_generate();
-        id_generated = 1;
-    }
+    if (!g_cfg.cabinet_id[0])
+        id_generated = cabinet_id_generate_early();
 
     if (g_loaded_version != TAIKO_CFG_VERSION || g_dongle_serial_reset ||
         id_generated) {

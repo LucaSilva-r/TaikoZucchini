@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <sys/memory.h>
 #include <sys/ppu_thread.h>
 #include <sys/process.h>
 #include <sys/sys_time.h>
@@ -26,10 +27,13 @@
 #define CONTROL_BACKOFF_MAX     30u
 
 static volatile int g_started;
+static volatile int g_screenshot_busy;
 static uint32_t g_last_seq;
 static char g_last_status[2048];
 static size_t g_last_status_len;
 static uint64_t g_last_status_sent_us;
+
+static void screenshot_request(void);
 
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -62,6 +66,14 @@ static void control_message(void *ctx, const char *message, size_t len) {
         taiko_overlay_show_message("Closing game (remote request)...");
         sys_timer_sleep(2);
         sys_process_exit(0);
+        return;
+    }
+    if (len == 2 && memcmp(message, "G\n", 2) == 0) {
+        /* Operator asked for a screen grab. webMAN cannot capture while a game
+         * runs, so this path exists for exactly the case that matters: seeing
+         * what the cabinet is showing mid-game. Off-thread — the capture is
+         * megabytes and the upload is a TLS round trip. */
+        screenshot_request();
         return;
     }
     if (len == 6 && (memcmp(message, "CLEAR\n", 6) == 0 ||
@@ -146,6 +158,69 @@ static const char *control_outgoing(void *ctx, size_t *out_len) {
     g_last_status_sent_us = now;
     *out_len = len;
     return g_last_status;
+}
+
+/* Capture the current frame and POST it to the connector.
+ *
+ * The buffer comes from sys_memory_allocate rather than the PRX heap: a 720p
+ * grab is ~690 KB and this plugin runs with a small libc heap. */
+static void screenshot_worker(uint64_t arg) {
+    (void)arg;
+    size_t need = taiko_overlay_capture_size();
+    sys_addr_t addr = 0;
+
+    if (need && sys_memory_allocate(((need + 0xFFFFF) & ~0xFFFFFu),
+                                    SYS_MEMORY_PAGE_SIZE_1M, &addr) == CELL_OK &&
+        addr) {
+        size_t len = taiko_overlay_capture_bmp((void *)(uintptr_t)addr, need);
+        if (len) {
+            char path[160], headers[256];
+            http_response_t resp;
+            int pn = snprintf(path, sizeof path,
+                              "/api/connector/cabinet/screenshot?id=%s",
+                              taiko_cfg_cabinet_id());
+            int hn = snprintf(headers, sizeof headers,
+                              "Authorization: Bearer %s\r\n"
+                              "Content-Type: application/octet-stream\r\n",
+                              custom_song_api_token());
+            int port = g_cfg.connector_port ? (int)g_cfg.connector_port : 443;
+            if (pn > 0 && (size_t)pn < sizeof path &&
+                hn > 0 && (size_t)hn < sizeof headers &&
+                /* _direct: the plain http_request() applies the
+                 * online-redirect rewrite, which would send this to the game
+                 * server instead of the connector. */
+                http_request_direct("POST", g_cfg.connector_host, port, path,
+                                    headers, (size_t)hn,
+                                    (const void *)(uintptr_t)addr, len,
+                                    &resp) == 0) {
+                dbg_print_hex32("[control] screenshot uploaded, status",
+                                (uint32_t)resp.status);
+                http_response_free(&resp);
+            } else {
+                dbg_print("[control] screenshot upload failed\n");
+            }
+        } else {
+            dbg_print("[control] screenshot capture returned nothing\n");
+        }
+        sys_memory_free(addr);
+    } else {
+        dbg_print("[control] screenshot buffer allocation failed\n");
+    }
+    g_screenshot_busy = 0;
+    sys_ppu_thread_exit(0);
+}
+
+static void screenshot_request(void) {
+    sys_ppu_thread_t tid = 0;
+    /* One at a time; an operator leaning on the button must not stack
+     * multi-megabyte allocations. */
+    if (!__sync_bool_compare_and_swap(&g_screenshot_busy, 0, 1))
+        return;
+    if (sys_ppu_thread_create(&tid, screenshot_worker, 0, 1400, 64 * 1024, 0,
+                              "taiko_screenshot") != 0) {
+        g_screenshot_busy = 0;
+        dbg_print("[control] screenshot thread create failed\n");
+    }
 }
 
 static void remote_worker(uint64_t arg) {

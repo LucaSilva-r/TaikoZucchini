@@ -1,6 +1,8 @@
 #ifndef TAIKO_CORE_OVERLAY_H
 #define TAIKO_CORE_OVERLAY_H
 
+#include <stddef.h>
+
 void taiko_overlay_hooks_install(void);
 void taiko_overlay_show_message(const char *message);
 void taiko_overlay_show_message_box(const char *title, const char *message);
@@ -69,5 +71,12 @@ void taiko_overlay_card_set(const char *title,
                             const char *const *lines, int n,
                             const char *footer, const char *qr_payload);
 void taiko_overlay_card_active(int on);
+
+/* Grab the surface currently on screen as a 24-bit BMP at half resolution.
+ * Returns bytes written, or 0 when nothing has been flipped yet. Works only
+ * while a game is rendering — which is exactly the case webMAN's own
+ * screenshot refuses to handle. */
+size_t taiko_overlay_capture_bmp(void *out, size_t cap);
+size_t taiko_overlay_capture_size(void);
 
 #endif

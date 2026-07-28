@@ -224,6 +224,13 @@ static void cache_display_info(void) {
     }
 }
 
+static void write_le32(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16);
+    p[3] = (uint8_t)(v >> 24);
+}
+
 static void flush_dcache(void *addr, size_t len) {
     uintptr_t p = (uintptr_t)addr & ~(uintptr_t)127;
     uintptr_t end = ((uintptr_t)addr + len + 127) & ~(uintptr_t)127;
@@ -1452,7 +1459,76 @@ static void maybe_draw_pairing(void *ctx, uint8_t id) {
     (void)finish_and_call(game, &cmd, cmd_io, cmd_buf);
 }
 
+/* Last buffer the game actually flipped. A screenshot must read the surface
+ * that is on screen, and only the flip hook knows which of the eight that is. */
+static volatile int g_last_flip_id = -1;
+
+/* Copy the on-screen surface into a 24-bit BMP, halving both axes.
+ *
+ * Lives here because g_buffers/g_local_base are this file's state, and the
+ * overlay already writes into these same surfaces every flip. Read-only, so it
+ * is safe to run from another thread while the game renders: a torn capture
+ * shows one frame's tearing, which for a diagnostic screenshot is fine.
+ *
+ * Half resolution keeps a 720p grab at ~690 KB instead of 2.7 MB — the plugin
+ * uploads it in one buffer over the connector socket.
+ *
+ * Returns bytes written into `out`, or 0. Caller supplies the buffer and can
+ * size it with taiko_overlay_capture_size(). */
+size_t taiko_overlay_capture_bmp(void *out, size_t cap) {
+    overlay_buffer_t b;
+    int id = g_last_flip_id;
+    uint8_t *dst = (uint8_t *)out;
+
+    if (!out || id < 0 || !g_local_base || !get_flip_buffer((uint8_t)id, &b))
+        return 0;
+
+    uint32_t w = b.width / 2, h = b.height / 2;
+    /* BMP rows are padded to 4 bytes. */
+    uint32_t stride = (w * 3u + 3u) & ~3u;
+    size_t need = 54 + (size_t)stride * h;
+    if (cap < need)
+        return 0;
+
+    memset(dst, 0, 54);
+    dst[0] = 'B'; dst[1] = 'M';
+    write_le32(dst + 2, (uint32_t)need);
+    write_le32(dst + 10, 54);
+    write_le32(dst + 14, 40);
+    write_le32(dst + 18, w);
+    write_le32(dst + 22, h);
+    dst[26] = 1;                     /* planes */
+    dst[28] = 24;                    /* bits per pixel */
+    write_le32(dst + 34, stride * h);
+
+    const uint8_t *src = (const uint8_t *)(uintptr_t)(g_local_base + b.offset);
+
+    /* BMP scanlines run bottom-up; the surface is A8R8G8B8, so within each
+     * 32-bit pixel the bytes are A,R,G,B and BMP wants B,G,R. */
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *row = src + (size_t)(h - 1 - y) * 2u * b.pitch;
+        uint8_t *o = dst + 54 + (size_t)y * stride;
+        for (uint32_t x = 0; x < w; x++) {
+            const uint8_t *px = row + (size_t)x * 8u;   /* 2 px * 4 bytes */
+            *o++ = px[3];
+            *o++ = px[2];
+            *o++ = px[1];
+        }
+    }
+    return need;
+}
+
+size_t taiko_overlay_capture_size(void) {
+    overlay_buffer_t b;
+    int id = g_last_flip_id;
+    if (id < 0 || !get_flip_buffer((uint8_t)id, &b))
+        return 0;
+    uint32_t w = b.width / 2, h = b.height / 2;
+    return 54 + (size_t)(((w * 3u + 3u) & ~3u)) * h;
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
+    g_last_flip_id = id;
     if (!g_local_base) {
         CellGcmConfig cfg;
         memset(&cfg, 0, sizeof cfg);
