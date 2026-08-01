@@ -31,6 +31,7 @@
 #include "game_version.h"
 #include "pad_input.h"
 #include "kb_input.h"
+#include "itaiko_cdc_diag.h"
 #include "taiko_frame.h"
 #include "usrdir_path.h"
 #include "eboot_fpt.h"
@@ -940,6 +941,10 @@ int taiko_start(unsigned int args, void *argp) {
          * keyboard itself — see the self_poll flag on menu_ingame_start. */
         kb_input_init();
     }
+    /* Diagnostic-only: keep cellKb on ITAIKO's HID interfaces while probing
+     * its CDC-ACM interface through cellUsbd.  The worker waits for the
+     * game's own cellUsbdInit before registering the VID/PID. */
+    itaiko_cdc_diag_start();
     /* The Connector management/status WebSocket is useful even when USIO
      * emulation is disabled; virtual inputs simply become harmless no-ops. */
     taiko_remote_control_start();
@@ -955,6 +960,7 @@ int taiko_start(unsigned int args, void *argp) {
 }
 
 int taiko_stop(void) {
+    itaiko_cdc_diag_stop();
     patch_ui_close();
     taiko_pairing_stop();
     if (g_cfg.online_diag)

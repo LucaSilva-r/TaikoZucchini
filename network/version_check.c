@@ -595,6 +595,10 @@ static void version_check_thread(uint64_t arg) {
 
     if (!taiko_net_imports_ready()) {
         dbg_print("[version] networking unavailable; update check disabled\n");
+        /* Injection only needs the disk-cached index and selection, both of
+         * which load fine without networking. */
+        custom_song_library_sync();
+        taiko_mgmt_load_active_selection();
         sys_ppu_thread_exit(0);
     }
 
@@ -607,17 +611,20 @@ static void version_check_thread(uint64_t arg) {
     sys_ppu_thread_exit(0);
 #endif
 
-    if (!wait_for_net_link(20)) {
+    if (!wait_for_net_link(20))
         dbg_print("[version] no IP after 20s; skipping update check\n");
-    } else {
+    else
         run_update_check();
 
-        /* Warm the custom-song library at boot so opening the overlay is
-         * instant (the sync no longer runs on the overlay-open path). */
-        if (!taiko_mgmt_operation_active()) {
-            dbg_print("[version] warming custom-song library\n");
-            custom_song_library_sync();
-        }
+    /* Warm the custom-song library at boot so opening the overlay is instant
+     * (the sync no longer runs on the overlay-open path). Runs with or without
+     * a link: song-select injection reads the in-memory library, and every
+     * accessor returns nothing until this sync loads it. Offline the sync
+     * falls back to the disk-cached index, which is what makes a cabinet that
+     * never reached the Connector still inject its installed songs. */
+    if (!taiko_mgmt_operation_active()) {
+        dbg_print("[version] warming custom-song library\n");
+        custom_song_library_sync();
     }
 
     /* Steady-state management lives on the control WebSocket (taiko_control_ws),

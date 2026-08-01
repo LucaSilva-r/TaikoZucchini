@@ -16,6 +16,15 @@ int kb_input_ready(void);
  * thread — no dedicated kb thread. Safe no-op until kb_input_init ran. */
 void kb_input_poll_tick(void);
 
+/* One boot-report slot per drum owned by the ITAIKO LDD. */
+#define KB_BOOT_SLOTS 2
+
+/* Feed an 8-byte USB boot-keyboard report from an input device owned by a
+ * custom cellUsbd LDD. This state is merged with, rather than substituted
+ * for, the regular cellKb keyboard ports. A negative slot clears them all. */
+void kb_input_submit_boot_report(int slot, const uint8_t report[8]);
+void kb_input_clear_boot_report(int slot);
+
 /* OR keyboard level into out->level[]; add keyboard hit/coin/test edges
  * into out's counters (clamped) and clear the kb-side accumulators.
  * Safe no-op until kb_input_init has run. */

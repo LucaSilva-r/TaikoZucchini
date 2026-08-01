@@ -86,7 +86,7 @@ LDFLAGS := -mprx -zgenprx -zgenstub \
 # libsysmodule_stub: cellSysmoduleLoadModule (if needed; harmless to keep)
 LDLIBS  := -lfs_stub -lsysmodule_stub -lsysutil_game_stub -lsysutil_stub \
            -lm_stub -lcamera_stub -lio_stub -lgcm_cmd -lgcm_sys_stub \
-           -lc -lnet_stub -lnetctl_stub -llv2_stub
+           -lusbd_stub -lc -lnet_stub -lnetctl_stub -llv2_stub
 
 TARGET_NAME := zucchini
 BIN_DIR := bin
@@ -122,7 +122,7 @@ SRCS    := core/main.c core/debug.c core/diag_log.c core/game_state.c core/enso_
            hooks/chassisinfo_hook.c storage/chassisinfo_synth.c \
            storage/chassisinfo_schema.c \
            core/game_version.c \
-           input/pad_input.c input/kb_input.c input/taiko_frame.c \
+           input/pad_input.c input/kb_input.c input/itaiko_cdc_diag.c input/taiko_frame.c \
            qr/camera_qr.c qr/qr_spu_host.c \
            bpreader/bpreader_serial.c \
            cards/card_store.c cards/card_picker.c cards/card_issuer.c \
@@ -348,6 +348,7 @@ core/patch_ui.o:  core/patch_ui.c  core/patch_ui.h core/debug.h core/diag_log.h 
 core/overlay.o:   core/overlay.c   core/overlay.h core/debug.h eboot_fpt.h mod_menu/menu_font_20.h mod_menu/menu_font.h
 input/pad_input.o: input/pad_input.c input/pad_input.h input/kb_input.h config/cfg_file.h config/runtime.h core/debug.h
 input/kb_input.o:  input/kb_input.c  input/kb_input.h  input/pad_input.h config/cfg_file.h config/runtime.h core/debug.h
+input/itaiko_cdc_diag.o: input/itaiko_cdc_diag.c input/itaiko_cdc_diag.h core/debug.h
 network/online_diag.o:   network/online_diag.c   network/online_diag.h config.h core/debug.h
 hooks/http_hook.o:      hooks/http_hook.c      hooks/http_hook.h core/icache.h core/debug.h network/http_client.h hooks/cell_http_shim.h eboot_fpt.h config/runtime.h config.h
 hooks/dns_hook.o:       hooks/dns_hook.c       hooks/dns_hook.h core/icache.h core/debug.h eboot_fpt.h config/runtime.h config.h

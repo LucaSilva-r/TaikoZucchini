@@ -13,6 +13,7 @@
 #include "config/runtime.h"
 #include "core/debug.h"
 #include "core/overlay.h"
+#include "input/itaiko_cdc_diag.h"
 #include "input/pad_input.h"
 #include "custom_song_client.h"
 #include "http_client.h"
@@ -32,6 +33,7 @@ static uint32_t g_last_seq;
 static char g_last_status[2048];
 static size_t g_last_status_len;
 static uint64_t g_last_status_sent_us;
+static char g_itaiko_status[768];
 
 static void screenshot_request(void);
 
@@ -76,10 +78,30 @@ static void control_message(void *ctx, const char *message, size_t len) {
         screenshot_request();
         return;
     }
+    /* `I GET <drum>` / `I SET <drum> <pairs>`: a cabinet can carry one drum
+     * per player, and each is configured on its own. */
+    if (len > 7 && memcmp(message, "I GET ", 6) == 0 &&
+        message[len - 1] == '\n') {
+        itaiko_cdc_diag_request_read(message + 6, len - 7);
+        return;
+    }
+    if (len > 7 && memcmp(message, "I SET ", 6) == 0 &&
+        message[len - 1] == '\n') {
+        itaiko_cdc_diag_request_write(message + 6, len - 7);
+        return;
+    }
     if (len == 6 && (memcmp(message, "CLEAR\n", 6) == 0 ||
                      memcmp(message, "READY\n", 6) == 0)) {
         g_last_seq = 0;
         pad_input_remote_clear();
+        if (memcmp(message, "READY\n", 6) == 0)
+            itaiko_cdc_diag_republish();
+        return;
+    }
+    if (len && message[0] == 'I') {
+        /* A drum command that matched neither branch above is a protocol
+         * mismatch, not noise: say so rather than dropping it silently. */
+        dbg_print_hex32("[control] unhandled I message len", (uint32_t)len);
         return;
     }
     if (len < 5 || message[0] != 'S' || message[1] != ' ')
@@ -119,6 +141,20 @@ static const char *control_outgoing(void *ctx, size_t *out_len) {
     char current[2048];
     uint64_t now = sys_time_get_system_time();
     *out_len = 0;
+
+    /* Drum reads and writes are interactive control-plane traffic. Send their
+     * resulting snapshot before the potentially multi-frame song inventory;
+     * otherwise a large cabinet can leave the connector showing the cached
+     * boot values even though the CDC read already completed successfully. */
+    {
+        size_t ilen = itaiko_cdc_diag_take_frame(
+            g_itaiko_status, sizeof(g_itaiko_status));
+        if (ilen) {
+            dbg_print("[control] sending ITAIKO status frame\n");
+            *out_len = ilen;
+            return g_itaiko_status;
+        }
+    }
 
     /* Inventory + config upload, sent only when something actually changed:
      * a completed song job, an applied config, a new connection, or an
