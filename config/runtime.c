@@ -13,6 +13,7 @@
 #include "pad_input.h"
 #include "kb_input.h"
 #include "storage/chassisinfo_schema.h"
+#include "network/version_check.h"
 
 #define TAIKO_CFG_VERSION 22  /* v22: agent_token for the webMAN agent */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
@@ -670,6 +671,14 @@ static int cabinet_id_from_mac(void) {
     static const char hexd[] = "0123456789abcdef";
     union CellNetCtlInfo info;
     int all_zero = 1, all_ff = 1;
+
+    /* Config load runs long before the game brings networking up. RPCS3
+     * resolves PRX imports eagerly, but real hardware leaves the libnetctl
+     * import stub target at 0 until CELL_SYSMODULE_NETCTL is loaded, so the
+     * call below faults with DAR=0 instead of returning an error. Same class
+     * as [[prx-import-got-unresolved-realhw]] in usrdir_install_hook. */
+    if (!taiko_net_imports_ready())
+        return 0;
 
     if (cellNetCtlGetInfo(CELL_NET_CTL_INFO_ETHER_ADDR, &info) != 0)
         return 0;
