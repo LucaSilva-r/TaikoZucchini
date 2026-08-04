@@ -84,7 +84,7 @@ typedef enum {
     F_WATCHDOG_PATCHES,
     F_NET_CLEANUP_GUARD,
     F_CLEARLOCKS_STUB,
-    F_ALLOW_SCREEN_TEARING,
+    F_UNLOCK_FPS,
     F_DANI_DOJO_UNLOCK,
     /* network */
     F_ONLINE_REDIRECT_ENABLE,
@@ -120,7 +120,7 @@ static int field_get(field_id_t id) {
     case F_WATCHDOG_PATCHES:    return g_cfg.watchdog_patches;
     case F_NET_CLEANUP_GUARD:   return g_cfg.net_cleanup_guard;
     case F_CLEARLOCKS_STUB:     return g_cfg.clearlocks_stub;
-    case F_ALLOW_SCREEN_TEARING:return g_cfg.allow_screen_tearing;
+    case F_UNLOCK_FPS:          return g_cfg.unlock_fps;
     case F_DANI_DOJO_UNLOCK:    return g_cfg.dani_dojo_unlock;
     case F_ONLINE_REDIRECT_ENABLE: return g_cfg.online_redirect_enable;
     default: break;
@@ -155,7 +155,7 @@ static void field_set(field_id_t id, int v) {
     case F_WATCHDOG_PATCHES:    g_cfg.watchdog_patches = v; break;
     case F_NET_CLEANUP_GUARD:   g_cfg.net_cleanup_guard = v; break;
     case F_CLEARLOCKS_STUB:     g_cfg.clearlocks_stub = v; break;
-    case F_ALLOW_SCREEN_TEARING:g_cfg.allow_screen_tearing = v; break;
+    case F_UNLOCK_FPS:          g_cfg.unlock_fps = v; break;
     case F_DANI_DOJO_UNLOCK:    g_cfg.dani_dojo_unlock = v; break;
     case F_ONLINE_REDIRECT_ENABLE: g_cfg.online_redirect_enable = v; break;
     default: break;
@@ -344,9 +344,9 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "Clearlocks stub",
       "No-ops file lock cleanup that conflicts with the patch flow.",
       F_CLEARLOCKS_STUB, 0 },
-    { ITEM_TOGGLE,  "Allow screen tearing",
-      "Uses HSYNC flips instead of VSYNC. Can tear, but may reduce rhythm-lane jumps.",
-      F_ALLOW_SCREEN_TEARING, 0 },
+    { ITEM_TOGGLE,  "Unlock FPS",
+      "Green only: removes the 60 Hz VBlank lock. RPCS3's Frame Limit controls FPS; HSYNC may tear.",
+      F_UNLOCK_FPS, 0 },
     { ITEM_TOGGLE,  "Dan-i Dojo unlock",
       "Unlocks Dan grading availability gates on supported pre-Red builds.",
       F_DANI_DOJO_UNLOCK, 0 },

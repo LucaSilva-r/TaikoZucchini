@@ -45,7 +45,7 @@ typedef struct {
     unsigned watchdog_patches     : 1;
     unsigned net_cleanup_guard    : 1;
     unsigned clearlocks_stub      : 1;
-    unsigned allow_screen_tearing : 1;
+    unsigned unlock_fps           : 1;
     unsigned dani_dojo_unlock     : 1;
 
     /* Force the game to render at its native 720p surface even when the

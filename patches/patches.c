@@ -1218,49 +1218,94 @@ static void apply_net_cleanup_guard(void) {
     write32(addr, 0x4E800020u); /* blr */
 }
 
-static int resolve_flip_mode_sites(flip_mode_sites_t *s) {
-    static const uint32_t flip_orig[] = {
-        0x38600002u, /* li r3,2 ; CELL_GCM_DISPLAY_VSYNC */
-        0x48000001u, /* bl cellGcmSetFlipMode */
-        0xE8410028u, /* ld r2,0x28(r1) */
-    };
-    static const uint32_t flip_mask[] = {
-        0xFFFFFFFFu,
-        0xFC000003u,
-        0xFFFFFFFFu,
+/* Green S11113-1 initializes the same GCM display path from two branches.
+ * Keep these fixed and fully validated for now: the surrounding branch
+ * displacement proves that both calls target Green's cellGcmSetFlipMode
+ * import stub at 0x00a1f210. */
+static int resolve_green_flip_mode_sites(flip_mode_sites_t *s) {
+    static const struct {
+        uintptr_t addr;
+        uint32_t branch;
+    } green_sites[] = {
+        { 0x0052DAF0u, 0x484F171Du },
+        { 0x0052E194u, 0x484F1079u },
     };
 
     s->count = 0;
-    for (uintptr_t p = CFG_SCAN_TEXT_START; p <= CFG_SCAN_TEXT_END - 12u; p += 4) {
-        if (!masked_words_match(p, flip_orig, flip_mask,
-                                sizeof(flip_orig) / 4))
-            continue;
-        if (s->count >= sizeof(s->sites) / sizeof(s->sites[0])) {
-            dbg_print("[patch] flip-mode scan found too many sites\n");
+    for (size_t i = 0; i < sizeof(green_sites) / sizeof(green_sites[0]); i++) {
+        uintptr_t p = green_sites[i].addr;
+        uint32_t mode = pt_read32(T, p);
+
+        /* Accept HSYNC too so repatching an already modified image remains
+         * idempotent. */
+        if ((mode != 0x38600002u && mode != 0x38600001u) ||
+            pt_read32(T, p + 4u) != green_sites[i].branch ||
+            pt_read32(T, p + 8u) != 0xE8410028u) {
+            dbg_print("[patch] Green flip-mode validation failed\n");
+            dbg_print_hex32("[patch] Green flip-mode site", (uint32_t)p);
             return 0;
         }
         s->sites[s->count++] = p;
     }
 
-    if (s->count == 0) {
-        dbg_print("[patch] flip-mode scan found no VSYNC sites\n");
-        return 0;
-    }
-    dbg_print_hex32("[patch] flip_mode_sites", (uint32_t)s->count);
+    dbg_print_hex32("[patch] Green flip_mode_sites", (uint32_t)s->count);
     for (size_t i = 0; i < s->count; i++)
-        dbg_print_hex32("[patch] flip_mode_site", (uint32_t)s->sites[i]);
+        dbg_print_hex32("[patch] Green flip_mode_site", (uint32_t)s->sites[i]);
     return 1;
 }
 
-static void apply_allow_screen_tearing(void) {
+/* Green's NU::System::VSync has three independent links to vblank:
+ *
+ * - GCM is put in VSYNC flip mode during initialization.
+ * - The render loop waits on a semaphore posted by the flip callback.
+ * - A separate engine-tick thread waits on a semaphore posted by the
+ *   VBlank callback.
+ *
+ * The last one is why changing only the render wait still measures 60 FPS.
+ * Use HSYNC, make the render wait non-blocking, unregister the VBlank
+ * callback, and register that same engine-tick callback as the flip callback.
+ * Engine ticks then follow actual presented flips (and RPCS3's FPS limiter)
+ * instead of the emulated 60 Hz VBlank source. */
+static void apply_unlock_fps(void) {
+    static const uintptr_t wait_addr = 0x00530524u;
+    static const uintptr_t handler_addr = 0x0053069Cu;
     flip_mode_sites_t sites;
-    if (!resolve_flip_mode_sites(&sites)) {
-        dbg_print("[patch] allow_screen_tearing skipped; unresolved patch sites\n");
+    uint32_t wait_selector = pt_read32(T, wait_addr + 8u);
+
+    if (pt_read32(T, wait_addr + 0u) != 0x807B0038u ||
+        pt_read32(T, wait_addr + 4u) != 0x38800000u ||
+        (wait_selector != 0x3960005Cu && wait_selector != 0x3960005Du) ||
+        pt_read32(T, wait_addr + 12u) != 0x44000002u ||
+        pt_read32(T, wait_addr + 16u) != 0x387A0050u) {
+        dbg_print("[patch] unlock_fps skipped; not Green wait site\n");
+        return;
+    }
+    if (pt_read32(T, handler_addr + 0u) != 0x80627558u ||
+        pt_read32(T, handler_addr + 12u) != 0x484EEC29u ||
+        pt_read32(T, handler_addr + 16u) != 0xE8410028u ||
+        pt_read32(T, handler_addr + 20u) != 0x8062755Cu ||
+        pt_read32(T, handler_addr + 24u) != 0x484EEBBDu ||
+        pt_read32(T, handler_addr + 28u) != 0xE8410028u) {
+        dbg_print("[patch] unlock_fps skipped; not Green handler sites\n");
+        return;
+    }
+    if (!resolve_green_flip_mode_sites(&sites)) {
+        dbg_print("[patch] unlock_fps skipped; not Green flip sites\n");
         return;
     }
 
     for (size_t i = 0; i < sites.count; i++)
-        write32(sites.sites[i], 0x38600001u); /* li r3,1 ; CELL_GCM_DISPLAY_HSYNC */
+        write32(sites.sites[i], 0x38600001u); /* CELL_GCM_DISPLAY_HSYNC */
+    dbg_print_hex32("[patch] Green vblank_wait", (uint32_t)(wait_addr + 8u));
+    write32(wait_addr + 8u, 0x3960005Du); /* li r11,93 ; sys_semaphore_trywait */
+
+    /* cellGcmSetVBlankHandler(NULL), followed by
+     * cellGcmSetFlipHandler(vblank_tick_callback).  The callback OPD lives at
+     * TOC+0x7558; Green's old flip callback OPD was at TOC+0x755c. */
+    dbg_print_hex32("[patch] Green vblank_handler_arg", (uint32_t)handler_addr);
+    dbg_print_hex32("[patch] Green flip_handler_arg", (uint32_t)(handler_addr + 20u));
+    write32(handler_addr + 0u, 0x38600000u);  /* li r3,0 */
+    write32(handler_addr + 20u, 0x80627558u); /* lwz r3,0x7558(r2) */
 }
 
 /*
@@ -1961,8 +2006,8 @@ static void patches_apply_all_impl(void) {
         apply_net_cleanup_guard();
     if (g_cfg.clearlocks_stub)
         apply_clearlocks_stub();
-    if (g_cfg.allow_screen_tearing)
-        apply_allow_screen_tearing();
+    if (g_cfg.unlock_fps)
+        apply_unlock_fps();
     if (g_cfg.dani_dojo_unlock) {
         apply_dani_dojo_unlock();
         apply_kimidori_dani_proc_main_runtime_fallback();

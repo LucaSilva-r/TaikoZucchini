@@ -8,11 +8,12 @@
 int menu_action_delete_usio_backup(void);
 
 /* Delete the shared /dev_hdd0/plugins/taiko/taiko_config.cfg so next boot
- * regenerates it with defaults. Does NOT touch repatch state (that lives
- * per-game in USRDIR/zucchini_hash). */
+ * regenerates it with defaults. Invalidates the per-game EBOOT patch cache
+ * so binary patches also return to their defaults. */
 int menu_action_delete_config(void);
 
-/* Persist current g_cfg via taiko_cfg_save(). Always returns 0. */
+/* Persist current g_cfg and invalidate the per-game EBOOT patch cache so
+ * binary patch toggles take effect on the next launch. Always returns 0. */
 int menu_action_save_config(void);
 
 /* Relaunch the patched EBOOT.BIN via sys_game_process_exitspawn2. Does

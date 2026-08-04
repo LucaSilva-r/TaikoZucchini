@@ -15,7 +15,7 @@
 #include "storage/chassisinfo_schema.h"
 #include "network/version_check.h"
 
-#define TAIKO_CFG_VERSION 22  /* v22: agent_token for the webMAN agent */
+#define TAIKO_CFG_VERSION 26  /* v26: single opt-in Green FPS unlock */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file (TAIKO_GLOBAL_CONFIG_PATH, exported via runtime.h). A per-game
@@ -46,7 +46,7 @@ taiko_runtime_cfg_t g_cfg = {
     .watchdog_patches     = TAIKO_PATCH_WATCHDOGS,
     .net_cleanup_guard    = TAIKO_PATCH_NET_CLEANUP_GUARD,
     .clearlocks_stub      = TAIKO_PATCH_CLEARLOCKS_STUB,
-    .allow_screen_tearing = TAIKO_PATCH_ALLOW_SCREEN_TEARING,
+    .unlock_fps           = TAIKO_PATCH_UNLOCK_FPS,
     .dani_dojo_unlock     = TAIKO_PATCH_DANI_DOJO_UNLOCK,
     .upscale_to_native    = 1,
     .upscale_blit         = 1,
@@ -117,7 +117,7 @@ static void handle_patches(const char *key, const char *value, void *u) {
     SET_BIT("watchdog_patches",     watchdog_patches);
     SET_BIT("net_cleanup_guard",    net_cleanup_guard);
     SET_BIT("clearlocks_stub",      clearlocks_stub);
-    SET_BIT("allow_screen_tearing", allow_screen_tearing);
+    SET_BIT("unlock_fps",           unlock_fps);
     SET_BIT("dani_dojo_unlock",     dani_dojo_unlock);
     SET_BIT("upscale_to_native",    upscale_to_native);
     SET_BIT("upscale_blit",         upscale_blit);
@@ -560,9 +560,9 @@ static void write_cfg_file(const char *path) {
         "Stub clearlocks() to no-op (file-lock cleanup that conflicts with our hooks).",
         "clearlocks_stub", g_cfg.clearlocks_stub);
     emit_kv_bool(fd,
-        "Set game flip mode to CELL_GCM_DISPLAY_HSYNC instead of VSYNC. "
-        "This can tear, but avoids visible rhythm-lane jumps when a frame misses vblank.",
-        "allow_screen_tearing", g_cfg.allow_screen_tearing);
+        "Green only: unlock rendering from the game's 60 Hz VBlank path. "
+        "RPCS3's Frame Limit controls the resulting frame rate; HSYNC may tear.",
+        "unlock_fps", g_cfg.unlock_fps);
     emit_kv_bool(fd,
         "Unlock Dan-i Dojo type-9 availability on older pre-Red builds. "
         "Self-validates by nearby instruction signatures and skips unknown builds.",

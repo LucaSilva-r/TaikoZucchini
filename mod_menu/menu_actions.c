@@ -28,6 +28,17 @@ static int unlink_in_usrdir(const char *tail) {
     return 0;
 }
 
+static void invalidate_eboot_patch_cache(void) {
+    char path[256];
+    if (usrdir_resolve_path("zucchini_hash", path, sizeof(path))) {
+        int rc = cellFsUnlink(path);
+        if (rc != CELL_FS_SUCCEEDED && rc != CELL_FS_ENOENT)
+            dbg_print_hex32("[menu_act] invalidate EBOOT hash rc", (uint32_t)rc);
+    } else {
+        dbg_print("[menu_act] cannot invalidate EBOOT hash; USRDIR unresolved\n");
+    }
+}
+
 int menu_action_delete_usio_backup(void) {
     return unlink_in_usrdir("usiobackup.bin");
 }
@@ -35,6 +46,7 @@ int menu_action_delete_usio_backup(void) {
 int menu_action_delete_config(void) {
     /* Shared config now lives next to the module, not in USRDIR. */
     int rc = cellFsUnlink(TAIKO_GLOBAL_CONFIG_PATH);
+    invalidate_eboot_patch_cache();
     if (rc != CELL_FS_SUCCEEDED) {
         dbg_print_hex32("[menu_act] delete global cfg rc", (uint32_t)rc);
         return -2;
@@ -44,6 +56,11 @@ int menu_action_delete_config(void) {
 
 int menu_action_save_config(void) {
     taiko_cfg_save();
+
+    /* Patch toggles are baked into EBOOT.BIN.  Drop the per-game success
+     * cache so the next launch regenerates it from EBOOT_ORIGINAL.BIN using
+     * the newly saved settings.  Missing state is already the desired result. */
+    invalidate_eboot_patch_cache();
     return 0;
 }
 
