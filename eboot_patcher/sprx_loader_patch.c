@@ -4,6 +4,7 @@
 
 #include "sprx_loader_patch.h"
 #include "elf_patch_util.h"
+#include "eboot_inline_specs.h"
 #include "debug.h"
 #include "eboot_fpt.h"
 #include "patches/patches.h"
@@ -1399,6 +1400,88 @@ static int append_fpt_and_patch_stubs(self_ctx_t *ctx, elf64_phdr_t *phdrs,
     store_be32(ctx->buf + fpt_off + 0x00, TAIKO_FPT_MAGIC);
     store_be32(ctx->buf + fpt_off + 0x04, TAIKO_FPT_VERSION);
     store_be32(ctx->buf + fpt_off + 0x08, TAIKO_FPT_SLOT_COUNT);
+    store_be32(ctx->buf + fpt_off +
+                   offsetof(taiko_fpt_t, animation_scale_bits),
+               0x3F800000u); /* 1.0f until the flip hook measures a delta */
+    store_be32(ctx->buf + fpt_off +
+                   offsetof(taiko_fpt_t, video_frame_accumulator_bits),
+               0u);
+    store_be32(ctx->buf + fpt_off +
+                   offsetof(taiko_fpt_t, video_avsync_accumulator_bits),
+               0u);
+
+    {
+        uint32_t sites[2];
+        size_t site_count = eboot_inline_green_animation_scale_sites(
+            sites, sizeof(sites) / sizeof(sites[0]));
+        uint32_t cell_va = (uint32_t)(
+            fpt_va + offsetof(taiko_fpt_t, animation_scale_bits));
+        for (size_t i = 0;
+             i < site_count && i < sizeof(sites) / sizeof(sites[0]); i++) {
+            uint64_t site_off = 0;
+            if (va_to_off(ctx, phdrs, phnum, sites[i], &site_off) != 0 ||
+                site_off + 8u > ctx->buf_len ||
+                load_be32(ctx->buf + site_off) != 0x3D807A12u ||
+                load_be32(ctx->buf + site_off + 4u) != 0x618C5CA1u)
+                return -16;
+            store_be32(ctx->buf + site_off,
+                       0x3D800000u | ((cell_va >> 16) & 0xFFFFu));
+            store_be32(ctx->buf + site_off + 4u,
+                       0x618C0000u | (cell_va & 0xFFFFu));
+            dbg_print_hex32("[patch] Green animation scale hook", sites[i]);
+        }
+        if (site_count)
+            dbg_print_hex32("[patch] Green animation scale cell", cell_va);
+    }
+
+    {
+        uint32_t sites[1];
+        size_t site_count = eboot_inline_green_video_accumulator_sites(
+            sites, sizeof(sites) / sizeof(sites[0]));
+        uint32_t cell_va = (uint32_t)(
+            fpt_va + offsetof(taiko_fpt_t, video_frame_accumulator_bits));
+        for (size_t i = 0;
+             i < site_count && i < sizeof(sites) / sizeof(sites[0]); i++) {
+            uint64_t site_off = 0;
+            if (va_to_off(ctx, phdrs, phnum, sites[i], &site_off) != 0 ||
+                site_off + 8u > ctx->buf_len ||
+                load_be32(ctx->buf + site_off) != 0x3D807A12u ||
+                load_be32(ctx->buf + site_off + 4u) != 0x618C5CA1u)
+                return -17;
+            store_be32(ctx->buf + site_off,
+                       0x3D800000u | ((cell_va >> 16) & 0xFFFFu));
+            store_be32(ctx->buf + site_off + 4u,
+                       0x618C0000u | (cell_va & 0xFFFFu));
+            dbg_print_hex32("[patch] Green video frame gate", sites[i]);
+        }
+        if (site_count)
+            dbg_print_hex32("[patch] Green video accumulator cell", cell_va);
+    }
+
+    {
+        uint32_t sites[1];
+        size_t site_count = eboot_inline_green_video_avsync_accumulator_sites(
+            sites, sizeof(sites) / sizeof(sites[0]));
+        uint32_t cell_va = (uint32_t)(
+            fpt_va + offsetof(taiko_fpt_t, video_avsync_accumulator_bits));
+        for (size_t i = 0;
+             i < site_count && i < sizeof(sites) / sizeof(sites[0]); i++) {
+            uint64_t site_off = 0;
+            if (va_to_off(ctx, phdrs, phnum, sites[i], &site_off) != 0 ||
+                site_off + 8u > ctx->buf_len ||
+                load_be32(ctx->buf + site_off) != 0x3D807A12u ||
+                load_be32(ctx->buf + site_off + 4u) != 0x618C5CA1u)
+                return -18;
+            store_be32(ctx->buf + site_off,
+                       0x3D800000u | ((cell_va >> 16) & 0xFFFFu));
+            store_be32(ctx->buf + site_off + 4u,
+                       0x618C0000u | (cell_va & 0xFFFFu));
+            dbg_print_hex32("[patch] Green video AV-sync gate", sites[i]);
+        }
+        if (site_count)
+            dbg_print_hex32("[patch] Green video AV-sync accumulator cell",
+                            cell_va);
+    }
 
     {
         const taiko_song_loader_manifest_t *song = song_loader_patch_manifest();

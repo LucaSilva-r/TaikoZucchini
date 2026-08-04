@@ -6,7 +6,7 @@
 #include "song_loader_manifest.h"
 
 #define TAIKO_FPT_MAGIC   0x544B4650u /* TKFP */
-#define TAIKO_FPT_VERSION 11u          /* v11: game build id scanned from the EBOOT */
+#define TAIKO_FPT_VERSION 15u          /* v15: Green CellSail AV-sync pacing */
 
 /* "S11113-1-NA-MPR0-N02" is 20 chars; 24 leaves room + alignment. */
 #define TAIKO_FPT_BUILD_ID_BYTES 24u
@@ -123,6 +123,23 @@ typedef struct {
      * This is the game's own statement of what it is, unlike PARAM.SFO,
      * which is repack-editable metadata. Empty if the scan found nothing. */
     char     game_build_id[TAIKO_FPT_BUILD_ID_BYTES];
+    /* v12: measured flip interval in authored 60 Hz frame units, consumed by
+     * Green's Lumen player and native Don3D NU motion step. Typical values:
+     * 60 FPS = 1.0, 120 FPS = 0.5, 144 FPS = 0.4167. */
+    uint32_t animation_scale_bits;
+    /* v13: fractional 60 Hz CellSail service budget. The stock game calls
+     * GetFrame at 60 Hz for every source rate; the baked gate suppresses only
+     * the extra calls introduced by unlocked vblank. */
+    uint32_t video_frame_accumulator_bits;
+    /* v14 diagnostics: wrapper entries and permitted GetFrame calls. These
+     * let live tracing compare the movie update cadence with RSX flips without
+     * stopping the PPU at a breakpoint. */
+    uint32_t video_wrapper_call_count;
+    uint32_t video_get_frame_count;
+    /* v15: independent 60 Hz budget and counters for UpdateAvSync. */
+    uint32_t video_avsync_accumulator_bits;
+    uint32_t video_avsync_call_count;
+    uint32_t video_avsync_update_count;
 } taiko_fpt_t;
 
 /* Write the 12-digit `serial12` into the FPT serial_utf16 cell as
@@ -141,6 +158,10 @@ uint32_t taiko_fpt_version_seen(void);
 /* Build id the patcher scanned out of this EBOOT ("ST8100-7-NA-MPR0-A06"),
  * or NULL on pre-v11 tables / a failed scan. */
 const char *taiko_fpt_game_build_id(void);
+/* Publish the measured shared Green Lumen/Don3D animation delta. Returns 0 on
+ * older tables that do not contain the live cell. */
+int taiko_fpt_publish_animation_scale(float scale);
+uintptr_t taiko_fpt_animation_scale_address(void);
 int taiko_fpt_available(void);
 const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void);
 /* Publish the v9 songselect hook cells. Return 0 (and do nothing) on tables

@@ -4,9 +4,10 @@
 #include <stdint.h>
 
 void taiko_frame_init(void);
-/* Reads pads, builds 0x60-byte USIO Taiko input frame. When advance_input
- * is non-zero, coin / test / hit edges are consumed and the frame is cached
- * for the next 0x1100 (previous) read. */
+/* Reads pads and builds a 0x60-byte USIO Taiko input frame. When advance_input
+ * is non-zero, coin/test/hit edges are consumed, drum peaks are shaped by
+ * elapsed time across independent producer/consumer threads, and the frame is
+ * cached for the next 0x1100 (previous) read. */
 void taiko_frame_build(uint8_t out[0x60], int advance_input);
 
 /* Gate all controller/keyboard input out of the virtual USIO frame. While

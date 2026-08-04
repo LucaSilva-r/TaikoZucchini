@@ -4,13 +4,15 @@
 #include <stdint.h>
 #include <string.h>
 
-#define USIO_HIT_PEAK   0xFFFFu
-#define HIT_PEAK_FRAMES 1     /* Hold PEAK for N consecutive game frames so
-                                 the game's drum threshold detector reliably
-                                 latches the hit even if its sample window
-                                 lands mid-pulse. */
-#define HIT_COOL_FRAMES 1     /* Forced 0 frame(s) after the pulse so two
-                                 distinct hits are seen as separate edges. */
+#include <sys/sys_time.h>
+
+#define USIO_HIT_PEAK 0xFFFFu
+/* The game requests 0x1080/0x1100 input pairs from a PPU thread separate from
+ * the flip thread. Measured in-song at 160-177 displayed FPS, input remained
+ * near 76 Hz. A one-request-cycle peak therefore becomes phase-sensitive.
+ * Keep each peak high for slightly longer than one authored 60 Hz interval so
+ * it overlaps consecutive request/consumer windows. */
+#define HIT_PEAK_US 18000ULL
 
 static uint16_t g_coin_counter;
 static int      g_test_on;
@@ -24,13 +26,12 @@ static volatile int g_gated;
  * resume. */
 static volatile int g_release_gate;
 
-/* Per-slot pulse state. `remaining_high` counts down PEAK frames pending,
- * `cooldown` enforces 0 frame(s) between distinct hits. No queue — new
- * edges arriving during the pulse or cooldown are dropped, so spamming
- * a button doesn't keep emitting hits after release. */
+/* Per-slot pulse state. The first read at/after `high_until_us` emits the
+ * required neutral sample and clears the deadline. No queue: new edges during
+ * a peak or its trailing neutral sample are dropped, matching the old pulse
+ * shaper without leaving delayed ghost hits after release. */
 typedef struct {
-    uint8_t remaining_high;
-    uint8_t cooldown;
+    uint64_t high_until_us;
 } hit_slot_state_t;
 static hit_slot_state_t g_hit_state[2][4];
 
@@ -123,31 +124,24 @@ void taiko_frame_build(uint8_t out[0x60], int advance_input) {
      *   +32..+39 = P1 drum (SL, CL, CR, SR), uint16 LE each.
      *   +40..+47 = P2 drum (SL, CL, CR, SR).
      *
-     * Pulse shaping per slot (no queue):
-     *  - When the slot is armed and a new edge arrives, emit PEAK for
-     *    HIT_PEAK_FRAMES consecutive frames, then 0 for HIT_COOL_FRAMES.
-     *  - Edges arriving during the pulse or cooldown are ignored, so
-     *    holding/spam-mashing a button does not keep firing extra hits
-     *    after release. */
+     * Pulse shaping is measured in wall-clock time rather than request frames.
+     * This prevents the independent input and gameplay threads from drifting
+     * into a phase where peaks disappear at rates such as 75 Hz. */
     if (advance_input) {
+        uint64_t now_us = (uint64_t)sys_time_get_system_time();
         for (int p = 0; p < 2; p++) {
             for (int i = 0; i < 4; i++) {
                 hit_slot_state_t *st = &g_hit_state[p][i];
                 uint16_t v = 0;
-                if (st->remaining_high > 0) {
+                if (st->high_until_us && now_us < st->high_until_us) {
                     v = USIO_HIT_PEAK;
-                    st->remaining_high--;
-                    if (st->remaining_high == 0)
-                        st->cooldown = HIT_COOL_FRAMES;
-                } else if (st->cooldown > 0) {
-                    st->cooldown--;
+                } else if (st->high_until_us) {
+                    /* This read is the mandatory low sample separating two
+                     * sensor edges. Drop a coincident edge, as before. */
+                    st->high_until_us = 0;
                 } else if (snap.hit[p][i]) {
-                    /* Armed + fresh edge: start the pulse. First frame
-                     * emits PEAK; remaining_high tracks the remainder. */
                     v = USIO_HIT_PEAK;
-                    st->remaining_high = (uint8_t)(HIT_PEAK_FRAMES - 1);
-                    if (st->remaining_high == 0)
-                        st->cooldown = HIT_COOL_FRAMES;
+                    st->high_until_us = now_us + HIT_PEAK_US;
                 }
 
                 const int off = 32 + p * 8 + i * 2;

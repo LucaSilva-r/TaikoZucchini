@@ -24,6 +24,13 @@
 #define OVERLAY_MESSAGE_BOX_FRAMES 600
 #define OVERLAY_GCM_HEADROOM_WORDS 32
 
+/* Convert the measured guest flip interval into authored 60 Hz frame units.
+ * Ordinary pacing variation is preserved as elapsed time. Ignore debugger,
+ * loading, and monitor-transition gaps rather than jumping animations ahead. */
+#define ANIMATION_TIMING_GAP_US  250000ULL
+#define ANIMATION_SCALE_MAX      4.0f
+#define ANIMATION_SCALE_PER_US   0.00006f /* delta_us * 60 / 1,000,000 */
+
 /* BLUE boots with only ~8.5 MiB of user memory free, and a game-side
  * operator new failure there throws std::bad_alloc that nothing catches (the
  * unwinder then walks off the thread stack and takes a DSI). So this mapping is
@@ -156,6 +163,12 @@ static uintptr_t g_orig_set_display_buffer;
 static overlay_buffer_t g_buffers[8];
 static void *g_local_base;
 static uint64_t g_boot_us;
+
+typedef struct {
+    uint64_t previous_us;
+} animation_timing_t;
+
+static animation_timing_t g_animation_timing;
 
 static uint32_t *g_overlay_mem;
 static uint32_t g_overlay_io;
@@ -1527,7 +1540,28 @@ size_t taiko_overlay_capture_size(void) {
     return 54 + (size_t)(((w * 3u + 3u) & ~3u)) * h;
 }
 
+/* Animation work for a frame happens before its flip, so the interval observed
+ * here is published for the next frame. This is intentionally unsmoothed: the
+ * multiplier represents elapsed wall-clock time, not a configured FPS target. */
+static void animation_timing_sample(uint64_t now) {
+    uint64_t previous = g_animation_timing.previous_us;
+    float scale = 1.0f;
+    g_animation_timing.previous_us = now;
+
+    if (previous && now > previous) {
+        uint64_t delta_us = now - previous;
+        if (delta_us < ANIMATION_TIMING_GAP_US) {
+            scale = (float)delta_us * ANIMATION_SCALE_PER_US;
+            if (scale > ANIMATION_SCALE_MAX)
+                scale = ANIMATION_SCALE_MAX;
+        }
+    }
+
+    (void)taiko_fpt_publish_animation_scale(scale);
+}
+
 static int hk_flip_command(void *ctx, uint8_t id) {
+    animation_timing_sample((uint64_t)sys_time_get_system_time());
     g_last_flip_id = id;
     if (!g_local_base) {
         CellGcmConfig cfg;
@@ -1762,6 +1796,8 @@ void taiko_overlay_hooks_install(void) {
     if (!g_boot_us)
         g_boot_us = (uint64_t)sys_time_get_system_time();
     cache_display_info();
+    g_animation_timing.previous_us = 0;
+    (void)taiko_fpt_publish_animation_scale(1.0f);
 
     g_orig_flip_command = taiko_fpt_original_opd(TAIKO_FPT_GCM_FLIP_COMMAND);
     g_orig_set_display_buffer =

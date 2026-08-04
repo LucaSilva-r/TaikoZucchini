@@ -146,7 +146,11 @@ ASM_SRCS := patches/asm/white_dani_taikojuku_hook.S \
             patches/asm/momoiro_dani_resource_retain_hook.S \
             patches/asm/momoiro_dani_request_status2_guard_hook.S \
             patches/asm/momoiro_dani_type10_ready_hook.S \
-            patches/asm/pre_red_dani_emit_gate_hook.S
+            patches/asm/pre_red_dani_emit_gate_hook.S \
+            patches/asm/green_lumen_scale_hook.S \
+            patches/asm/green_don3d_scale_hook.S \
+            patches/asm/green_video_frame_gate_hook.S \
+            patches/asm/green_video_avsync_gate_hook.S
 ASM_OBJS := $(ASM_SRCS:.S=.o)
 OBJS += $(ASM_OBJS)
 
@@ -322,6 +326,10 @@ patches/asm/momoiro_dani_resource_retain_hook.o: patches/asm/momoiro_dani_resour
 patches/asm/momoiro_dani_request_status2_guard_hook.o: patches/asm/momoiro_dani_request_status2_guard_hook.S
 patches/asm/momoiro_dani_type10_ready_hook.o: patches/asm/momoiro_dani_type10_ready_hook.S
 patches/asm/pre_red_dani_emit_gate_hook.o: patches/asm/pre_red_dani_emit_gate_hook.S
+patches/asm/green_lumen_scale_hook.o: patches/asm/green_lumen_scale_hook.S
+patches/asm/green_don3d_scale_hook.o: patches/asm/green_don3d_scale_hook.S
+patches/asm/green_video_frame_gate_hook.o: patches/asm/green_video_frame_gate_hook.S
+patches/asm/green_video_avsync_gate_hook.o: patches/asm/green_video_avsync_gate_hook.S
 storage/data00000_redirect.o: storage/data00000_redirect.c storage/data00000_redirect.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h hooks/chassisinfo_hook.h
 hooks/camera_diag.o: hooks/camera_diag.c hooks/camera_diag.h config.h core/debug.h core/icache.h eboot_fpt.h config/runtime.h
 qr/camera_qr.o:   qr/camera_qr.c   qr/camera_qr.h qr/qr_spu_host.h qr_spu/qr_spu_shared.h config.h core/debug.h qr/qr_selftest_data.h $(QUIRC_DIR)/lib/quirc.h

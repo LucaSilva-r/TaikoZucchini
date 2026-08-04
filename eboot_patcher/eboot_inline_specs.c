@@ -32,6 +32,294 @@ extern const uint8_t taiko_momoiro_dani_request_status2_guard_hook_start[];
 extern const uint8_t taiko_momoiro_dani_request_status2_guard_hook_end[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_start[];
 extern const uint8_t taiko_pre_red_dani_emit_gate_hook_end[];
+extern const uint8_t taiko_green_lumen_scale_hook_start[];
+extern const uint8_t taiko_green_lumen_scale_hook_end[];
+extern const uint8_t taiko_green_lumen_scale_addr[];
+extern const uint8_t taiko_green_don3d_scale_hook_start[];
+extern const uint8_t taiko_green_don3d_scale_hook_end[];
+extern const uint8_t taiko_green_don3d_scale_addr[];
+extern const uint8_t taiko_green_video_frame_gate_hook_start[];
+extern const uint8_t taiko_green_video_frame_gate_hook_end[];
+extern const uint8_t taiko_green_video_frame_gate_accum_addr[];
+extern const uint8_t taiko_green_video_avsync_gate_hook_start[];
+extern const uint8_t taiko_green_video_avsync_gate_hook_end[];
+extern const uint8_t taiko_green_video_avsync_gate_accum_addr[];
+
+static uint32_t g_green_lumen_scale_site;
+static uint32_t g_green_don3d_scale_site;
+static uint32_t g_green_video_accumulator_site;
+static uint32_t g_green_video_avsync_accumulator_site;
+
+static int record_green_animation_scale_site(
+    const eboot_inline_hook_spec_t *spec, uint32_t payload_va, uint8_t *dst,
+    size_t dst_size) {
+    const uint8_t *marker;
+    uint32_t *site;
+    if (spec->payload_start == taiko_green_lumen_scale_hook_start) {
+        marker = taiko_green_lumen_scale_addr;
+        site = &g_green_lumen_scale_site;
+    } else if (spec->payload_start == taiko_green_don3d_scale_hook_start) {
+        marker = taiko_green_don3d_scale_addr;
+        site = &g_green_don3d_scale_site;
+    } else {
+        return -1;
+    }
+    size_t offset = (size_t)(marker - spec->payload_start);
+    if (offset + 8u > dst_size ||
+        elf_patch_load_be32(dst + offset) != 0x3D807A12u ||
+        elf_patch_load_be32(dst + offset + 4u) != 0x618C5CA1u)
+        return -2;
+    if (payload_va + offset > 0xFFFFFFFFu)
+        return -3;
+    *site = payload_va + (uint32_t)offset;
+    return 0;
+}
+
+size_t eboot_inline_green_animation_scale_sites(uint32_t *out,
+                                                size_t capacity) {
+    size_t count = 0;
+    if (g_green_lumen_scale_site) {
+        if (out && count < capacity)
+            out[count] = g_green_lumen_scale_site;
+        count++;
+    }
+    if (g_green_don3d_scale_site) {
+        if (out && count < capacity)
+            out[count] = g_green_don3d_scale_site;
+        count++;
+    }
+    return count;
+}
+
+static int record_green_video_accumulator_site(
+    const eboot_inline_hook_spec_t *spec, uint32_t payload_va, uint8_t *dst,
+    size_t dst_size) {
+    size_t offset = (size_t)(taiko_green_video_frame_gate_accum_addr -
+                             spec->payload_start);
+    if (spec->payload_start != taiko_green_video_frame_gate_hook_start ||
+        offset + 8u > dst_size ||
+        elf_patch_load_be32(dst + offset) != 0x3D807A12u ||
+        elf_patch_load_be32(dst + offset + 4u) != 0x618C5CA1u)
+        return -1;
+    if (payload_va + offset > 0xFFFFFFFFu)
+        return -2;
+    g_green_video_accumulator_site = payload_va + (uint32_t)offset;
+    return 0;
+}
+
+size_t eboot_inline_green_video_accumulator_sites(uint32_t *out,
+                                                  size_t capacity) {
+    if (!g_green_video_accumulator_site)
+        return 0;
+    if (out && capacity)
+        out[0] = g_green_video_accumulator_site;
+    return 1;
+}
+
+static int record_green_video_avsync_accumulator_site(
+    const eboot_inline_hook_spec_t *spec, uint32_t payload_va, uint8_t *dst,
+    size_t dst_size) {
+    size_t offset = (size_t)(taiko_green_video_avsync_gate_accum_addr -
+                             spec->payload_start);
+    if (spec->payload_start != taiko_green_video_avsync_gate_hook_start ||
+        offset + 8u > dst_size ||
+        elf_patch_load_be32(dst + offset) != 0x3D807A12u ||
+        elf_patch_load_be32(dst + offset + 4u) != 0x618C5CA1u)
+        return -1;
+    if (payload_va + offset > 0xFFFFFFFFu)
+        return -2;
+    g_green_video_avsync_accumulator_site = payload_va + (uint32_t)offset;
+    return 0;
+}
+
+size_t eboot_inline_green_video_avsync_accumulator_sites(uint32_t *out,
+                                                         size_t capacity) {
+    if (!g_green_video_avsync_accumulator_site)
+        return 0;
+    if (out && capacity)
+        out[0] = g_green_video_avsync_accumulator_site;
+    return 1;
+}
+
+static const uint32_t GREEN_LUMEN_SCALE_WORDS[] = {
+    0xEC22082Au, /* fadds f1,f2,f1 */
+    0x83DE005Cu, /* lwz r30,0x5c(r30) */
+    0xD0230050u, /* stfs f1,0x50(r3) */
+    0x41820014u, /* beq +0x14 */
+};
+
+static const uint32_t GREEN_LUMEN_ENTRY_WORDS[] = {
+    0xF821FF81u, /* stdu r1,-0x80(r1) */
+    0x7C0802A6u, /* mflr r0 */
+    0xF8010090u, /* std r0,0x90(r1) */
+    0xFBC10070u, /* std r30,0x70(r1) */
+};
+
+static const eboot_inline_signature_t GREEN_LUMEN_SCALE_SIGNATURES[] = {
+    {
+        "Green Lumen movie delta accumulation",
+        0x0038B56Cu,
+        GREEN_LUMEN_SCALE_WORDS,
+        NULL,
+        sizeof(GREEN_LUMEN_SCALE_WORDS) /
+            sizeof(GREEN_LUMEN_SCALE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "Green Lumen player tick entry",
+        0x0038B458u,
+        GREEN_LUMEN_ENTRY_WORDS,
+        NULL,
+        sizeof(GREEN_LUMEN_ENTRY_WORDS) /
+            sizeof(GREEN_LUMEN_ENTRY_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const uint32_t GREEN_DON3D_SCALE_WORDS[] = {
+    0xFFE00890u, /* fmr f31,f1 */
+    0x7BD80020u, /* rldicl r24,r30,0,32 */
+    0xFB6100A0u, /* std r27,0xa0(r1) */
+    0xFBE100C0u, /* std r31,0xc0(r1) */
+};
+
+static const uint32_t GREEN_DON3D_ADVANCE_ENTRY_WORDS[] = {
+    0xF821FF31u, /* stdu r1,-0xd0(r1) */
+    0x7C0802A6u, /* mflr r0 */
+    0xFBC100B8u, /* std r30,0xb8(r1) */
+    0x3BC301F8u, /* addi r30,r3,0x1f8 */
+};
+
+static const uint32_t GREEN_DON3D_ACTION_CORE_WORDS[] = {
+    0xC03C0008u, /* lfs f1,8(r28) */
+    0x78840020u, /* rldicl r4,r4,0,32 */
+    0x807C0004u, /* lwz r3,4(r28) */
+    0xEC21F824u, /* fdivs f1,f1,f31 */
+};
+
+static const uint32_t GREEN_DON3D_ACTION_CALL_WORDS[] = {
+    0x4800A341u, /* bl 0x2a6bb4 */
+};
+
+static const eboot_inline_signature_t GREEN_DON3D_SCALE_SIGNATURES[] = {
+    {
+        "Green Don3D shared NU motion step",
+        0x002A6BCCu,
+        GREEN_DON3D_SCALE_WORDS,
+        NULL,
+        sizeof(GREEN_DON3D_SCALE_WORDS) /
+            sizeof(GREEN_DON3D_SCALE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "Green Don3D shared NU motion entry",
+        0x002A6BB4u,
+        GREEN_DON3D_ADVANCE_ENTRY_WORDS,
+        NULL,
+        sizeof(GREEN_DON3D_ADVANCE_ENTRY_WORDS) /
+            sizeof(GREEN_DON3D_ADVANCE_ENTRY_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "Green CDonAction Exec motion-step core",
+        0x0029C850u,
+        GREEN_DON3D_ACTION_CORE_WORDS,
+        NULL,
+        sizeof(GREEN_DON3D_ACTION_CORE_WORDS) /
+            sizeof(GREEN_DON3D_ACTION_CORE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "Green CDonAction call to shared NU motion",
+        0x0029C874u,
+        GREEN_DON3D_ACTION_CALL_WORDS,
+        NULL,
+        sizeof(GREEN_DON3D_ACTION_CALL_WORDS) /
+            sizeof(GREEN_DON3D_ACTION_CALL_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const uint32_t GREEN_VIDEO_FRAME_GATE_WORDS[] = {
+    0x381F0020u, /* addi r0,r31,0x20 */
+    0x38810078u, /* addi r4,r1,0x78 */
+    0x781D0020u, /* rldicl r29,r0,0,32 */
+    0x7FA3EB78u, /* mr r3,r29 */
+};
+
+static const uint32_t GREEN_VIDEO_TIME_CONVERT_WORDS[] = {
+    0x38000000u, /* li r0,0 */
+    0xE8810088u, /* ld r4,0x88(r1) */
+    0x7FA3EB78u, /* mr r3,r29 */
+    0x38A10070u, /* addi r5,r1,0x70 */
+    0xF8010070u, /* std r0,0x70(r1) */
+};
+
+static const eboot_inline_signature_t GREEN_VIDEO_FRAME_GATE_SIGNATURES[] = {
+    {
+        "Green CellSail per-render frame pull",
+        0x002901FCu,
+        GREEN_VIDEO_FRAME_GATE_WORDS,
+        NULL,
+        sizeof(GREEN_VIDEO_FRAME_GATE_WORDS) /
+            sizeof(GREEN_VIDEO_FRAME_GATE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "Green CellSail PTS conversion context",
+        0x00290270u,
+        GREEN_VIDEO_TIME_CONVERT_WORDS,
+        NULL,
+        sizeof(GREEN_VIDEO_TIME_CONVERT_WORDS) /
+            sizeof(GREEN_VIDEO_TIME_CONVERT_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
+
+static const uint32_t GREEN_VIDEO_AVSYNC_GATE_WORDS[] = {
+    0x4878E429u, /* bl cellGcmGetLastFlipTime */
+    0xE8410028u, /* ld r2,0x28(r1) */
+    0x809F0120u, /* lwz r4,0x120(r31) */
+    0x7C651B78u, /* mr r5,r3 */
+};
+
+static const uint32_t GREEN_VIDEO_AVSYNC_CONTEXT_WORDS[] = {
+    0x387F0020u, /* addi r3,r31,0x20 */
+    0x78630020u, /* rldicl r3,r3,0,32 */
+    0x4878F831u, /* bl cellSailGraphicsAdapterUpdateAvSync */
+    0xE8410028u, /* ld r2,0x28(r1) */
+};
+
+static const eboot_inline_signature_t GREEN_VIDEO_AVSYNC_GATE_SIGNATURES[] = {
+    {
+        "Green CellSail per-render AV-sync update",
+        0x0028EBA8u,
+        GREEN_VIDEO_AVSYNC_GATE_WORDS,
+        NULL,
+        sizeof(GREEN_VIDEO_AVSYNC_GATE_WORDS) /
+            sizeof(GREEN_VIDEO_AVSYNC_GATE_WORDS[0]),
+        NULL,
+        NULL,
+    },
+    {
+        "Green CellSail AV-sync adapter call context",
+        0x0028EBB8u,
+        GREEN_VIDEO_AVSYNC_CONTEXT_WORDS,
+        NULL,
+        sizeof(GREEN_VIDEO_AVSYNC_CONTEXT_WORDS) /
+            sizeof(GREEN_VIDEO_AVSYNC_CONTEXT_WORDS[0]),
+        NULL,
+        NULL,
+    },
+};
 
 enum {
     PRE_RED_DANI_STATE_LOAD_MAGIC = 0x0DAD1001u,
@@ -873,6 +1161,70 @@ static int patch_kimidori_dani_state4_service_table(self_ctx_t *ctx) {
 
 static const eboot_inline_hook_spec_t INLINE_HOOK_SPECS[] = {
     {
+        "unlock_fps",
+        "green-lumen-live-movie-scale",
+        0x0038B56Cu,
+        GREEN_LUMEN_SCALE_SIGNATURES,
+        sizeof(GREEN_LUMEN_SCALE_SIGNATURES) /
+            sizeof(GREEN_LUMEN_SCALE_SIGNATURES[0]),
+        taiko_green_lumen_scale_hook_start,
+        taiko_green_lumen_scale_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_HOOK_NEXT,
+        0u,
+        NULL,
+        record_green_animation_scale_site,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "unlock_fps",
+        "green-don3d-live-native-motion-scale",
+        0x002A6BCCu,
+        GREEN_DON3D_SCALE_SIGNATURES,
+        sizeof(GREEN_DON3D_SCALE_SIGNATURES) /
+            sizeof(GREEN_DON3D_SCALE_SIGNATURES[0]),
+        taiko_green_don3d_scale_hook_start,
+        taiko_green_don3d_scale_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_HOOK_NEXT,
+        0u,
+        NULL,
+        record_green_animation_scale_site,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "unlock_fps",
+        "green-cellsail-video-frame-gate",
+        0x002901FCu,
+        GREEN_VIDEO_FRAME_GATE_SIGNATURES,
+        sizeof(GREEN_VIDEO_FRAME_GATE_SIGNATURES) /
+            sizeof(GREEN_VIDEO_FRAME_GATE_SIGNATURES[0]),
+        taiko_green_video_frame_gate_hook_start,
+        taiko_green_video_frame_gate_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_HOOK_NEXT,
+        0u,
+        NULL,
+        record_green_video_accumulator_site,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
+        "unlock_fps",
+        "green-cellsail-video-avsync-gate",
+        0x0028EBA8u,
+        GREEN_VIDEO_AVSYNC_GATE_SIGNATURES,
+        sizeof(GREEN_VIDEO_AVSYNC_GATE_SIGNATURES) /
+            sizeof(GREEN_VIDEO_AVSYNC_GATE_SIGNATURES[0]),
+        taiko_green_video_avsync_gate_hook_start,
+        taiko_green_video_avsync_gate_hook_end,
+        4u,
+        EBOOT_INLINE_RETURN_HOOK_NEXT,
+        0u,
+        NULL,
+        record_green_video_avsync_accumulator_site,
+        { 0u, 0u, 0u, 0u },
+    },
+    {
         "dani_dojo_unlock",
         "white-st71-v07r00-dani-emit-gate",
         0x0067DE0Cu,
@@ -1086,12 +1438,29 @@ static const size_t INLINE_HOOK_SPEC_COUNT =
     sizeof(INLINE_HOOK_SPECS) / sizeof(INLINE_HOOK_SPECS[0]);
 
 int eboot_inline_hooks_apply(self_ctx_t *ctx) {
-    if (!g_cfg.dani_dojo_unlock)
-        return 0;
-    int rc = patch_kimidori_dani_state4_service_table(ctx);
-    if (rc != 0)
-        return rc;
-    return eboot_inline_hook_apply(ctx, INLINE_HOOK_SPECS,
-                                   INLINE_HOOK_SPEC_COUNT,
-                                   "dani_dojo_unlock");
+    int rc = 0;
+    g_green_lumen_scale_site = 0;
+    g_green_don3d_scale_site = 0;
+    g_green_video_accumulator_site = 0;
+
+    if (g_cfg.dani_dojo_unlock) {
+        rc = patch_kimidori_dani_state4_service_table(ctx);
+        if (rc != 0)
+            return rc;
+        rc = eboot_inline_hook_apply(ctx, INLINE_HOOK_SPECS,
+                                     INLINE_HOOK_SPEC_COUNT,
+                                     "dani_dojo_unlock");
+        if (rc != 0)
+            return rc;
+    }
+
+    if (g_cfg.unlock_fps) {
+        rc = eboot_inline_hook_apply(ctx, INLINE_HOOK_SPECS,
+                                     INLINE_HOOK_SPEC_COUNT,
+                                     "unlock_fps");
+        if (rc != 0)
+            return rc;
+    }
+
+    return 0;
 }

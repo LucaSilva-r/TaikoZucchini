@@ -57,6 +57,10 @@ static uintptr_t fpt_total_size(uint32_t version, uint32_t slots) {
         size += (3u + 2u * TAIKO_SONG_NATIVE_COUNT) * sizeof(uint32_t);
     if (version >= 10u)
         size += sizeof(uint32_t);
+    if (version >= 11u)
+        size += TAIKO_FPT_BUILD_ID_BYTES;
+    if (version >= 12u)
+        size += sizeof(uint32_t);
     return size;
 }
 
@@ -239,6 +243,27 @@ const char *taiko_fpt_game_build_id(void) {
         if (!t->game_build_id[i])
             return t->game_build_id;
     return NULL;
+}
+
+int taiko_fpt_publish_animation_scale(float scale) {
+    union {
+        float f;
+        uint32_t u;
+    } bits;
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 12u)
+        return 0;
+    bits.f = scale;
+    *(volatile uint32_t *)&t->animation_scale_bits = bits.u;
+    __asm__ volatile("sync" ::: "memory");
+    return 1;
+}
+
+uintptr_t taiko_fpt_animation_scale_address(void) {
+    taiko_fpt_t *t = get_fpt();
+    if (!t || t->version < 12u)
+        return 0;
+    return (uintptr_t)&t->animation_scale_bits;
 }
 
 const taiko_song_loader_manifest_t *taiko_fpt_song_loader_manifest(void) {
