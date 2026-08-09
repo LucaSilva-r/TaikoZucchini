@@ -1552,7 +1552,10 @@ int http_websocket_run(const char *host, int port, const char *path,
         goto done;
 
     dbg_print("[control] websocket connected\n");
-    int64_t next_outgoing = 0;
+    /* Give the connector's READY frame one receive window before starting a
+     * reconnect heartbeat. READY re-publishes both drums, so control-plane
+     * identity reaches the server ahead of inventory even on a slow link. */
+    int64_t next_outgoing = now_ms() + 250;
     int64_t last_rx_ms = now_ms();
     for (;;) {
         unsigned char fh[2];

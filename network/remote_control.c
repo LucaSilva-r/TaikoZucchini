@@ -26,6 +26,9 @@
 #define CONTROL_STATUS_MIN_US   (10ull * 1000ull * 1000ull)
 #define CONTROL_BACKOFF_MIN     3u
 #define CONTROL_BACKOFF_MAX     30u
+#define CONTROL_HEARTBEAT_RAW_CHUNK 3500u
+#define CONTROL_HEARTBEAT_CHUNK_CAPACITY \
+    (CONTROL_HEARTBEAT_RAW_CHUNK * 2u + 256u)
 
 static volatile int g_started;
 static volatile int g_screenshot_busy;
@@ -34,8 +37,56 @@ static char g_last_status[2048];
 static size_t g_last_status_len;
 static uint64_t g_last_status_sent_us;
 static char g_itaiko_status[768];
+static char g_heartbeat_chunk[CONTROL_HEARTBEAT_CHUNK_CAPACITY];
+static const char *g_heartbeat_data;
+static size_t g_heartbeat_len;
+static size_t g_heartbeat_offset;
+static uint32_t g_heartbeat_stream;
 
 static void screenshot_request(void);
+
+static const char *heartbeat_chunk(size_t *out_len) {
+    static const char hex[] = "0123456789abcdef";
+    size_t remaining;
+    size_t raw_len;
+    int header_len;
+
+    *out_len = 0;
+    if (!g_heartbeat_data || g_heartbeat_offset >= g_heartbeat_len)
+        return NULL;
+    remaining = g_heartbeat_len - g_heartbeat_offset;
+    raw_len = remaining < CONTROL_HEARTBEAT_RAW_CHUNK
+                  ? remaining
+                  : CONTROL_HEARTBEAT_RAW_CHUNK;
+    header_len = snprintf(g_heartbeat_chunk, sizeof(g_heartbeat_chunk),
+                          "B\nid=%s\nstream=%u\noffset=%u\ntotal=%u\n"
+                          "encoding=hex\n\n",
+                          taiko_cfg_cabinet_id(),
+                          (unsigned)g_heartbeat_stream,
+                          (unsigned)g_heartbeat_offset,
+                          (unsigned)g_heartbeat_len);
+    if (header_len <= 0 ||
+        (size_t)header_len + raw_len * 2u >= sizeof(g_heartbeat_chunk)) {
+        g_heartbeat_data = NULL;
+        g_heartbeat_len = 0;
+        g_heartbeat_offset = 0;
+        return NULL;
+    }
+    for (size_t i = 0; i < raw_len; i++) {
+        unsigned char byte =
+            (unsigned char)g_heartbeat_data[g_heartbeat_offset + i];
+        g_heartbeat_chunk[header_len + i * 2u] = hex[byte >> 4];
+        g_heartbeat_chunk[header_len + i * 2u + 1u] = hex[byte & 0x0fu];
+    }
+    *out_len = (size_t)header_len + raw_len * 2u;
+    g_heartbeat_offset += raw_len;
+    if (g_heartbeat_offset >= g_heartbeat_len) {
+        g_heartbeat_data = NULL;
+        g_heartbeat_len = 0;
+        g_heartbeat_offset = 0;
+    }
+    return g_heartbeat_chunk;
+}
 
 static int hex_nibble(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -78,8 +129,9 @@ static void control_message(void *ctx, const char *message, size_t len) {
         screenshot_request();
         return;
     }
-    /* `I GET <drum>` / `I SET <drum> <pairs>`: a cabinet can carry one drum
-     * per player, and each is configured on its own. */
+    /* `I GET <drum> <op>` / `I SET <drum> <op> <pairs>`: operation ids make
+     * reconnect retries idempotent. The CDC layer also accepts the legacy
+     * id-less shape for compatibility. */
     if (len > 7 && memcmp(message, "I GET ", 6) == 0 &&
         message[len - 1] == '\n') {
         itaiko_cdc_diag_request_read(message + 6, len - 7);
@@ -156,6 +208,16 @@ static const char *control_outgoing(void *ctx, size_t *out_len) {
         }
     }
 
+    /* The full inventory can approach 192 KiB. Sending it as one WebSocket
+     * frame monopolized this thread long enough to starve commands and pings
+     * on poor WAN links. Application chunks let the main loop service inbound
+     * control traffic between every bounded write. */
+    if (g_heartbeat_data) {
+        const char *chunk = heartbeat_chunk(out_len);
+        if (chunk)
+            return chunk;
+    }
+
     /* Inventory + config upload, sent only when something actually changed:
      * a completed song job, an applied config, a new connection, or an
      * explicit connector request. Returns NULL the rest of the time, which is
@@ -165,8 +227,13 @@ static const char *control_outgoing(void *ctx, size_t *out_len) {
         size_t hlen = 0;
         const char *heartbeat = taiko_mgmt_build_heartbeat(&hlen);
         if (heartbeat && hlen) {
-            *out_len = hlen;
-            return heartbeat;
+            g_heartbeat_stream++;
+            if (!g_heartbeat_stream)
+                g_heartbeat_stream++;
+            g_heartbeat_data = heartbeat;
+            g_heartbeat_len = hlen;
+            g_heartbeat_offset = 0;
+            return heartbeat_chunk(out_len);
         }
     }
 
@@ -294,6 +361,9 @@ static void remote_worker(uint64_t arg) {
          * sent before a reconnect. */
         g_last_status_len = 0;
         g_last_status_sent_us = 0;
+        g_heartbeat_data = NULL;
+        g_heartbeat_len = 0;
+        g_heartbeat_offset = 0;
         /* A reconnected connector may be a different process that knows
          * nothing about this cabinet, so always open with a full snapshot. */
         taiko_mgmt_heartbeat_request();
