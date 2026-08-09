@@ -22,6 +22,7 @@
 #include "hooks/songselect_natives.h"
 #include "online_diag.h"
 #include "data00000_redirect.h"
+#include "enso_override.h"
 #include "camera_diag.h"
 #include "hooks/smart_stub.h"
 #include "camera_qr.h"
@@ -896,6 +897,7 @@ int taiko_start(unsigned int args, void *argp) {
      * with broken saves. */
     if (runtime_block_on_bad_write_perms())
         return SYS_PRX_RESIDENT;
+    taiko_asset_override_init();
     data00000_redirect_install();
     http_hooks_install();
     /* Raw HTTP does not go through cellHttp. DNS marks those EBOOT-side

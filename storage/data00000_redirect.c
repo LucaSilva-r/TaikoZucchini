@@ -128,6 +128,18 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
 static const void * const hk_cellFsOpen_opd = (const void *)hk_cellFsOpen;
 
 static int hk_cellFsStat(const char *path, CellFsStat *sb) {
+    char override_path[512];
+
+    /* Stock-path stat would report the original size for an overridden
+     * asset; the game then short-reads the (differently sized) override. */
+    if (taiko_asset_override_path(path, override_path, sizeof override_path)) {
+        CellFsStat st;
+        if (cellFsStat(override_path, &st) == CELL_FS_SUCCEEDED) {
+            if (sb) *sb = st;
+            return CELL_FS_SUCCEEDED;
+        }
+    }
+
     if (g_cfg.data00000_redirect &&
         (data00000_path_matches(path) || versionup_path_matches(path))) {
         if (!g_redirect_ready) resolve_redirect_path();

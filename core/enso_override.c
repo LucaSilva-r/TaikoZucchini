@@ -5,6 +5,8 @@
 #include <cell/fs/cell_fs_file_api.h>
 
 #include "enso_override.h"
+#include "debug.h"
+#include "usrdir_path.h"
 #include "game_state.h"
 #include "network/custom_song_client.h"
 #include "network/extra_scores.h"
@@ -388,11 +390,220 @@ static int try_open_custom_song_short_alias(const char *path, int flags,
     return 1;
 }
 
+/* ---------------------- Generic asset override ----------------------
+ * <gamedir>/OVERRIDE/<tail> shadows a stock asset when it exists, so a
+ * translation ships as a sparse tree instead of replacing game files.
+ *
+ * ponytail: <tail> is taken from the leading "/data/" component instead
+ * of stripping the USRDIR prefix — prefix-agnostic (works for
+ * /dev_hdd0/game/<id>/USRDIR, /app_home, /dev_bdvd) and every asset the
+ * game opens lives under data/. Switch to prefix stripping if an asset
+ * outside data/ ever needs overriding. */
+#define OVERRIDE_DIR_NAME    "OVERRIDE"
+#define OVERRIDE_POOL_BYTES  (128 * 1024)
+#define OVERRIDE_SLOTS       4096u /* power of two; keep load factor <= 0.5 */
+#define OVERRIDE_MAX_ENTRIES (OVERRIDE_SLOTS / 2u)
+#define OVERRIDE_MAX_DEPTH   8
+
+static char g_override_root[PATH_MAX];
+static unsigned int g_override_root_len;
+static int  g_override_state; /* 0 unresolved, 1 ready, -1 absent */
+
+/* Tails ("/data/lumendata/...") of every file under the override root, in
+ * an open-addressed hash set: g_override_slots holds pool offset + 1, 0
+ * means empty. A stock asset open costs one hash and (at <=0.5 load) about
+ * one probe, instead of a failed cellFsOpen.
+ *
+ * ponytail: a hash set, not a path trie. Every query is a whole-path exact
+ * match, never a prefix walk, so a trie would only add a node per path
+ * component and a pointer chase per component to reach the same answer.
+ * This is also the smaller of the two: one uint32 per slot plus the packed
+ * string pool, no per-entry node or pointer. The index is a snapshot —
+ * files added while the game runs need a restart. */
+static char  g_override_pool[OVERRIDE_POOL_BYTES];
+static unsigned int g_override_pool_len;
+static uint32_t g_override_slots[OVERRIDE_SLOTS];
+static unsigned int g_override_count;
+static int g_override_index_full;
+
+static uint32_t path_hash(const char *s) {
+    uint32_t h = 2166136261u; /* FNV-1a */
+
+    while (*s) {
+        h ^= (uint32_t)(unsigned char)*s++;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* Probe for tail. Returns the slot holding it, or the first free slot. */
+static unsigned int override_slot_of(const char *tail) {
+    unsigned int i = path_hash(tail) & (OVERRIDE_SLOTS - 1u);
+
+    while (g_override_slots[i]) {
+        if (str_equal(g_override_pool + g_override_slots[i] - 1u, tail))
+            break;
+        i = (i + 1u) & (OVERRIDE_SLOTS - 1u);
+    }
+    return i;
+}
+
+static void override_record(const char *tail) {
+    unsigned int n = 0;
+    unsigned int slot;
+
+    while (tail[n])
+        n++;
+    if (g_override_count >= OVERRIDE_MAX_ENTRIES ||
+        g_override_pool_len + n + 1 > sizeof g_override_pool) {
+        if (!g_override_index_full) {
+            g_override_index_full = 1;
+            dbg_print("[override] index full; remaining files ignored\n");
+        }
+        return;
+    }
+    slot = override_slot_of(tail);
+    if (g_override_slots[slot]) /* duplicate; cannot happen from one walk */
+        return;
+    memcpy(g_override_pool + g_override_pool_len, tail, n + 1);
+    g_override_slots[slot] = g_override_pool_len + 1u;
+    g_override_pool_len += n + 1;
+    g_override_count++;
+}
+
+/* path holds root + the directory walked so far; len is its length. */
+static void override_index_dir(char *path, unsigned int len, int depth) {
+    CellFsDirent de;
+    uint64_t nread = 0;
+    int fd;
+
+    if (depth > OVERRIDE_MAX_DEPTH)
+        return;
+    if (cellFsOpendir(path, &fd) != CELL_FS_SUCCEEDED)
+        return;
+
+    while (cellFsReaddir(fd, &de, &nread) == CELL_FS_SUCCEEDED && nread > 0) {
+        unsigned int n = len;
+
+        if (de.d_name[0] == '.') /* . .. and dotfiles */
+            continue;
+        if (append_str(path, PATH_MAX, &n, "/") &&
+            append_str(path, PATH_MAX, &n, de.d_name)) {
+            if (de.d_type == CELL_FS_TYPE_DIRECTORY)
+                override_index_dir(path, n, depth + 1);
+            else
+                override_record(path + g_override_root_len);
+        }
+        path[len] = '\0';
+    }
+    cellFsClosedir(fd);
+}
+
+static int override_index_ready(void) {
+    char usrdir[PATH_MAX];
+    char scan[PATH_MAX];
+    unsigned int n = 0;
+    unsigned int len;
+    CellFsStat st;
+
+    if (g_override_state)
+        return g_override_state > 0;
+
+    /* USRDIR seed comes from the bootstrap/argv path; unavailable on the
+     * earliest opens, so stay unresolved and retry on a later one. */
+    if (!usrdir_resolve_path("", usrdir, sizeof usrdir))
+        return 0;
+
+    while (usrdir[n])
+        n++;
+    while (n > 0 && usrdir[n - 1] == '/')
+        n--;
+    while (n > 0 && usrdir[n - 1] != '/') /* drop the USRDIR component */
+        n--;
+    if (n == 0 || n >= sizeof g_override_root) {
+        g_override_state = -1;
+        return 0;
+    }
+    memcpy(g_override_root, usrdir, n);
+    g_override_root[n] = '\0';
+    len = n;
+    if (!append_str(g_override_root, sizeof g_override_root, &len,
+                    OVERRIDE_DIR_NAME)) {
+        g_override_state = -1;
+        return 0;
+    }
+
+    if (cellFsStat(g_override_root, &st) != CELL_FS_SUCCEEDED ||
+        !(st.st_mode & CELL_FS_S_IFDIR)) {
+        g_override_state = -1;
+        dbg_print("[override] no OVERRIDE dir; asset override disabled\n");
+        return 0;
+    }
+    g_override_root_len = len;
+
+    len = 0;
+    scan[0] = '\0';
+    append_str(scan, sizeof scan, &len, g_override_root);
+    override_index_dir(scan, len, 0);
+
+    if (g_override_count == 0) {
+        g_override_state = -1;
+        dbg_print("[override] OVERRIDE dir empty; asset override disabled\n");
+        return 0;
+    }
+    g_override_state = 1;
+    dbg_print("[override] root=");
+    dbg_print(g_override_root);
+    dbg_print("\n");
+    dbg_print_hex32("[override] indexed files", g_override_count);
+    return 1;
+}
+
+/* Build the index at plugin init so a large translation tree costs its
+ * opendir walk during boot, not inside the game's first asset open.
+ * Falls back to the lazy build if the USRDIR seed isn't in yet. */
+void taiko_asset_override_init(void) {
+    (void)override_index_ready();
+}
+
+int taiko_asset_override_path(const char *path, char *out, unsigned int cap) {
+    const char *tail;
+
+    if (!path || !out || cap == 0 || !override_index_ready())
+        return 0;
+
+    tail = path_find(path, "/data/");
+    if (!tail)
+        return 0;
+
+    if (!g_override_slots[override_slot_of(tail)])
+        return 0;
+
+    unsigned int n = 0;
+    out[0] = '\0';
+    return append_str(out, cap, &n, g_override_root) &&
+           append_str(out, cap, &n, tail);
+}
+
 int taiko_enso_override_try_open(const char *path, int flags, int *fd,
                                  const void *arg, uint64_t size,
                                  int *out_rc) {
-    return try_open_custom_song_short_alias(path, flags, fd, arg, size,
-                                            out_rc);
+    char target[PATH_MAX];
+
+    if (try_open_custom_song_short_alias(path, flags, fd, arg, size, out_rc))
+        return 1;
+
+    /* Reads only: never shadow a write/create with a read-only asset. */
+    if (flags == CELL_FS_O_RDONLY &&
+        taiko_asset_override_path(path, target, sizeof target)) {
+        int rc = cellFsOpen(target, flags, fd, arg, size);
+        if (rc == CELL_FS_SUCCEEDED) {
+            if (out_rc)
+                *out_rc = rc;
+            return 1;
+        }
+    }
+    return 0;
 }
 
 void taiko_enso_override_note_read(int fd, uint64_t requested,
