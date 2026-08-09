@@ -105,7 +105,7 @@ SRCS = core\main.c core\debug.c core\diag_log.c core\qr_encode.c \
        hooks\camera_diag.c hooks\smart_stub.c hooks\bpreader_hook.c \
        hooks\chassisinfo_hook.c storage\chassisinfo_synth.c \
        storage\chassisinfo_schema.c core\game_version.c \
-       input\pad_input.c input\kb_input.c input\itaiko_cdc_diag.c input\taiko_frame.c \
+       input\pad_input.c input\kb_input.c input\itaiko_driver.c input\itaiko_settings.c input\itaiko_protocol.c input\taiko_frame.c \
        qr\camera_qr.c qr\qr_spu_host.c bpreader\bpreader_serial.c \
        cards\card_store.c cards\card_picker.c cards\card_issuer.c \
        network\online_diag.c hooks\http_hook.c hooks\cell_http_shim.c \

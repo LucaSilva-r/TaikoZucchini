@@ -106,11 +106,10 @@ static uint8_t  g_kb_saved_cards[KB_MAX_BINDS];
  * the latest packet per port across empty polls preserves the held
  * state until a real event replaces it. */
 static uint32_t g_kb_port_state[KB_SCAN_PORTS][8];
-/* Latest boot-keyboard report supplied by the ITAIKO-specific cellUsbd LDD,
- * one entry per drum. Kept separate so a disconnected/empty cellKb port never
- * clears it, and per drum so one drum's idle report never clears the other's
- * held keys. */
-static uint32_t g_kb_boot_state[KB_BOOT_SLOTS][8];
+/* Latest keyboard report from each external USB input source. Kept separate
+ * from cellKb so a physical keyboard port cannot clear a custom driver's
+ * state, and separate per source so one idle controller cannot clear another. */
+static uint32_t g_kb_external_state[KB_EXTERNAL_SOURCES][8];
 
 static int              g_initialized;
 
@@ -318,9 +317,9 @@ static void build_pressed(uint32_t pressed[8]) {
             pressed[i] |= g_kb_port_state[port][i];
         }
     }
-    for (int slot = 0; slot < KB_BOOT_SLOTS; slot++)
+    for (int slot = 0; slot < KB_EXTERNAL_SOURCES; slot++)
         for (int i = 0; i < 8; i++)
-            pressed[i] |= g_kb_boot_state[slot][i];
+            pressed[i] |= g_kb_external_state[slot][i];
 }
 
 static int any_bound_pressed(const uint8_t *binds, const uint32_t *bm) {
@@ -465,9 +464,9 @@ void kb_input_poll_tick(void) {
     sys_lwmutex_unlock(&g_kb_lock);
 }
 
-void kb_input_submit_boot_report(int slot, const uint8_t report[8]) {
+void kb_input_submit_hid_report(int slot, const uint8_t report[8]) {
     if (!g_initialized || !report) return;
-    if (slot < 0 || slot >= KB_BOOT_SLOTS) return;
+    if (slot < 0 || slot >= KB_EXTERNAL_SOURCES) return;
 
     uint32_t fresh[8];
     memset(fresh, 0, sizeof fresh);
@@ -484,18 +483,20 @@ void kb_input_submit_boot_report(int slot, const uint8_t report[8]) {
     }
 
     sys_lwmutex_lock(&g_kb_lock, 0);
-    memcpy(g_kb_boot_state[slot], fresh, sizeof g_kb_boot_state[slot]);
+    memcpy(g_kb_external_state[slot], fresh,
+           sizeof g_kb_external_state[slot]);
     sys_lwmutex_unlock(&g_kb_lock);
 }
 
-void kb_input_clear_boot_report(int slot) {
+void kb_input_clear_hid_source(int slot) {
     if (!g_initialized) return;
-    if (slot >= KB_BOOT_SLOTS) return;
+    if (slot >= KB_EXTERNAL_SOURCES) return;
     sys_lwmutex_lock(&g_kb_lock, 0);
     if (slot < 0)
-        memset(g_kb_boot_state, 0, sizeof g_kb_boot_state);
+        memset(g_kb_external_state, 0, sizeof g_kb_external_state);
     else
-        memset(g_kb_boot_state[slot], 0, sizeof g_kb_boot_state[slot]);
+        memset(g_kb_external_state[slot], 0,
+               sizeof g_kb_external_state[slot]);
     sys_lwmutex_unlock(&g_kb_lock);
 }
 
@@ -557,7 +558,7 @@ void kb_input_init(void) {
 
     memset(g_kb_prev_pressed, 0, sizeof g_kb_prev_pressed);
     memset(g_kb_port_state, 0, sizeof g_kb_port_state);
-    memset(g_kb_boot_state, 0, sizeof g_kb_boot_state);
+    memset(g_kb_external_state, 0, sizeof g_kb_external_state);
     memset(g_kb_level, 0, sizeof g_kb_level);
     memset(g_kb_hit_edges, 0, sizeof g_kb_hit_edges);
     memset(g_kb_menu_hit_edges, 0, sizeof g_kb_menu_hit_edges);

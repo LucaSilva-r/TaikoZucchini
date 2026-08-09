@@ -12,8 +12,9 @@
 
 #include "config/runtime.h"
 #include "core/debug.h"
+#include "core/diag_log.h"
 #include "core/overlay.h"
-#include "input/itaiko_cdc_diag.h"
+#include "input/itaiko_driver.h"
 #include "input/pad_input.h"
 #include "custom_song_client.h"
 #include "http_client.h"
@@ -37,6 +38,12 @@ static char g_last_status[2048];
 static size_t g_last_status_len;
 static uint64_t g_last_status_sent_us;
 static char g_itaiko_status[768];
+/* Cabinets on wifi have no ProDG: the PS3 debug port is Ethernet-only, so the
+ * dbg_print ring is the only way to see what the plugin did. Kept under the
+ * connector's 4 KiB per-message limit; it carries the tail, which is where a
+ * failure always is. */
+static volatile int g_log_requested;
+static char g_log_frame[3712];
 static char g_heartbeat_chunk[CONTROL_HEARTBEAT_CHUNK_CAPACITY];
 static const char *g_heartbeat_data;
 static size_t g_heartbeat_len;
@@ -95,6 +102,57 @@ static int hex_nibble(char c) {
     return -1;
 }
 
+static char *next_word(char **cursor) {
+    char *start;
+    while (**cursor == ' ' || **cursor == '\t')
+        (*cursor)++;
+    start = *cursor;
+    while (**cursor && **cursor != ' ' && **cursor != '\t')
+        (*cursor)++;
+    if (**cursor)
+        *(*cursor)++ = '\0';
+    return start;
+}
+
+static int handle_itaiko_message(const char *message, size_t len) {
+    char input[384];
+    char *cursor;
+    char *version;
+    char *verb;
+    char *request;
+    char *device_text;
+    int device;
+
+    if (len < 4 || len >= sizeof(input) || message[len - 1] != '\n')
+        return 0;
+    memcpy(input, message, len - 1);
+    input[len - 1] = '\0';
+    if (len > 1 && input[len - 2] == '\r')
+        input[len - 2] = '\0';
+
+    cursor = input;
+    version = next_word(&cursor);
+    verb = next_word(&cursor);
+    request = next_word(&cursor);
+    device_text = next_word(&cursor);
+    if (strcmp(version, "I2") != 0 || !verb[0] || !request[0] ||
+        device_text[0] < '0' || device_text[0] > '9' || device_text[1])
+        return 0;
+    device = device_text[0] - '0';
+
+    while (*cursor == ' ' || *cursor == '\t')
+        cursor++;
+    if (strcmp(verb, "READ") == 0 && !cursor[0]) {
+        (void)itaiko_driver_request_read(device, request);
+        return 1;
+    }
+    if (strcmp(verb, "WRITE") == 0 && cursor[0]) {
+        (void)itaiko_driver_request_write(device, request, cursor);
+        return 1;
+    }
+    return 0;
+}
+
 static void control_message(void *ctx, const char *message, size_t len) {
     (void)ctx;
     if (len > 2 && message[0] == 'M' && message[1] == '\n') {
@@ -129,17 +187,15 @@ static void control_message(void *ctx, const char *message, size_t len) {
         screenshot_request();
         return;
     }
-    /* `I GET <drum> <op>` / `I SET <drum> <op> <pairs>`: operation ids make
-     * reconnect retries idempotent. The CDC layer also accepts the legacy
-     * id-less shape for compatibility. */
-    if (len > 7 && memcmp(message, "I GET ", 6) == 0 &&
-        message[len - 1] == '\n') {
-        itaiko_cdc_diag_request_read(message + 6, len - 7);
+    /* iTaiko v2 control traffic has an explicit request id and device. It is
+     * deliberately separate from the high-rate `S` input stream. */
+    if (len >= 3 && memcmp(message, "I2 ", 3) == 0) {
+        if (!handle_itaiko_message(message, len))
+            dbg_print("[control] invalid iTaiko v2 command\n");
         return;
     }
-    if (len > 7 && memcmp(message, "I SET ", 6) == 0 &&
-        message[len - 1] == '\n') {
-        itaiko_cdc_diag_request_write(message + 6, len - 7);
+    if (len == 4 && memcmp(message, "LOG\n", 4) == 0) {
+        g_log_requested = 1;
         return;
     }
     if (len == 6 && (memcmp(message, "CLEAR\n", 6) == 0 ||
@@ -147,7 +203,7 @@ static void control_message(void *ctx, const char *message, size_t len) {
         g_last_seq = 0;
         pad_input_remote_clear();
         if (memcmp(message, "READY\n", 6) == 0)
-            itaiko_cdc_diag_republish();
+            itaiko_driver_republish();
         return;
     }
     if (len && message[0] == 'I') {
@@ -199,13 +255,30 @@ static const char *control_outgoing(void *ctx, size_t *out_len) {
      * otherwise a large cabinet can leave the connector showing the cached
      * boot values even though the CDC read already completed successfully. */
     {
-        size_t ilen = itaiko_cdc_diag_take_frame(
+        size_t ilen = itaiko_driver_take_frame(
             g_itaiko_status, sizeof(g_itaiko_status));
         if (ilen) {
             dbg_print("[control] sending ITAIKO status frame\n");
             *out_len = ilen;
             return g_itaiko_status;
         }
+    }
+
+    /* Operator asked for the plugin log. Answered before the inventory for the
+     * same reason the drum snapshot is: it is interactive traffic, and a
+     * cabinet mid-heartbeat would otherwise sit on it for seconds. */
+    if (g_log_requested) {
+        int n = snprintf(g_log_frame, sizeof(g_log_frame), "L\nid=%s\n\n",
+                         taiko_cfg_cabinet_id());
+        if (n > 0 && (size_t)n < sizeof(g_log_frame)) {
+            size_t used = (size_t)n;
+            used += diag_log_tail_text(g_log_frame + used,
+                                       sizeof(g_log_frame) - used);
+            g_log_requested = 0;
+            *out_len = used;
+            return g_log_frame;
+        }
+        g_log_requested = 0;
     }
 
     /* The full inventory can approach 192 KiB. Sending it as one WebSocket
