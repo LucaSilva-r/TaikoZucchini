@@ -9,6 +9,8 @@
 #define KIND_MAX    8
 
 static volatile taiko_game_state_t g_game_state = TAIKO_GAME_STATE_UNKNOWN;
+static volatile int g_alt_enso_mode;
+static volatile int g_scene_tracked;
 static char g_preview_song[SONG_ID_MAX];
 static char g_gameplay_song[SONG_ID_MAX];
 static char g_gameplay_course[COURSE_MAX];
@@ -112,6 +114,66 @@ const char *taiko_game_state_name(taiko_game_state_t state) {
 
 taiko_game_state_t taiko_game_state_current(void) {
     return g_game_state;
+}
+
+int taiko_game_state_alt_enso_mode(void) {
+    return g_alt_enso_mode;
+}
+
+/* Scene-driven state, straight from the game's own scene switch. This is the
+ * signal the asset-path heuristic below was approximating, so once it arrives
+ * it owns the alternative-enso latch outright. */
+void taiko_game_state_observe_scene(taiko_game_state_t state, int alt_mode) {
+    g_scene_tracked = 1;
+
+    if (alt_mode >= 0 && alt_mode != g_alt_enso_mode) {
+        g_alt_enso_mode = alt_mode;
+        dbg_print(alt_mode ? "[state] alt enso mode on\n"
+                           : "[state] alt enso mode off\n");
+    }
+    if (state == TAIKO_GAME_STATE_UNKNOWN || state == g_game_state)
+        return;
+    g_game_state = state;
+    dbg_print("[state] ");
+    dbg_print(taiko_game_state_name(state));
+    dbg_print(" (scene)\n");
+}
+
+/* AI battle ("ghost", green) and RPG mode ("battle", blue) build their song
+ * list through the same shared task as the standard select, but their libraries
+ * render injected rows as broken textures and ids. The list build runs one
+ * scene BEFORE the mode's own select scene, so the game state at that moment
+ * names the previous scene and can never identify the mode on its own.
+ *
+ * Fallback for the pre-RTTI EBOOTs, where scene tracking cannot resolve the
+ * SequenceController: latch the mode family from the lumen tree instead.
+ * Anything under packed/ghost/ or packed/battle/ means an alternative mode owns
+ * the next list build. Only a scene that unambiguously belongs to the standard
+ * flow clears it -- clearing on any non-alt scene would drop the latch on the
+ * shared assets (indicator, intermission) that the alt modes load between their
+ * own songs. */
+static void observe_mode_family(const char *path, taiko_game_state_t state) {
+    if (g_scene_tracked)
+        return;
+
+    if (path_contains(path, "/data/lumendata/packed/ghost/") ||
+        path_contains(path, "/data/lumendata/packed/battle/")) {
+        g_alt_enso_mode = 1;
+        return;
+    }
+    switch (state) {
+    case TAIKO_GAME_STATE_ATTRACT:
+    case TAIKO_GAME_STATE_WAITINPUT:
+    case TAIKO_GAME_STATE_ENTRY:
+    case TAIKO_GAME_STATE_SONG_SELECT:
+    case TAIKO_GAME_STATE_DANI_SELECT:
+    case TAIKO_GAME_STATE_SHOP:
+    case TAIKO_GAME_STATE_SERVICE:
+        g_alt_enso_mode = 0;
+        break;
+    default:
+        break;
+    }
 }
 
 int taiko_game_state_allows_mod_menu(void) {
@@ -345,6 +407,8 @@ static void observe_fumen(const char *path) {
 
 void taiko_game_state_observe_open(const char *path) {
     taiko_game_state_t state = classify_open_path(path);
+    if (path)
+        observe_mode_family(path, state);
     if (state != TAIKO_GAME_STATE_UNKNOWN && state != g_game_state) {
         g_game_state = state;
         dbg_print("[state] ");

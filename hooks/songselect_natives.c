@@ -1435,6 +1435,9 @@ static void ssn_show_category_toast(void *vm) {
  * preventing duplicate injection, it gives category growth a valid BasicSong
  * value with which to drive the already-live-proven vector growth helper. */
 static uint32_t g_ssn_src_begin;
+/* Address of that vector (resource+0xD04), so the rows can be taken back out
+ * from outside the builder -- see taiko_songselect_sync_alt_mode(). */
+static uint32_t g_ssn_src_vec;
 
 /* Rebuild the Lumen-facing board ranges as:
  *   stock genre, custom genre chunk 0, custom genre chunk 1, ...
@@ -2711,6 +2714,36 @@ static void ssn_reset_virtual_songs(void) {
     g_current_custom_song_valid = 0;
 }
 
+/* The alternative enso modes never build their own song list: in green
+ * GameGhostTutorial hands the shared resource straight to GameGhostSongSelect
+ * (blue does the same for the RPG's GameBattleSongSelect), so whatever the
+ * standard select injected into resource+0xD04 is still there and the alt
+ * library renders those rows as dummy boards with broken difficulties.
+ *
+ * Gating the builder cannot fix that on its own -- there may be no build to
+ * gate at all. Take the rows back out instead, on the first file open after
+ * the latch goes up: core/scene_track.c raises it when the SequenceController
+ * is handed the mode's first scene, so the removal lands while the alt select
+ * is still setting up, before it walks the vector. The next standard list
+ * build re-adds them from the cached refs. */
+void taiko_songselect_sync_alt_mode(void) {
+    static const unsigned char keep[SSN_INJECT_MAX];      /* keep nothing */
+    static const uint16_t new_index[SSN_INJECT_MAX];
+
+    if (!g_song_manifest || !g_ssn_src_vec || !g_ssn_virtual_song_count ||
+        !taiko_game_state_alt_enso_mode())
+        return;
+
+    dbg_print("[ssn] alt enso mode: removing injected rows\n");
+    dbg_print_hex32("[ssn] alt removal count", g_ssn_virtual_song_count);
+    if (ssn_vec90_reconcile_custom(g_ssn_src_vec, keep, new_index,
+                                   g_ssn_virtual_song_count) < 0)
+        dbg_print("[ssn] alt removal failed\n");
+    ssn_reset_virtual_songs();
+    g_ssn_src_begin = 0;
+    g_ssn_src_vec = 0;
+}
+
 static void ssn_compact_virtual_songs(
         const unsigned char keep[SSN_INJECT_MAX], uint32_t old_count) {
     uint32_t out = 0;
@@ -2772,15 +2805,19 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     if (!ssn_stack_ptr_sane(owner) || !ssn_stack_ptr_sane(temp))
         return;
 
-    /* The waiwai/AI-battle selects rebuild their list through this same E46
-     * path and render injected rows as broken dummy songs, so skip them. They
-     * also drop the caches, so the next song-select build starts fresh instead
-     * of reconciling against a foreign scene's vector.
+    /* The waiwai select and the alternative enso modes (AI battle, RPG) rebuild
+     * their list through this same E46 path and render injected rows as broken
+     * dummy songs, so skip them. They also drop the caches, so the next
+     * song-select build starts fresh instead of reconciling against a foreign
+     * scene's vector.
      *
-     * Skip only the scenes known to be wrong rather than requiring a positive
-     * song_select match: the list build runs during scene setup, before the
-     * state observer has necessarily seen that scene's lumendata, so demanding
-     * SONG_SELECT here skipped injection entirely.
+     * Skip only the modes known to be wrong rather than requiring a positive
+     * song_select match: the list build runs during scene setup, so the state
+     * still names the scene that scheduled the build (GameEntry for the
+     * standard flow, GameGhostTutorial for AI battle) -- demanding SONG_SELECT
+     * here skipped injection entirely. The AI battle/RPG test is therefore the
+     * alternative-enso latch, which core/scene_track.c sets from the scene the
+     * SequenceController was handed, well before this build runs.
      *
      * Dan-i Dojo used to be excluded too, because it asks the texture manager
      * for title keys its scene never registered and the game dereferences the
@@ -2790,9 +2827,18 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     {
         taiko_game_state_t state = taiko_game_state_current();
 
-        if (state == TAIKO_GAME_STATE_WAIWAI_SONG_SELECT) {
+        /* Which scene family owns each list build. */
+        dbg_print("[ssn] e46 build state=");
+        dbg_print(taiko_game_state_name(state));
+        dbg_print(taiko_game_state_alt_enso_mode() ? " alt=1\n" : " alt=0\n");
+        dbg_print_hex32("[ssn] e46 virtual count", g_ssn_virtual_song_count);
+        dbg_print_hex32("[ssn] e46 src begin",
+                        *(volatile uint32_t *)(uintptr_t)(svec + 0x00u));
+
+        if (state == TAIKO_GAME_STATE_WAIWAI_SONG_SELECT ||
+            taiko_game_state_alt_enso_mode()) {
             if (g_ssn_virtual_song_count || g_ssn_src_begin) {
-                dbg_print("[ssn] rival select scene: injection skipped, reset\n");
+                dbg_print("[ssn] alt select scene: injection skipped, reset\n");
                 ssn_reset_virtual_songs();
                 g_ssn_src_begin = 0;
             }
@@ -2801,6 +2847,7 @@ static void ssn_e46_inject_custom_songs(uint32_t owner, uint32_t temp) {
     }
 
     src_begin = *(volatile uint32_t *)(uintptr_t)(svec + 0x00u);
+    g_ssn_src_vec = svec;
 
     ref_count = ssn_collect_cached_refs(refs, SSN_INJECT_MAX);
 
@@ -2990,6 +3037,22 @@ static void install_e46_listbuild_bridge(void) {
     g_e46_listbuild_bridge_installed = 1;
 }
 
+/* TEMP DIAG: the entry scene's mode choice. SetNextScene(id) is called with the
+ * scene the player picked, well before the song list is built, so its id is the
+ * signal that can keep injection out of the alternative enso modes -- once we
+ * know which id is which. */
+static native_fn g_orig_SetNextScene;
+
+void hk_SetNextScene(void *vm);
+void hk_SetNextScene(void *vm) {
+    uint32_t id = 0xffffffffu;
+
+    (void)ssn_arg_u32(ssn_arg(vm, 1u), &id);
+    dbg_print_hex32("[ssn] SetNextScene id", id);
+    if (g_orig_SetNextScene)
+        g_orig_SetNextScene(vm);
+}
+
 static int g_installed;
 
 static void install_one(uint32_t word_addr, native_fn my, native_fn *save)
@@ -3050,6 +3113,12 @@ void songselect_natives_install(void) {
         SONGSEL_NATIVES(INSTALL_RESOLVED_NATIVE)
 #undef INSTALL_RESOLVED_NATIVE
     }
+    if (g_song_manifest->entry_next_scene_slot)
+        install_one(g_song_manifest->entry_next_scene_slot,
+                    (native_fn)&hk_SetNextScene, &g_orig_SetNextScene);
+    else
+        dbg_print("[ssn] entry SetNextScene row unresolved\n");
+
     if (g_song_capabilities & TAIKO_SONG_CAP_METADATA)
         install_basic_lookup_hook();
     if (g_song_capabilities & TAIKO_SONG_CAP_INJECTION)

@@ -30,6 +30,7 @@
 #include "bpreader_serial.h"
 #include "chassisinfo_hook.h"
 #include "game_version.h"
+#include "scene_track.h"
 #include "pad_input.h"
 #include "kb_input.h"
 #include "taiko_frame.h"
@@ -911,6 +912,11 @@ int taiko_start(unsigned int args, void *argp) {
      * gcm allocator runs. */
     taiko_video_upscale_install();
     taiko_overlay_hooks_install();
+    /* Before the song-loader hooks: the scene push is what tells injection
+     * which mode owns the next song list, and it must be armed before the
+     * first transition. Independent of the injector -- every overlay and gate
+     * that reads the game state benefits. */
+    taiko_scene_track_install();
     if (g_cfg.custom_song_injector)
         songselect_natives_install();
     taiko_version_check_start();

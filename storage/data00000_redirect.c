@@ -41,6 +41,7 @@
 #include "chassisinfo_hook.h"
 #include "game_state.h"
 #include "enso_override.h"
+#include "songselect_natives.h"
 
 #define CELLFS_OPEN_FNID 0x718BF5F8u
 #define TARGET_PATH_TAIL "DATA00000.BIN"
@@ -103,6 +104,7 @@ static int hk_cellFsOpen(const char *path, int flags, int *fd,
     int override_rc = CELL_FS_SUCCEEDED;
 
     taiko_game_state_observe_open(path);
+    taiko_songselect_sync_alt_mode();
 
     if (taiko_enso_override_try_open(path, flags, fd, arg, size, &override_rc))
         return override_rc;

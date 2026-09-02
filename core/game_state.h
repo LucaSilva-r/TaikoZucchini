@@ -22,6 +22,18 @@ typedef enum taiko_game_state {
 } taiko_game_state_t;
 
 taiko_game_state_t taiko_game_state_current(void);
+
+/* Scene signal from the SequenceController push hook (core/scene_track.c).
+ * `state` TAIKO_GAME_STATE_UNKNOWN means the scene names no state of its own,
+ * so the current one stays. `alt_mode` is 1/0 to set or clear the
+ * alternative-enso latch, or -1 to leave it alone. The first call switches the
+ * latch over to scene tracking for good: the asset-path heuristic stops
+ * touching it, because the scene is the thing the paths were guessing at. */
+void taiko_game_state_observe_scene(taiko_game_state_t state, int alt_mode);
+
+/* True while an alternative enso mode (AI battle / RPG) owns the song list.
+ * Custom-song injection must stay out of those libraries. */
+int taiko_game_state_alt_enso_mode(void);
 const char *taiko_game_state_name(taiko_game_state_t state);
 int taiko_game_state_allows_mod_menu(void);
 /* Attract-only overlays: true in attract, in `also_allow`, or when the state

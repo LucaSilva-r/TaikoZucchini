@@ -109,6 +109,33 @@ static int resolve_native_rows(uint32_t slots[TAIKO_SONG_NATIVE_COUNT],
     return 1;
 }
 
+/* The entry scene's SetNextScene(id) row. Resolved by name alone: no other
+ * native table in the shipped EBOOTs registers that name, and the row still has
+ * to carry a valid ELFv1 descriptor. */
+static int resolve_entry_next_scene(uint32_t *out) {
+    uint32_t found = 0;
+    unsigned hits = 0;
+
+    for (size_t s = 0; s < T->nsegs; s++) {
+        uintptr_t start = (T->segs[s].va_start + 3u) & ~(uintptr_t)3u;
+        uintptr_t end = T->segs[s].va_end;
+        for (uintptr_t p = start; p + 8u <= end; p += 4u) {
+            uint32_t opd = pt_read32(T, p);
+            uint32_t name = pt_read32(T, p + 4u);
+            if (!patch_cstr_equal(T, name, "SetNextScene") ||
+                !opd_valid(opd, NULL, NULL))
+                continue;
+            if (++hits > 1u)
+                return 0;
+            found = (uint32_t)p;
+        }
+    }
+    if (hits != 1u)
+        return 0;
+    *out = found;
+    return 1;
+}
+
 static uint32_t native_code(unsigned index) {
     uint32_t opd;
     uint32_t code = 0;
@@ -464,6 +491,7 @@ void song_loader_patch_resolve(void) {
                                     COUNT_OF(result_guard_blue),
                                     &g_manifest.result_table_guard, NULL);
     have_vtable = 0;
+    (void)resolve_entry_next_scene(&g_manifest.entry_next_scene_slot);
 
     if (have_basic) {
         g_manifest.basic_lookup_resume = g_manifest.basic_lookup_entry + 4u;
@@ -577,6 +605,8 @@ void song_loader_patch_resolve(void) {
                     g_manifest.inject_temp_sp_off);
     dbg_print_hex32("[songpatch] display vector off", g_manifest.display_vector_off);
     dbg_print_hex32("[songpatch] source vector off", g_manifest.source_vector_off);
+    dbg_print_hex32("[songpatch] entry SetNextScene row",
+                    g_manifest.entry_next_scene_slot);
 }
 
 const taiko_song_loader_manifest_t *song_loader_patch_manifest(void) {

@@ -91,6 +91,10 @@ typedef struct taiko_song_loader_manifest {
     uint32_t inline_string_buf_off;
     uint32_t inline_string_len_off;
     uint32_t inline_string_cap_off;
+
+    /* Entry-scene Lumen native row for SetNextScene(id): the mode the player
+     * picked, published long before the song list is built. */
+    uint32_t entry_next_scene_slot;
 } taiko_song_loader_manifest_t;
 
 #endif
