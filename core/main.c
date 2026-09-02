@@ -32,7 +32,6 @@
 #include "game_version.h"
 #include "pad_input.h"
 #include "kb_input.h"
-#include "itaiko_driver.h"
 #include "taiko_frame.h"
 #include "usrdir_path.h"
 #include "eboot_fpt.h"
@@ -943,9 +942,6 @@ int taiko_start(unsigned int args, void *argp) {
          * keyboard itself — see the self_poll flag on menu_ingame_start. */
         kb_input_init();
     }
-    /* Own iTaiko's composite USB interface. HID input remains continuously
-     * active while the independent CDC engine reads or saves settings. */
-    itaiko_driver_start();
     /* The Connector management/status WebSocket is useful even when USIO
      * emulation is disabled; virtual inputs simply become harmless no-ops. */
     taiko_remote_control_start();
@@ -961,7 +957,6 @@ int taiko_start(unsigned int args, void *argp) {
 }
 
 int taiko_stop(void) {
-    itaiko_driver_stop();
     patch_ui_close();
     taiko_pairing_stop();
     if (g_cfg.online_diag)

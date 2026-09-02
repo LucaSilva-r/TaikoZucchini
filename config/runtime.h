@@ -80,10 +80,6 @@ typedef struct {
      * live on different domains. */
     char     connector_host[TAIKO_REDIRECT_HOST_MAX];
     uint16_t connector_port;
-    /* Plain-HTTP port the webMAN agent polls. webMAN has no TLS stack, so it
-     * cannot use connector_port; the plugin never connects here itself, it
-     * only publishes the value for the agent to read out of this file. */
-    uint16_t connector_agent_port;
 
     /* Stable cabinet identity for the connector. cabinet_id is generated
      * on first boot (dongle serials collide across cabinets: they all
@@ -94,14 +90,6 @@ typedef struct {
     /* Optional override for the baked TaikOnline card issuer bearer token.
      * Empty means use TAIKO_ZUCCHINI_API_TOKEN from the binary. */
     char     zucchini_api_token[TAIKO_API_TOKEN_MAX];
-
-    /* Credential for the webMAN agent, which runs in VSH and cannot read the
-     * token baked into this plugin. Deliberately NOT the same secret: the
-     * agent channel is plaintext and this value lands on the cabinet's disk,
-     * whereas zucchini_api_token also mints TaikOnline cards. The connector
-     * pushes its own value here through the config channel, so an operator
-     * normally never touches it. */
-    char     agent_token[TAIKO_API_TOKEN_MAX];
 
     /* EBOOT-patcher state. Tracks whether the on-disk EBOOT has already
      * been pre-patched, so runtime memory writes can be skipped on retail

@@ -15,7 +15,7 @@
 #include "storage/chassisinfo_schema.h"
 #include "network/version_check.h"
 
-#define TAIKO_CFG_VERSION 22  /* v22: agent_token for the webMAN agent */
+#define TAIKO_CFG_VERSION 24  /* v24: itaiko support removed */
 #define TAIKO_CONFIG_NAME "taiko_config.cfg"
 /* Shared config lives next to the module so every game reads/writes one
  * file (TAIKO_GLOBAL_CONFIG_PATH, exported via runtime.h). A per-game
@@ -56,7 +56,6 @@ taiko_runtime_cfg_t g_cfg = {
     .online_redirect_port   = 443,
     .connector_host           = {0},
     .connector_port           = 443,
-    .connector_agent_port     = 8080,
     .cabinet_id               = {0},
     .cabinet_name             = {0},
 
@@ -261,28 +260,6 @@ static void handle_network(const char *key, const char *value, void *u) {
         }
         if (v == 0 || v > 65535u) v = 443;
         g_cfg.connector_port = (uint16_t)v;
-        return;
-    }
-    if (cfg_file_str_eq_ci(key, "connector_agent_port")) {
-        while (*value == ' ' || *value == '\t') value++;
-        unsigned v = 0;
-        while (*value >= '0' && *value <= '9') {
-            v = v * 10u + (unsigned)(*value - '0');
-            value++;
-        }
-        if (v > 65535u) v = 8080;
-        g_cfg.connector_agent_port = (uint16_t)v;
-        return;
-    }
-    if (cfg_file_str_eq_ci(key, "agent_token")) {
-        while (*value == ' ' || *value == '\t') value++;
-        size_t n = 0;
-        while (value[n] && value[n] != '\r' && value[n] != '\n' &&
-               n < TAIKO_API_TOKEN_MAX - 1) {
-            g_cfg.agent_token[n] = value[n];
-            n++;
-        }
-        g_cfg.agent_token[n] = 0;
         return;
     }
     if (cfg_file_str_eq_ci(key, "zucchini_api_token")) {
@@ -603,21 +580,10 @@ static void write_cfg_file(const char *path) {
     emit_kv_uint(fd,
         "TCP port for the Connector converter service.",
         "connector_port", (unsigned)g_cfg.connector_port);
-    emit_kv_uint(fd,
-        "Plain-HTTP port the webMAN agent polls for console commands "
-        "(reboot, relaunch). 0 disables the agent. webMAN cannot use the "
-        "TLS port above.",
-        "connector_agent_port", (unsigned)g_cfg.connector_agent_port);
     emit_kv_str(fd,
         "Optional TaikOnline card issuer bearer token override. Leave blank "
         "for official builds with the token baked into zucchini.sprx.",
         "zucchini_api_token", g_cfg.zucchini_api_token);
-    emit_kv_str(fd,
-        "Credential the webMAN agent uses for the connector's plain-HTTP "
-        "agent port. The connector fills this in automatically; it is a "
-        "different secret from zucchini_api_token on purpose, because this "
-        "one travels in clear on the LAN and is readable on this disk.",
-        "agent_token", g_cfg.agent_token);
     cfg_file_write_str(fd, "\n");
 
     cfg_file_write_str(fd, "[chassis]\n");
@@ -656,11 +622,10 @@ static void parse_into_cfg(const char *buf, size_t len) {
  * connector needs an identity that is unique in practice. */
 /* Derive the cabinet id from the console's MAC.
  *
- * The plugin and the webMAN agent are installed independently and in either
- * order, and both need to agree on this id without talking to each other —
- * the connector simply files whatever id a frame carries, so two different
- * ids mean two records for one machine. The MAC is the only stable value both
- * halves can read (the agent could use IDPS, a sandboxed game process cannot).
+ * The connector simply files whatever id a frame carries, so the id has to be
+ * stable across reinstalls and config resets or one machine ends up with
+ * several records. The MAC is the only such value a sandboxed game process can
+ * read (IDPS is not reachable from here).
  *
  * Refuses the unset/failed-discovery values: RPCS3 leaves the address at
  * FF:FF:FF:FF:FF:FF when it cannot determine one, and every such instance
