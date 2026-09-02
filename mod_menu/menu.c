@@ -86,6 +86,7 @@ typedef enum {
     F_CLEARLOCKS_STUB,
     F_ALLOW_SCREEN_TEARING,
     F_DANI_DOJO_UNLOCK,
+    F_THREADMAIN_ALLOC_RACE,
     /* network */
     F_ONLINE_REDIRECT_ENABLE,
 
@@ -122,6 +123,7 @@ static int field_get(field_id_t id) {
     case F_CLEARLOCKS_STUB:     return g_cfg.clearlocks_stub;
     case F_ALLOW_SCREEN_TEARING:return g_cfg.allow_screen_tearing;
     case F_DANI_DOJO_UNLOCK:    return g_cfg.dani_dojo_unlock;
+    case F_THREADMAIN_ALLOC_RACE: return g_cfg.threadmain_alloc_race;
     case F_ONLINE_REDIRECT_ENABLE: return g_cfg.online_redirect_enable;
     default: break;
     }
@@ -157,6 +159,7 @@ static void field_set(field_id_t id, int v) {
     case F_CLEARLOCKS_STUB:     g_cfg.clearlocks_stub = v; break;
     case F_ALLOW_SCREEN_TEARING:g_cfg.allow_screen_tearing = v; break;
     case F_DANI_DOJO_UNLOCK:    g_cfg.dani_dojo_unlock = v; break;
+    case F_THREADMAIN_ALLOC_RACE: g_cfg.threadmain_alloc_race = v; break;
     case F_ONLINE_REDIRECT_ENABLE: g_cfg.online_redirect_enable = v; break;
     default: break;
     }
@@ -350,6 +353,10 @@ static const menu_item_t g_items[] = {
     { ITEM_TOGGLE,  "Dan-i Dojo unlock",
       "Unlocks Dan grading availability gates on supported pre-Red builds.",
       F_DANI_DOJO_UNLOCK, 0 },
+    { ITEM_TOGGLE,  "ThreadMain alloc race fix",
+      "Sets the boot thread's allocator before starting it. Without this the "
+      "thread can call through a null pointer and crash at boot.",
+      F_THREADMAIN_ALLOC_RACE, 0 },
 
     { ITEM_SECTION, "Actions", "", 0, 0 },
     { ITEM_ACTION,  "Delete usiobackup.bin",

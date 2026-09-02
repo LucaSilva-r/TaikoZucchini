@@ -47,6 +47,7 @@ typedef struct {
     unsigned clearlocks_stub      : 1;
     unsigned allow_screen_tearing : 1;
     unsigned dani_dojo_unlock     : 1;
+    unsigned threadmain_alloc_race : 1;
 
     /* Force the game to render at its native 720p surface even when the
      * system video mode is 1080p, then RSX-scale the source up to 1080p

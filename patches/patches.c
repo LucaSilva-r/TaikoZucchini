@@ -568,6 +568,10 @@ static uint32_t branch_uncond(uintptr_t src, uintptr_t dst) {
     return (18u << 26) | (((uint32_t)disp) & 0x03FFFFFCu);
 }
 
+static uint32_t branch_link(uintptr_t src, uintptr_t dst) {
+    return branch_uncond(src, dst) | 1u; /* bl */
+}
+
 static uint32_t branch_bne_cr7(uintptr_t src, uintptr_t dst) {
     int32_t disp = (int32_t)(dst - src);
     /* bc 4, 30, target  ->  bne cr7, target */
@@ -1556,6 +1560,135 @@ static void apply_kimidori_dani_proc_main_runtime_fallback(void) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* ThreadMain allocator race                                          */
+/* ------------------------------------------------------------------ */
+
+/* The session object that owns the "ThreadMain" PPU thread is handed its
+ * allocator/deallocator function descriptors *after* the thread has already
+ * been created and started. Every EBOOT emits the same 16-instruction shape
+ * (r2 restores are `nop` for same-TOC calls, `ld r2,0x28(r1)` otherwise):
+ *
+ *     bl   <handle>          ; r3 = handle, feeds r5 of the create call
+ *     <r2>
+ *     li   r7,0
+ *     clrldi r5,r3,32
+ *     addi r6,r29,<off>
+ *     ori  r7,r7,33333
+ *     li   r4,4096           ; stack size
+ *     li   r3,1500           ; priority
+ *     bl   thread_create     ; creates AND starts ThreadMain
+ *     <r2>
+ *     lwz  r3,<alloc>(r2)
+ *     bl   set_allocator     ; obj->0x228 = alloc descriptor
+ *     <r2>
+ *     lwz  r3,<free>(r2)
+ *     bl   set_deallocator   ; obj->0x22c = free descriptor
+ *     <r2>
+ *
+ * ThreadMain latches obj->0x228 into a register within its first handful of
+ * instructions (`lwz r9,0x228(r31)`), carries it down four call levels and
+ * finally calls through it. Lose the race and the indirect call loads its
+ * entry point from NULL:
+ *
+ *   F VM: Access violation reading location 0x0 (unmapped memory)
+ *     {PPU[0x100004f] Thread (ThreadMain) [0x005702b8]}
+ *
+ * On PS3 the creating thread nearly always wins (ThreadMain is created at
+ * priority 1500, below main_thread); under RPCS3 both are real OS threads
+ * and it loses often enough to read as a random boot crash.
+ *
+ * Fix: hoist the two setter calls above the create. The setters only need r3
+ * loaded from the TOC, so the block reorders into the same 16 slots with
+ * every call keeping its own trailing r2 restore - no spare slot, no stack
+ * slot, no register has to survive anything new.
+ *
+ * Verified mapping (Green): VA 0x2018c..0x201c8.
+ */
+static void apply_threadmain_alloc_race_fix(void) {
+    enum { N = 16 };
+    static const uint32_t seq_orig[N] = {
+        0x48000001u, /*  0 bl   <handle>            */
+        0x00000000u, /*  1 <r2 restore>             */
+        0x38E00000u, /*  2 li   r7,0                */
+        0x78650020u, /*  3 clrldi r5,r3,32          */
+        0x38DD0000u, /*  4 addi r6,r29,<off>        */
+        0x60E78235u, /*  5 ori  r7,r7,33333         */
+        0x38801000u, /*  6 li   r4,4096             */
+        0x386005DCu, /*  7 li   r3,1500             */
+        0x48000001u, /*  8 bl   thread_create       */
+        0x00000000u, /*  9 <r2 restore>             */
+        0x80620000u, /* 10 lwz  r3,<alloc>(r2)      */
+        0x48000001u, /* 11 bl   set_allocator       */
+        0x00000000u, /* 12 <r2 restore>             */
+        0x80620000u, /* 13 lwz  r3,<free>(r2)       */
+        0x48000001u, /* 14 bl   set_deallocator     */
+        0x00000000u, /* 15 <r2 restore>             */
+    };
+    static const uint32_t seq_mask[N] = {
+        0xFC000003u, 0x00000000u, 0xFFFFFFFFu, 0xFFFFFFFFu,
+        0xFFFF0000u, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu,
+        0xFC000003u, 0x00000000u, 0xFFFF0000u, 0xFC000003u,
+        0x00000000u, 0xFFFF0000u, 0xFC000003u, 0x00000000u,
+    };
+    static const size_t restore_idx[] = { 1u, 9u, 12u, 15u };
+    uintptr_t addr = 0;
+    uint32_t o[N];
+    uint32_t w[N];
+
+    if (!find_unique_masked_words(CFG_SCAN_TEXT_START, CFG_SCAN_TEXT_END,
+                                  seq_orig, seq_mask, N, &addr)) {
+        dbg_print("[patch] ThreadMain alloc race fix skipped; "
+                  "unresolved patch site\n");
+        return;
+    }
+
+    for (size_t i = 0; i < (size_t)N; i++)
+        o[i] = pt_read32(T, addr + i * 4u);
+
+    /* The four don't-care slots must really be r2 restores; the reorder
+     * keeps each one glued to its own call. */
+    for (size_t i = 0; i < sizeof(restore_idx) / sizeof(restore_idx[0]); i++) {
+        uint32_t r = o[restore_idx[i]];
+        if (r != 0x60000000u && r != 0xE8410028u) {
+            dbg_print("[patch] ThreadMain alloc race fix skipped; "
+                      "unexpected r2 restore\n");
+            return;
+        }
+    }
+
+    uintptr_t handle_fn = branch_target(addr + 0x00u, o[0]);
+    uintptr_t create_fn = branch_target(addr + 0x20u, o[8]);
+    uintptr_t set_alloc = branch_target(addr + 0x2Cu, o[11]);
+    uintptr_t set_free  = branch_target(addr + 0x38u, o[14]);
+
+    if (!handle_fn || !create_fn || !set_alloc || !set_free) {
+        dbg_print("[patch] ThreadMain alloc race fix skipped; "
+                  "unresolved call target\n");
+        return;
+    }
+
+    w[0]  = o[10];                                /* lwz r3,<alloc>(r2)   */
+    w[1]  = branch_link(addr + 0x04u, set_alloc);
+    w[2]  = o[12];
+    w[3]  = o[13];                                /* lwz r3,<free>(r2)    */
+    w[4]  = branch_link(addr + 0x10u, set_free);
+    w[5]  = o[15];
+    w[6]  = branch_link(addr + 0x18u, handle_fn); /* r3 = handle          */
+    w[7]  = o[1];
+    w[8]  = o[2];                                 /* li r7,0              */
+    w[9]  = o[3];                                 /* clrldi r5,r3,32      */
+    w[10] = o[4];                                 /* addi r6,r29,<off>    */
+    w[11] = o[5];                                 /* ori r7,r7,33333      */
+    w[12] = o[6];                                 /* li r4,4096           */
+    w[13] = o[7];                                 /* li r3,1500           */
+    w[14] = branch_link(addr + 0x38u, create_fn); /* start ThreadMain     */
+    w[15] = o[9];
+
+    dbg_print_hex32("[patch] threadmain_alloc_race", (uint32_t)addr);
+    write_stream(addr, w, (size_t)N);
+}
+
 /*
  * Katsu Don ST21 (software 0.21 and older) updates the gold-crown bit in
  * object byte +0x44, but the field actually lives at +0x45. Later EBOOTs
@@ -1969,6 +2102,8 @@ static void patches_apply_all_impl(void) {
     }
     apply_online_gate_force_patches();
     apply_katsudon_gold_crown_fix();
+    if (g_cfg.threadmain_alloc_race)
+        apply_threadmain_alloc_race_fix();
     if (g_have_data00000_metadata)
         apply_data00000_embed_patch();
 

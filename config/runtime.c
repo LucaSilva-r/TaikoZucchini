@@ -48,6 +48,7 @@ taiko_runtime_cfg_t g_cfg = {
     .clearlocks_stub      = TAIKO_PATCH_CLEARLOCKS_STUB,
     .allow_screen_tearing = TAIKO_PATCH_ALLOW_SCREEN_TEARING,
     .dani_dojo_unlock     = TAIKO_PATCH_DANI_DOJO_UNLOCK,
+    .threadmain_alloc_race = TAIKO_PATCH_THREADMAIN_ALLOC_RACE,
     .upscale_to_native    = 1,
     .upscale_blit         = 1,
 
@@ -118,6 +119,7 @@ static void handle_patches(const char *key, const char *value, void *u) {
     SET_BIT("clearlocks_stub",      clearlocks_stub);
     SET_BIT("allow_screen_tearing", allow_screen_tearing);
     SET_BIT("dani_dojo_unlock",     dani_dojo_unlock);
+    SET_BIT("threadmain_alloc_race", threadmain_alloc_race);
     SET_BIT("upscale_to_native",    upscale_to_native);
     SET_BIT("upscale_blit",         upscale_blit);
 }
@@ -544,6 +546,12 @@ static void write_cfg_file(const char *path) {
         "Unlock Dan-i Dojo type-9 availability on older pre-Red builds. "
         "Self-validates by nearby instruction signatures and skips unknown builds.",
         "dani_dojo_unlock", g_cfg.dani_dojo_unlock);
+    emit_kv_bool(fd,
+        "Hand the boot thread its allocator before starting it instead of "
+        "after. The stock order races, and a lost race makes the thread call "
+        "through a null function descriptor: a random access violation at 0x0 "
+        "during boot. Self-validating; skips builds without the signature.",
+        "threadmain_alloc_race", g_cfg.threadmain_alloc_race);
     emit_kv_bool(fd,
         "Force the game to render at 720p and RSX-scale the output up "
         "to the system's native HDMI mode (1080p). Required on monitors "
