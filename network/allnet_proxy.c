@@ -240,8 +240,17 @@ static void handle_client(int client_fd) {
      * Our http_response_t.headers excludes the trailing CRLFCRLF and
      * includes the original status line at the front, so re-emit it
      * directly and append CRLFCRLF + body. */
-    send_all(client_fd, resp.headers, resp.headers_len);
-    send_all(client_fd, "\r\n\r\n", 4);
+    /* Rebuild the head rather than relaying the server's own: see
+     * http_response_minimal_head. A CDN-injected header is enough to stop the
+     * title's ALL.Net parse and leave the cabinet offline for the session. */
+    static char head[512];
+    size_t head_len = http_response_minimal_head(&resp, head, sizeof head);
+    if (head_len) {
+        send_all(client_fd, head, head_len);
+    } else {
+        send_all(client_fd, resp.headers, resp.headers_len);
+        send_all(client_fd, "\r\n\r\n", 4);
+    }
     if (resp.body && resp.body_len > 0)
         send_all(client_fd, resp.body, resp.body_len);
 

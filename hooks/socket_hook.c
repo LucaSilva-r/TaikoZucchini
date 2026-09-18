@@ -251,16 +251,27 @@ static int dispatch_request(slot_t *s) {
         return 0;
     }
 
-    size_t total = resp.headers_len + 4 + resp.body_len;
+    /* Rebuild the head rather than relaying the server's own: see
+     * http_response_minimal_head. */
+    static char head[512];
+    size_t head_len = http_response_minimal_head(&resp, head, sizeof head);
+    size_t total = head_len ? head_len + resp.body_len
+                            : resp.headers_len + 4 + resp.body_len;
     s->resp_buf = (unsigned char *)malloc(total);
     if (!s->resp_buf) {
         http_response_free(&resp);
         return -7;
     }
-    memcpy(s->resp_buf, resp.headers, resp.headers_len);
-    memcpy(s->resp_buf + resp.headers_len, "\r\n\r\n", 4);
-    if (resp.body && resp.body_len > 0)
-        memcpy(s->resp_buf + resp.headers_len + 4, resp.body, resp.body_len);
+    if (head_len) {
+        memcpy(s->resp_buf, head, head_len);
+        if (resp.body && resp.body_len > 0)
+            memcpy(s->resp_buf + head_len, resp.body, resp.body_len);
+    } else {
+        memcpy(s->resp_buf, resp.headers, resp.headers_len);
+        memcpy(s->resp_buf + resp.headers_len, "\r\n\r\n", 4);
+        if (resp.body && resp.body_len > 0)
+            memcpy(s->resp_buf + resp.headers_len + 4, resp.body, resp.body_len);
+    }
     s->resp_len = total;
 
     http_response_free(&resp);

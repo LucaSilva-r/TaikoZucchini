@@ -348,6 +348,46 @@ static int icase_eq(const char *a, size_t alen, const char *b) {
     return 1;
 }
 
+static int head_append(char *dst, size_t cap, size_t *len,
+                       const char *src, size_t n)
+{
+    if (*len + n >= cap) return -1;
+    memcpy(dst + *len, src, n);
+    *len += n;
+    return 0;
+}
+
+size_t http_response_minimal_head(const http_response_t *r, char *dst, size_t cap)
+{
+    if (!r || !r->headers || !dst || cap == 0) return 0;
+
+    const char *status_end = (const char *)memchr(r->headers, '\r', r->headers_len);
+    size_t status_len = status_end ? (size_t)(status_end - r->headers)
+                                   : r->headers_len;
+
+    size_t ctype_len = 0;
+    const char *ctype = http_header_find(r, "Content-Type", &ctype_len);
+
+    char length[48];
+    int length_len = snprintf(length, sizeof length,
+                              "Content-Length: %u\r\nConnection: close\r\n\r\n",
+                              (unsigned)r->body_len);
+    if (length_len <= 0 || (size_t)length_len >= sizeof length) return 0;
+
+    size_t len = 0;
+    if (head_append(dst, cap, &len, r->headers, status_len) ||
+        head_append(dst, cap, &len, "\r\n", 2))
+        return 0;
+    if (ctype && ctype_len > 0 &&
+        (head_append(dst, cap, &len, "Content-Type: ", 14) ||
+         head_append(dst, cap, &len, ctype, ctype_len) ||
+         head_append(dst, cap, &len, "\r\n", 2)))
+        return 0;
+    if (head_append(dst, cap, &len, length, (size_t)length_len))
+        return 0;
+    return len;
+}
+
 const char *http_header_find(const http_response_t *r,
                              const char *name, size_t *out_len) {
     if (!r || !r->headers) return NULL;

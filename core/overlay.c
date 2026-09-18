@@ -53,9 +53,15 @@
 #define OVERLAY_SWATCH_H       16
 #define OVERLAY_VERTEX_SLOTS   4
 #define OVERLAY_VERTEX_MAX     4096   /* room for 16 rows + wrapped desc */
+/* Solid rects and the QR are 3D quads, not NV3089 blits: RPCS3's Vulkan
+ * backend blacks out the whole frame when a main-memory blit lands on a live
+ * render target. Own ring, deeper than the text one, because every draw
+ * (toast, menu, activity...) takes a slot and several run per flip. */
+#define OVERLAY_RECT_SLOTS     8
+#define OVERLAY_RECT_VTX_MAX   (6 * 128)
 
 /* Card/QR surface: a 64x64 ARGB texture holding the QR at 1px/module (QR is
- * 57 modules), nearest-neighbour scaled up on blit so it stays crisp. */
+ * 57 modules), nearest-neighbour sampled so it stays crisp when scaled. */
 #define OVERLAY_QR_TEX_DIM     64
 #define OVERLAY_CARD_LINES     8
 #define OVERLAY_PAIRING_TEX_W  272
@@ -162,7 +168,16 @@ static uint32_t g_overlay_io;
 static uint32_t *g_overlay_cmd;
 static uint32_t g_overlay_cmd_io;
 static uint32_t g_font_tex_io;
-static uint32_t g_swatch_io[SWATCH_COUNT];
+static uint32_t g_white_io;   /* 16x16 opaque white; rects tint it per vertex */
+static overlay_vertex_t *g_rect_vtx;
+static uint32_t g_rect_vtx_io;
+static uint32_t g_rect_next;
+/* Rect arena of the current command buffer: [start, used) not drawn yet. */
+static overlay_vertex_t *g_rect_slot;
+static uint32_t g_rect_slot_io;
+static int g_rect_start;
+static int g_rect_used;
+static overlay_buffer_t g_rect_buf;
 static uint32_t g_qr_tex_io;
 static uint32_t *g_qr_tex;
 static uint32_t g_pairing_tex_io[OVERLAY_PAIRING_SLOTS];
@@ -309,20 +324,18 @@ static int ensure_overlay_mapped(void) {
     cursor += atlas_bytes;
 
     cursor = align_up_u32(cursor, 128);
-    uint32_t swatches[] = {
-        UI_COLOR_BG, UI_COLOR_PANEL, UI_COLOR_ACCENT,
-        UI_COLOR_TEXT, UI_COLOR_MUTED, UI_COLOR_DARK,
-        0xE0209AB0u, 0xFF18A8B8u, 0xFFFF4088u,
-        0xFF35C84Au, 0xFFFF9818u, 0xFFFFDA28u,
-        0xFFA96A20u, 0xFFE63A20u, 0xFFE8F1F8u
-    };
-    for (int i = 0; i < (int)(sizeof swatches / sizeof swatches[0]); i++) {
-        g_swatch_io[i] = off + cursor;
+    g_white_io = off + cursor;
+    {
         uint32_t *dst = (uint32_t *)((uint8_t *)g_overlay_mem + cursor);
         for (int j = 0; j < OVERLAY_SWATCH_W * OVERLAY_SWATCH_H; j++)
-            dst[j] = swatches[i];
-        cursor += OVERLAY_SWATCH_W * OVERLAY_SWATCH_H * 4;
+            dst[j] = 0xFFFFFFFFu;
     }
+    cursor += OVERLAY_SWATCH_W * OVERLAY_SWATCH_H * 4;
+
+    cursor = align_up_u32(cursor, 128);
+    g_rect_vtx = (overlay_vertex_t *)((uint8_t *)g_overlay_mem + cursor);
+    g_rect_vtx_io = off + cursor;
+    cursor += OVERLAY_RECT_SLOTS * OVERLAY_RECT_VTX_MAX * sizeof(overlay_vertex_t);
 
     cursor = align_up_u32(cursor, 128);
     g_qr_tex_io = off + cursor;
@@ -377,6 +390,12 @@ static uint32_t *cmd_begin(uint32_t *cmd_io_out) {
      * buffers that a later flip cannot overwrite an unexecuted command
      * containing the previous flip id's framebuffer offset. */
     uint32_t slot = g_cmd_next++ % OVERLAY_CMD_RING_SLOTS;
+    uint32_t rslot = g_rect_next++ % OVERLAY_RECT_SLOTS;
+    g_rect_slot = g_rect_vtx + rslot * OVERLAY_RECT_VTX_MAX;
+    g_rect_slot_io = g_rect_vtx_io +
+                     rslot * OVERLAY_RECT_VTX_MAX * sizeof(overlay_vertex_t);
+    g_rect_start = 0;
+    g_rect_used = 0;
     if (cmd_io_out)
         *cmd_io_out = g_overlay_cmd_io + slot * OVERLAY_CMD_WORDS * 4;
     return g_overlay_cmd + slot * OVERLAY_CMD_WORDS;
@@ -491,87 +510,86 @@ static int append_image_vertices(overlay_vertex_t *v, int *count, int max_vtx,
     return 1;
 }
 
-static int append_scaled_blit(CellGcmContextData *cmd,
-                              const overlay_buffer_t *b,
-                              uint32_t src_io, uint16_t src_pitch,
-                              int src_w, int src_h,
-                              int sx, int sy, int sw, int sh,
-                              int dx, int dy, int dw, int dh,
-                              uint8_t interp, uint8_t operation) {
-    if (!cmd || !b || !b->valid || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
-        return 0;
-    if (src_w <= 0 || src_h <= 0 || sx < 0 || sy < 0 ||
-        sx + sw > src_w || sy + sh > src_h)
-        return 0;
-    if (dx < 0) { dw += dx; dx = 0; }
-    if (dy < 0) { dh += dy; dy = 0; }
-    if (dx + dw > (int)b->width) dw = (int)b->width - dx;
-    if (dy + dh > (int)b->height) dh = (int)b->height - dy;
-    if (dw <= 0 || dh <= 0)
-        return 0;
-    if (cmd->current + 64 > cmd->end)
-        return 0;
+static const uint32_t g_swatch_argb[SWATCH_COUNT] = {
+    UI_COLOR_BG, UI_COLOR_PANEL, UI_COLOR_ACCENT,
+    UI_COLOR_TEXT, UI_COLOR_MUTED, UI_COLOR_DARK,
+    0xE0209AB0u, 0xFF18A8B8u, 0xFFFF4088u,
+    0xFF35C84Au, 0xFFFF9818u, 0xFFFFDA28u,
+    0xFFA96A20u, 0xFFE63A20u, 0xFFE8F1F8u
+};
 
-    uint32_t source_io = src_io + (uint32_t)sy * src_pitch + (uint32_t)sx * 4;
-    int image_w = sw;
-    if (image_w < 16)
-        image_w = 16;
-    int32_t ratioX = (int32_t)(((int64_t)sw << 20) / dw);
-    int32_t ratioY = (int32_t)(((int64_t)sh << 20) / dh);
+static void append_texture_batch(CellGcmContextData *cmd,
+                                 const overlay_buffer_t *b,
+                                 uint32_t vtx_io, int vtx_count,
+                                 uint8_t format, uint32_t remap,
+                                 uint16_t width, uint16_t height,
+                                 uint32_t pitch, uint32_t texture_offset,
+                                 uint8_t filter, int preserve_texture_color);
 
-    CellGcmTransferScale scale;
-    memset(&scale, 0, sizeof scale);
-    scale.conversion = CELL_GCM_TRANSFER_CONVERSION_TRUNCATE;
-    scale.format     = CELL_GCM_TRANSFER_SCALE_FORMAT_A8R8G8B8;
-    scale.operation  = operation;
-    scale.clipX      = (uint16_t)dx;
-    scale.clipY      = (uint16_t)dy;
-    scale.clipW      = (uint16_t)dw;
-    scale.clipH      = (uint16_t)dh;
-    scale.outX       = (uint16_t)dx;
-    scale.outY       = (uint16_t)dy;
-    scale.outW       = (uint16_t)dw;
-    scale.outH       = (uint16_t)dh;
-    scale.ratioX     = ratioX;
-    scale.ratioY     = ratioY;
-    scale.inW        = (uint16_t)image_w;
-    scale.inH        = (uint16_t)sh;
-    scale.pitch      = src_pitch;
-    scale.origin     = CELL_GCM_TRANSFER_ORIGIN_CORNER;
-    scale.interp     = interp;
-    scale.offset     = source_io;
-    scale.inX        = 0;
-    scale.inY        = 0;
+static const uint32_t g_argb_remap = CELL_GCM_REMAP_MODE(
+    CELL_GCM_TEXTURE_REMAP_ORDER_XYXY,
+    CELL_GCM_TEXTURE_REMAP_FROM_A,
+    CELL_GCM_TEXTURE_REMAP_FROM_R,
+    CELL_GCM_TEXTURE_REMAP_FROM_G,
+    CELL_GCM_TEXTURE_REMAP_FROM_B,
+    CELL_GCM_TEXTURE_REMAP_REMAP,
+    CELL_GCM_TEXTURE_REMAP_REMAP,
+    CELL_GCM_TEXTURE_REMAP_REMAP,
+    CELL_GCM_TEXTURE_REMAP_REMAP);
 
-    CellGcmTransferSurface surf;
-    memset(&surf, 0, sizeof surf);
-    surf.format = CELL_GCM_TRANSFER_SURFACE_FORMAT_A8R8G8B8;
-    surf.pitch  = (uint16_t)b->pitch;
-    surf.offset = b->offset;
+/* Draw the rects queued since the last flush, as one batch. Every texture
+ * draw calls this first, so rects stay under whatever is drawn after them. */
+static void flush_rects(CellGcmContextData *cmd) {
+    int n = g_rect_used - g_rect_start;
+    if (n <= 0)
+        return;
+    uint32_t io = g_rect_slot_io +
+                  (uint32_t)g_rect_start * sizeof(overlay_vertex_t);
+    flush_dcache(g_rect_slot + g_rect_start, (size_t)n * sizeof(overlay_vertex_t));
+    g_rect_start = g_rect_used;
+    append_texture_batch(cmd, &g_rect_buf, io, n,
+                         CELL_GCM_TEXTURE_A8R8G8B8, g_argb_remap,
+                         OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
+                         OVERLAY_SWATCH_W * 4, g_white_io,
+                         CELL_GCM_TEXTURE_NEAREST, 1);
+}
 
-    cellGcmSetTransferScaleModeUnsafe(cmd,
-                                      CELL_GCM_TRANSFER_MAIN_TO_LOCAL,
-                                      CELL_GCM_TRANSFER_SURFACE);
-    cellGcmSetTransferScaleSurfaceUnsafe(cmd, &scale, &surf);
+/* Queue a quad in the current command buffer's rect arena. */
+static int push_rect_quad(const overlay_buffer_t *b, int x, int y, int w, int h,
+                          uint32_t color) {
+    if (!g_rect_slot || w <= 0 || h <= 0)
+        return 0;
+    if (g_rect_used + 6 > OVERLAY_RECT_VTX_MAX) {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            dbg_print("[overlay] rect arena full\n");
+        }
+        return 0;
+    }
+    g_rect_buf = *b;
+    float x0 = (float)x, y0 = (float)y;
+    float x1 = (float)(x + w), y1 = (float)(y + h);
+    overlay_vertex_t *v = g_rect_slot;
+    text_push_vertex(v, &g_rect_used, x0, y0, 0.0f, 0.0f, color, b->width, b->height);
+    text_push_vertex(v, &g_rect_used, x1, y0, 1.0f, 0.0f, color, b->width, b->height);
+    text_push_vertex(v, &g_rect_used, x0, y1, 0.0f, 1.0f, color, b->width, b->height);
+    text_push_vertex(v, &g_rect_used, x1, y0, 1.0f, 0.0f, color, b->width, b->height);
+    text_push_vertex(v, &g_rect_used, x1, y1, 1.0f, 1.0f, color, b->width, b->height);
+    text_push_vertex(v, &g_rect_used, x0, y1, 0.0f, 1.0f, color, b->width, b->height);
     return 1;
 }
 
-static int append_rect_io(CellGcmContextData *cmd, const overlay_buffer_t *b,
-                          int x, int y, int w, int h, uint32_t swatch_io) {
-    return append_scaled_blit(cmd, b, swatch_io,
-                              OVERLAY_SWATCH_W * 4,
-                              OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
-                              0, 0, OVERLAY_SWATCH_W, OVERLAY_SWATCH_H,
-                              x, y, w, h,
-                              CELL_GCM_TRANSFER_INTERPOLATOR_ZOH,
-                              CELL_GCM_TRANSFER_OPERATION_SRCCOPY);
-}
-
+/* Solid swatch rect. Forced opaque: the old blit copied the swatch raw, and
+ * scanout ignores alpha, so these always looked solid. */
 static int append_rect(CellGcmContextData *cmd, const overlay_buffer_t *b,
                        int x, int y, int w, int h, int swatch) {
+    (void)cmd;
+    if (!b || !b->valid)
+        return 0;
     if (swatch < 0 || swatch >= SWATCH_COUNT)
         swatch = SWATCH_PANEL;
-    return append_rect_io(cmd, b, x, y, w, h, g_swatch_io[swatch]);
+    return push_rect_quad(b, x, y, w, h, g_swatch_argb[swatch] | 0xFF000000u);
 }
 
 static int boot_window_open(void) {
@@ -613,6 +631,7 @@ static int finish_and_call(CellGcmContextData *game,
                            CellGcmContextData *cmd,
                            uint32_t cmd_io,
                            uint32_t *cmd_buf) {
+    flush_rects(cmd);
     cellGcmSetReturnCommandUnsafe(cmd);
     size_t bytes = (size_t)(cmd->current - cmd->begin) * sizeof(uint32_t);
     if (bytes == 0 || bytes > OVERLAY_CMD_WORDS * sizeof(uint32_t)) {
@@ -644,6 +663,7 @@ static void append_texture_batch(CellGcmContextData *cmd,
                                  uint8_t filter, int preserve_texture_color) {
     if (!cmd || !b || vtx_count <= 0)
         return;
+    flush_rects(cmd);
 
     CellGcmSurface surf;
     memset(&surf, 0, sizeof surf);
@@ -1207,14 +1227,21 @@ static void maybe_draw_card(void *ctx, uint8_t id) {
         /* white quiet-zone border behind the code (swatch 3 = white) */
         if (!append_rect(&cmd, &b, qx - 10, qy - 10, qr_px + 20, qr_px + 20, 3))
             return;
-        if (!append_scaled_blit(&cmd, &b, g_qr_tex_io,
-                                OVERLAY_QR_TEX_DIM * 4,
-                                OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
-                                0, 0, OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
-                                qx, qy, qr_px, qr_px,
-                                CELL_GCM_TRANSFER_INTERPOLATOR_ZOH,
-                                CELL_GCM_TRANSFER_OPERATION_SRCCOPY))
+        /* Queue the QR quad behind the pending rects, then draw it on its
+         * own with the QR texture (white vertex color = texture as-is). */
+        flush_rects(&cmd);
+        if (!push_rect_quad(&b, qx, qy, qr_px, qr_px, 0xFFFFFFFFu))
             return;
+        int qr_first = g_rect_start;
+        g_rect_start = g_rect_used;
+        flush_dcache(g_rect_slot + qr_first, 6 * sizeof(overlay_vertex_t));
+        append_texture_batch(&cmd, &b,
+                             g_rect_slot_io +
+                                 (uint32_t)qr_first * sizeof(overlay_vertex_t),
+                             6, CELL_GCM_TEXTURE_A8R8G8B8, g_argb_remap,
+                             OVERLAY_QR_TEX_DIM, OVERLAY_QR_TEX_DIM,
+                             OVERLAY_QR_TEX_DIM * 4, g_qr_tex_io,
+                             CELL_GCM_TEXTURE_NEAREST, 1);
     }
 
     int tty = y + pad;

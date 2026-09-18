@@ -92,6 +92,22 @@ int http_websocket_run(const char *host, int port, const char *path,
                        http_ws_message_fn message,
                        http_ws_outgoing_fn outgoing, void *ctx);
 
+/* Write a minimal response head -- status line, Content-Type, a Content-Length
+ * matching the decoded body, and Connection: close -- into `dst`. Returns its
+ * length, or 0 when it does not fit (the caller then relays the original).
+ *
+ * The game parses the ALL.Net reply itself and cannot take a large header
+ * block. Cloudflare's Page Shield samples a few percent of responses and
+ * appends a ~1.2 KiB Content-Security-Policy-Report-Only header, taking the
+ * head from about 630 to 1863 bytes; that alone stops the title's ALL.Net state
+ * machine dead and leaves the cabinet offline until the next boot. Reproduced
+ * deterministically on TaikoRecomp with an injecting proxy: 3/3 boots offline
+ * with the header, 3/3 online without it, and 3/3 online with trimming.
+ *
+ * Built with memcpy on purpose: core/libc_stubs.c's vsnprintf has no precision
+ * support, so "%.*s" prints '?' and corrupts every response. */
+size_t http_response_minimal_head(const http_response_t *r, char *dst, size_t cap);
+
 /* Case-insensitive header lookup. Returns pointer into `r->headers` to
  * the value (no surrounding whitespace), and writes value length into
  * *out_len. NULL if absent. */
